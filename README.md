@@ -156,3 +156,7 @@ VENES_E2E_WS=/abs/workspace npm run e2e      # real Claude Code, in an isolated 
 ```
 
 The end-to-end suite loads this folder with `--plugin-dir`, so nothing gets installed, and it uses a small amount of model usage. Set `VENES_E2E_SSH=1` to add a case that goes through real SSH to this Mac, which needs key login to `localhost`.
+
+## License
+
+[MIT](LICENSE)

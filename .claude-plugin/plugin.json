@@ -1,6 +1,6 @@
 {
   "name": "venes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Streams Claude Code sessions as structured events to a local helper, so the Venes app can show and answer them over SSH.",
   "author": {
     "name": "Lorpaves",
@@ -14,5 +14,6 @@
     "ios",
     "hooks",
     "tmux"
-  ]
+  ],
+  "license": "MIT"
 }

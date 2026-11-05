@@ -1,0 +1,13 @@
+{
+  "name": "venes",
+  "owner": {
+    "name": "Lorpaves"
+  },
+  "plugins": [
+    {
+      "name": "venes",
+      "source": "./",
+      "description": "Streams Claude Code sessions as structured events to a local helper, so the Venes app can show and answer them over SSH."
+    }
+  ]
+}

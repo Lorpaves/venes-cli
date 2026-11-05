@@ -1,0 +1,17 @@
+{
+  "name": "venes-helper",
+  "version": "0.1.0",
+  "description": "Claude Code plugin that turns hooks and transcripts into a structured event stream for the Venes app.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "venes": "cli/venes.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/unit/",
+    "e2e": "node test/e2e.mjs"
+  }
+}

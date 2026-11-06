@@ -20,7 +20,7 @@ const STALE_SESSION_MS = 60 * 60_000;
 // sent message gets this long to show which it was before the next one follows.
 const HELD_SETTLE_MS = 2000;
 // In case a compaction ends in a way neither hooks nor the transcript show.
-const COMPACT_LIMIT_MS = 10 * 60_000;
+const COMPACT_LIMIT_MS = 30 * 60_000;
 
 export class HelperError extends Error {
   constructor(code, message, details) {

@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { parseTaskNotification, signalsFrom, unwrapPasted } from './transcript.mjs';
+import { normalized, parseTaskNotification, signalsFrom, unwrapPasted } from './transcript.mjs';
 
 const EVENT_LOG_SIZE = 5000;
 const REQUEST_KIND = { AskUserQuestion: 'question', ExitPlanMode: 'plan' };
@@ -21,6 +21,9 @@ const STALE_SESSION_MS = 60 * 60_000;
 const HELD_SETTLE_MS = 2000;
 // In case a compaction ends in a way neither hooks nor the transcript show.
 const COMPACT_LIMIT_MS = 30 * 60_000;
+// Stop can fire before the turn's last words reach the transcript.
+const TRANSCRIPT_SETTLE_MS = 2000;
+const ENDS_TURN = new Set(['turn.end', 'turn.interrupted', 'turn.error', 'session.ended']);
 
 export class HelperError extends Error {
   constructor(code, message, details) {
@@ -61,7 +64,10 @@ function rememberableRules(suggestions = []) {
 // that happened after the compaction does.
 const isCompacting = s => !!(s.compacting || s.compactWait);
 
-const normalized = text => text.trim().split(/\s+/).join(' ');
+const isAtWork = status => status === 'running' || status === 'waiting';
+
+// Late pieces of the turn before can sit between its end and these.
+const startsTurn = e => e.kind === 'message.user' || e.kind === 'task.notification' || (e.kind === 'session.status' && isAtWork(e.status));
 
 function taskView({ result, outputFile, ...task }) {
   // A subagent's output file is its raw transcript, so only its result counts.
@@ -94,7 +100,7 @@ export class SessionStore extends EventEmitter {
   liveSessions() { return [...this.#sessions.values()].filter(s => s.status !== 'ended'); }
 
   isBusy(s) {
-    return s.status === 'running' || s.status === 'waiting' || s.held.length > 0 || isCompacting(s);
+    return isAtWork(s.status) || s.held.length > 0 || isCompacting(s);
   }
 
   // Whether the helper could restart now without losing anything in progress. Restarting
@@ -159,6 +165,15 @@ export class SessionStore extends EventEmitter {
     };
   }
 
+  // This session's events that the transcript can't be relied on for yet: the turn going on
+  // now, and any that ended so recently its last words may not have reached the file.
+  openTurn(s, now = Date.now()) {
+    const events = this.#log.filter(e => e.sessionId === s.id);
+    const settled = events.findLastIndex(e => ENDS_TURN.has(e.kind) && now - e.at > TRANSCRIPT_SETTLE_MS);
+    const start = events.findIndex((e, index) => index > settled && startsTurn(e));
+    return start < 0 ? [] : events.slice(start);
+  }
+
   // Returns undefined, or { request, decision } when the hook must wait for an answer.
   handleHook(ev, tmux = {}) {
     if (!ev.session_id) return undefined;
@@ -166,6 +181,7 @@ export class SessionStore extends EventEmitter {
     const agentId = ev.agent_id;
     switch (ev.hook_event_name) {
       case 'SessionStart':
+        s.model = ev.model ?? s.model;
         this.#emit(s, 'session.started', { source: ev.source, model: ev.model, cwd: s.cwd });
         break;
       case 'SessionEnd':
@@ -203,6 +219,7 @@ export class SessionStore extends EventEmitter {
         this.#closeRequests(s, { decision: 'unknown', by: 'turn_end' }, r => !r.agentId);
         this.#mergeTasks(s, ev.background_tasks);
         s.backgroundTasks = ev.background_tasks?.length ?? 0;
+        s.lastMessage = ev.last_assistant_message ?? s.lastMessage;
         this.#setStatus(s, 'idle');
         this.#emit(s, 'turn.end', {
           lastMessage: ev.last_assistant_message, backgroundTasks: s.backgroundTasks,
@@ -516,6 +533,7 @@ export class SessionStore extends EventEmitter {
   #sessionView(s) {
     return {
       id: s.id, status: s.status, cwd: s.cwd, pane: s.pane ?? null, tmuxSocket: s.tmuxSocket ?? null,
+      model: s.model, lastPrompt: s.lastPrompt, lastMessage: s.lastMessage,
       permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
       startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id),

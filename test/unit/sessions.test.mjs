@@ -712,3 +712,129 @@ test('a refusal says which message it was about', () => {
   const refusal = events.find(e => e.kind === 'model.refusal');
   assert.deepEqual([refusal.id, refusal.model, refusal.category, refusal.prompt], ['r1', 'big', 'bio', 'do the thing']);
 });
+
+const LATER = 60_000;
+const turnKinds = (store, now) => store.openTurn(store.get('a'), now).map(e => e.kind);
+
+test('a session with no turn going has nothing to replay', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', { source: 'startup' });
+  assert.deepEqual(store.openTurn(store.get('a')), []);
+});
+
+test('a running turn is replayed from its prompt', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'one' });
+  hook('Stop', { last_assistant_message: 'done' });
+  hook('MessageDisplay', { message_id: 'late', delta: 'done', index: 0, final: true });
+  hook('UserPromptSubmit', { prompt: 'two' });
+  hook('PreToolUse', { tool_use_id: 't', ...bash });
+  const turn = store.openTurn(store.get('a'), Date.now() + LATER);
+  assert.deepEqual(turn.map(e => e.kind), ['message.user', 'session.status', 'tool.start']);
+  assert.equal(turn[0].text, 'two');
+});
+
+test('a message sent during a turn stays inside it', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'one' });
+  hook('PreToolUse', { tool_use_id: 't', ...bash });
+  hook('UserPromptSubmit', { prompt: 'and another thing' });
+  const turn = store.openTurn(store.get('a'));
+  assert.equal(turn[0].text, 'one');
+  assert.equal(turn.filter(e => e.kind === 'message.user').length, 2);
+});
+
+test('a turn waiting for an answer is still open', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'one' });
+  hook('PreToolUse', { tool_use_id: 't', ...bash });
+  hook('PermissionRequest', bash);
+  assert.equal(store.get('a').status, 'waiting');
+  assert.ok(turnKinds(store, Date.now() + LATER).includes('request.opened'));
+});
+
+test('a turn started by a finished task begins with its notification', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'one' });
+  hook('Stop', { last_assistant_message: 'done' });
+  hook('UserPromptSubmit', { prompt: '<task-notification>\n<task-id>1</task-id>\n<status>completed</status>' });
+  hook('PreToolUse', { tool_use_id: 't', ...bash });
+  const kinds = turnKinds(store, Date.now() + LATER);
+  assert.equal(kinds[0], 'task.notification');
+  assert.ok(!kinds.includes('message.user'));
+});
+
+test('a turn that has only just ended is replayed whole, until the transcript has caught up', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'zero' });
+  hook('Stop', { last_assistant_message: 'old' });
+  t.mock.timers.tick(5000);
+  hook('UserPromptSubmit', { prompt: 'one' });
+  hook('Stop', { last_assistant_message: 'done' });
+  hook('MessageDisplay', { message_id: 'late', delta: 'done', index: 0, final: true });
+  const turn = store.openTurn(store.get('a'));
+  assert.equal(turn[0].text, 'one');
+  assert.deepEqual(turn.map(e => e.kind), ['message.user', 'session.status', 'session.status', 'turn.end', 'message.assistant.delta']);
+  t.mock.timers.tick(5000);
+  assert.deepEqual(store.openTurn(store.get('a')), []);
+});
+
+for (const [name, end] of [
+  ['interrupted', (store) => store.handleTranscriptRecord('a', { type: 'user', message: { content: '[Request interrupted by user]' } })],
+  ['failed', (store, hook) => hook('StopFailure', { error: 'overloaded' })],
+  ['ended with its session', (store, hook) => hook('SessionEnd', { reason: 'other' })],
+]) {
+  test(`a turn that ${name} is over once the transcript has caught up`, t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+    const { store, hook } = setup();
+    hook('UserPromptSubmit', { prompt: 'one' });
+    end(store, hook);
+    assert.notEqual(store.get('a').status, 'running');
+    assert.equal(store.openTurn(store.get('a'))[0].text, 'one');
+    t.mock.timers.tick(5000);
+    assert.deepEqual(store.openTurn(store.get('a')), []);
+  });
+}
+
+test('a turn that follows straight on from another brings it along', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'one' });
+  t.mock.timers.tick(5000);
+  hook('Stop', { last_assistant_message: 'done' });
+  t.mock.timers.tick(50);
+  hook('UserPromptSubmit', { prompt: '<task-notification>\n<task-id>1</task-id>\n<status>completed</status>' });
+  const turn = store.openTurn(store.get('a'));
+  assert.equal(turn[0].text, 'one', 'the first turn\'s last words may still be on their way to the file');
+  t.mock.timers.tick(5000);
+  assert.equal(store.openTurn(store.get('a'))[0].kind, 'task.notification');
+});
+
+test('a turn is only ever made of its own session\'s events', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'mine' });
+  store.handleHook({ session_id: 'b', cwd: '/x', hook_event_name: 'UserPromptSubmit', prompt: 'theirs' });
+  assert.ok(store.openTurn(store.get('a')).every(e => e.sessionId === 'a'));
+});
+
+test('a turn that started before the log did is replayed from what is left', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'long' });
+  for (let i = 0; i < 2600; i++) {
+    hook('PreToolUse', { tool_use_id: `t${i}`, ...bash });
+    hook('PostToolUse', { tool_use_id: `t${i}`, ...bash, tool_response: {} });
+  }
+  assert.deepEqual(store.openTurn(store.get('a')), [], 'nothing left says where it began, so history stands alone');
+  hook('UserPromptSubmit', { prompt: 'still going' });
+  assert.equal(store.openTurn(store.get('a'))[0].text, 'still going');
+});
+
+test('a session reports its model and its last words for a list', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', { source: 'startup', model: 'claude-x' });
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  hook('Stop', { last_assistant_message: 'done' });
+  const [view] = store.sessions();
+  assert.deepEqual([view.model, view.lastPrompt, view.lastMessage], ['claude-x', 'hi', 'done']);
+});

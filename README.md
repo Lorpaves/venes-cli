@@ -97,6 +97,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
+| `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
 | `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. |
@@ -106,7 +107,20 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 
 To reconnect, pass the last `seq` you saw as `since`, together with `bootId` from the snapshot. A helper restart, which an update causes, closes the connection and reports `gap: true`.
 
-On `gap: true`, throw away everything built from earlier events, including any decoder state, and rebuild from the snapshot and `history`. Events were lost, so text from a new turn could otherwise be mistaken for a late piece of an old one.
+On `gap: true`, throw away everything built from earlier events, including any decoder state, and rebuild from the snapshot and `join`. Events were lost, so text from a new turn could otherwise be mistaken for a late piece of an old one.
+
+### Joining a session
+
+`join` is how to open a session, including one in the middle of a turn. Show `items` as finished history, then play `turn` as if its events were arriving now, so that a call still running shows as running and text half written can carry on.
+
+| Field | Contents |
+|---|---|
+| `items`, `before`, `hasMore` | A page of `history` that stops where the current turn begins |
+| `turn` | This session's events since that turn began. Empty when no turn is going. |
+| `seq` | The last event this reply accounts for |
+| `sessions`, `requests` | This session's current state, in the form a snapshot has it |
+
+Every event up to `seq` is covered by the reply, and every later one follows it on the wire. So drop what arrives for a session while its `join` is on its way, and apply what comes after. A turn that ended within the last two seconds counts as current, because the transcript can lag behind `turn.end`. A turn older than the event log comes back with an empty `turn`, and shows as history.
 
 ### Sending during a turn
 
@@ -181,6 +195,8 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `send.failed` | `clientId`, `code`, `message`: a held message couldn't be delivered |
 
 Order text by `messageId` and `index`, because hooks run as separate processes and a delta can arrive after `turn.end`. `message.thinking` comes from the transcript, so it can arrive after the text it came before.
+
+Snapshots also carry each session's `model`, `lastPrompt` and `lastMessage`, for a list. They stay current through `session.started`, `message.user` and `turn.end`.
 
 A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others), `status` (`running`, `completed`, `failed`, `killed`), `description`, `name`, `command`, `agentType`, `toolUseId`, `startedAt`, `finishedAt`, `summary`, `tokens`, `toolUses`, `durationMs` and `hasOutput`, as far as they're known. Snapshots list them under `sessions[].tasks`.
 

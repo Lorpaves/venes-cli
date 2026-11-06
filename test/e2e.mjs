@@ -335,6 +335,42 @@ T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissi
   assert.deepEqual([...older.items, ...page.items], all.items.slice(-4), 'pages join up with no overlap');
 });
 
+T('join_replays_the_running_turn_and_nothing_twice', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  await delay(2500);
+  const { id } = await r.session();
+  const before = await r.client.request('join', { sessionId: id });
+  assert.deepEqual(before.turn, [], 'a finished turn comes from the transcript alone');
+  assert.ok(before.items.some(i => i.role === 'assistant' && /READY/.test(i.text)));
+  assert.match(before.sessions[0].lastMessage, /READY/);
+  assert.equal(before.sessions[0].lastPrompt, 'Reply with only the word READY.');
+
+  r.mark();
+  const prompt = SLEEP(5, 'SECOND');
+  await r.type(prompt);
+  const start = await r.kind('tool.start', 30000);
+  await delay(800); // long enough for the transcript to have the call
+  const during = await r.client.request('join', { sessionId: id });
+  assert.equal(during.sessions[0].status, 'running');
+  assert.ok(!during.items.some(i => i.role === 'user' && i.text === prompt), 'the prompt is in the turn, not the page');
+  assert.ok(!during.items.some(i => i.toolUseId === start.toolUseId), 'nor is the running call');
+  assert.ok(during.items.some(i => i.text === 'Reply with only the word READY.'), 'the page keeps the turn before');
+  assert.equal(during.turn[0].kind, 'message.user');
+  assert.equal(during.turn[0].text, prompt);
+  assert.ok(during.turn.some(e => e.kind === 'tool.start' && e.toolUseId === start.toolUseId));
+  assert.ok(!during.turn.some(e => e.kind === 'tool.end'), 'the call is still running');
+  assert.equal(during.turn.at(-1).seq, during.seq, 'nothing newer is left out');
+
+  await r.turnEnd(40000);
+  await delay(2500);
+  const after = await r.client.request('join', { sessionId: id });
+  assert.deepEqual(after.turn, []);
+  const tool = after.items.find(i => i.toolUseId === start.toolUseId);
+  assert.ok(tool && 'result' in tool, 'once it is over the transcript has it all');
+  assert.equal(after.items.filter(i => i.role === 'user' && i.text === prompt).length, 1);
+});
+
 T('send_carries_a_client_id', {}, async r => {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();

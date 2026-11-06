@@ -11,6 +11,8 @@ const REFUSAL = /^model_refusal_(no_)?fallback$/;
 const BACKGROUND_OUTPUT = /Output is being written to: (\S+\.output)/;
 const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr)>([\s\S]*?)<\/local-command-\1>/;
 const DEFAULT_HISTORY_LIMIT = 200;
+// A prompt's record is stamped a little before its hook reaches the helper.
+const PROMPT_LEAD_MS = 5000;
 
 // Long or many-line pastes reach Claude wrapped in these tags; the id pairs them.
 const PASTED_BLOCK = /\n*<pasted_content id="([^"]*)">\n([\s\S]*?)\n<\/pasted_content id="\1">\n?/g;
@@ -18,6 +20,8 @@ const PASTED_BLOCK = /\n*<pasted_content id="([^"]*)">\n([\s\S]*?)\n<\/pasted_co
 export function unwrapPasted(text) {
   return text.replace(PASTED_BLOCK, (match, id, body, offset) => (offset === 0 ? body : `\n\n${body}`));
 }
+
+export const normalized = text => text.trim().split(/\s+/).join(' ');
 
 function blocksOf(record) {
   const content = record?.message?.content;
@@ -141,7 +145,15 @@ function parseLine(line) {
   try { return JSON.parse(line); } catch { return null; }
 }
 
-const readRecords = file => fs.readFileSync(file, 'utf8').split('\n').map(parseLine).filter(Boolean);
+// A session has no transcript until its first message.
+function readRecords(file) {
+  try {
+    return fs.readFileSync(file, 'utf8').split('\n').map(parseLine).filter(Boolean);
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
 
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return undefined; }
@@ -228,12 +240,25 @@ function conversationItems(file) {
   return items;
 }
 
+// Where a turn begins among `items`: at its prompt, or for a turn that has none, like a
+// finished task's, at its first event.
+function turnStartIn(items, { at, prompt }) {
+  const stamp = item => Date.parse(item.at);
+  const own = prompt === undefined ? -1 : items.findLastIndex(item => (
+    item.role === 'user' && stamp(item) >= at - PROMPT_LEAD_MS && normalized(item.text) === normalized(prompt)
+  ));
+  if (own >= 0) return own;
+  const first = items.findIndex(item => stamp(item) >= at);
+  return first < 0 ? items.length : first;
+}
+
 // `before` counts items from the start of the transcript, which only ever grows, so a
 // cursor stays valid while the session runs. Subagent calls follow the call that started
-// them and don't count towards `limit`.
-export function readHistory(file, { limit, before } = {}) {
+// them and don't count towards `limit`. `turn` stops the page where that turn begins.
+export function readHistory(file, { limit, before, turn } = {}) {
   const items = conversationItems(file);
-  const end = Math.min(before ?? items.length, items.length);
+  const edge = turn ? turnStartIn(items, turn) : items.length;
+  const end = Math.min(before ?? edge, edge);
   const start = Math.max(0, end - (limit ?? DEFAULT_HISTORY_LIMIT));
   const subagents = subagentTranscripts(file);
   const withCalls = item => (subagents.has(item.toolUseId)

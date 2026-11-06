@@ -139,6 +139,19 @@ function createClientServer(store, checkForUpdate) {
       return { gap: gap || !sameBoot };
     },
     history: msg => readHistory(store.get(msg.sessionId).transcriptPath, msg),
+    // Nothing here awaits, so every event is either in this reply or follows it on the wire.
+    join: msg => {
+      const session = store.get(msg.sessionId);
+      const turn = store.openTurn(session);
+      const [first] = turn;
+      const start = first && { at: first.at, prompt: first.kind === 'message.user' ? first.text : undefined };
+      return {
+        ...readHistory(session.transcriptPath, { limit: msg.limit, turn: start }),
+        turn, seq: store.seq,
+        sessions: store.sessions().filter(s => s.id === session.id),
+        requests: store.requests().filter(r => r.sessionId === session.id),
+      };
+    },
     respond: msg => { store.respond(msg.requestId, msg); return {}; },
     send: async msg => {
       if (typeof msg.text !== 'string' || !msg.text.trim()) throw new HelperError('bad_text', 'Nothing to send.');

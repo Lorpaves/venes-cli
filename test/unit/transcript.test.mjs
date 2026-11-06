@@ -294,3 +294,64 @@ test('a long output file is cut from the front, and says so', () => {
     assert.deepEqual(readTail(file, 100), { output: '0123456789', truncated: false });
   } finally { cleanup(); }
 });
+
+const T = Date.parse('2026-11-06T10:00:00.000Z');
+const stamped = (at, record) => line({ timestamp: new Date(at).toISOString(), ...record });
+const said = (at, text) => stamped(at, { type: 'user', message: { content: text } });
+const replied = (at, text) => stamped(at, { type: 'assistant', message: { content: [{ type: 'text', text }] } });
+const texts = page => page.items.map(i => i.text);
+
+test('a page stops at the prompt of the open turn, which is stamped before its hook arrives', () => {
+  const { file, cleanup } = tempFile([said(T, 'old'), replied(T + 10, 'old reply'), said(T + 70, 'now'), replied(T + 200, 'so far')].join(''));
+  try {
+    assert.deepEqual(texts(readHistory(file, { turn: { at: T + 100, prompt: 'now' } })), ['old', 'old reply']);
+  } finally { cleanup(); }
+});
+
+test('the same words said earlier are not the open turn\'s prompt', () => {
+  const { file, cleanup } = tempFile([said(T, 'again'), replied(T + 10, 'first'), said(T + 100, 'again'), replied(T + 110, 'second')].join(''));
+  try {
+    assert.deepEqual(texts(readHistory(file, { turn: { at: T + 120, prompt: 'again' } })), ['again', 'first']);
+  } finally { cleanup(); }
+});
+
+test('words said long before the turn began are not its prompt', () => {
+  const { file, cleanup } = tempFile([said(T, 'again'), replied(T + 10, 'first')].join(''));
+  try {
+    assert.deepEqual(texts(readHistory(file, { turn: { at: T + 60_000, prompt: 'again' } })), ['again', 'first']);
+  } finally { cleanup(); }
+});
+
+test('a prompt is matched however its whitespace came out', () => {
+  const { file, cleanup } = tempFile([said(T, 'old'), said(T + 70, 'two\n  lines')].join(''));
+  try {
+    assert.deepEqual(texts(readHistory(file, { turn: { at: T + 100, prompt: 'two lines ' } })), ['old']);
+  } finally { cleanup(); }
+});
+
+test('an open turn whose prompt is not in the file yet leaves the page whole', () => {
+  const { file, cleanup } = tempFile([said(T, 'old'), replied(T + 10, 'reply')].join(''));
+  try {
+    assert.deepEqual(texts(readHistory(file, { turn: { at: T + 100, prompt: 'new' } })), ['old', 'reply']);
+  } finally { cleanup(); }
+});
+
+test('a turn with no prompt begins at its first event', () => {
+  const { file, cleanup } = tempFile([said(T, 'old'), replied(T + 10, 'reply'), replied(T + 950, 'from a task')].join(''));
+  try {
+    assert.deepEqual(texts(readHistory(file, { turn: { at: T + 900 } })), ['old', 'reply']);
+  } finally { cleanup(); }
+});
+
+test('older pages carry on from where a page cut off by a turn stopped', () => {
+  const { file, cleanup } = tempFile([said(T, 'a'), said(T + 1, 'b'), said(T + 2, 'c'), said(T + 100, 'now')].join(''));
+  try {
+    const page = readHistory(file, { limit: 1, turn: { at: T + 100, prompt: 'now' } });
+    assert.deepEqual([texts(page), page.before, page.hasMore], [['c'], 2, true]);
+    assert.deepEqual(texts(readHistory(file, { limit: 2, before: page.before })), ['a', 'b']);
+  } finally { cleanup(); }
+});
+
+test('a session with no transcript yet has an empty history', () => {
+  assert.deepEqual(readHistory('/nonexistent/venes/t.jsonl'), { items: [], before: 0, hasMore: false });
+});

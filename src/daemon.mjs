@@ -8,11 +8,12 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { SessionStore, HelperError } from './sessions.mjs';
-import { TranscriptTail, readHistory } from './transcript.mjs';
+import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
 import { findClaudePanes, parseTmuxEnv, sendEscape, sendText } from './tmux.mjs';
 
 export const PROTOCOL_VERSION = 1;
 const TRANSCRIPT_POLL_MS = 300;
+const TASK_OUTPUT_BYTES = 256 * 1024;
 // Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux.
 const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin'];
 
@@ -71,8 +72,31 @@ function createClientServer(store) {
   const subscribers = new Set();
   const write = (socket, message) => socket.write(`${JSON.stringify(message)}\n`);
 
+  const deliver = async (session, { clientId, text }) => {
+    if (clientId) store.expectEcho(session, clientId, text);
+    try {
+      await sendText({ pane: session.pane, tmuxSocket: session.tmuxSocket }, text, () => store.pendingFor(session)[0]);
+    } catch (error) {
+      if (clientId) store.forgetEcho(session, clientId);
+      throw error;
+    }
+  };
+
+  // Held messages go out one at a time, each when the turn before it has ended.
+  const deliverHeld = async sessionId => {
+    const session = store.get(sessionId);
+    const message = store.nextHeld(session);
+    if (!message) return;
+    try {
+      await deliver(session, message);
+    } catch (error) {
+      store.failSend(session, message, error);
+    }
+  };
+
   store.on('event', event => {
     for (const socket of subscribers) write(socket, { type: 'event', event });
+    if (event.kind === 'session.status' && event.status === 'idle') deliverHeld(event.sessionId);
   });
 
   const sessionWithPane = sessionId => {
@@ -105,13 +129,26 @@ function createClientServer(store) {
       subscribers.add(socket);
       return { gap: gap || !sameBoot };
     },
-    history: msg => ({ items: readHistory(store.get(msg.sessionId).transcriptPath, msg.limit) }),
+    history: msg => readHistory(store.get(msg.sessionId).transcriptPath, msg),
     respond: msg => { store.respond(msg.requestId, msg); return {}; },
     send: async msg => {
       if (typeof msg.text !== 'string' || !msg.text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
+      if (msg.lane !== undefined && msg.lane !== 'next' && msg.lane !== 'later') throw new HelperError('bad_lane', `Unknown lane: ${msg.lane}`);
       const session = sessionWithPane(msg.sessionId);
-      await sendText({ pane: session.pane, tmuxSocket: session.tmuxSocket }, msg.text, () => store.pendingFor(session)[0]);
-      return {};
+      const message = { clientId: msg.clientId, text: msg.text };
+      if (msg.lane === 'later' && store.isBusy(session)) {
+        store.hold(session, message);
+        return { queued: true };
+      }
+      await deliver(session, message);
+      return { queued: false };
+    },
+    cancel: msg => ({ cancelled: store.cancelHeld(store.get(msg.sessionId), msg.clientId) }),
+    taskOutput: msg => {
+      const task = store.task(msg.sessionId, msg.taskId);
+      if (task.result !== undefined) return { output: task.result, truncated: false };
+      if (!task.outputFile || task.type === 'subagent') return { output: null, truncated: false };
+      return readTail(task.outputFile, TASK_OUTPUT_BYTES);
     },
     interrupt: async msg => {
       const session = sessionWithPane(msg.sessionId);
@@ -148,7 +185,8 @@ function createClientServer(store) {
 function startTranscriptPolling(store) {
   const tails = new Map();
   const timer = setInterval(() => {
-    for (const session of store.activeSessions()) {
+    // Idle sessions too: compaction and background tasks don't need a running turn.
+    for (const session of store.liveSessions()) {
       if (!session.transcriptPath) continue;
       if (!tails.has(session.id)) tails.set(session.id, new TranscriptTail(session.transcriptPath));
       for (const record of tails.get(session.id).poll()) store.handleTranscriptRecord(session.id, record);
@@ -164,7 +202,7 @@ export async function startDaemon(paths) {
   if (await socketIsLive(paths.clientSocket)) throw new HelperError('already_running', 'The helper is already running.');
   for (const file of [paths.hookSocket, paths.clientSocket]) fs.rmSync(file, { force: true });
 
-  const store = new SessionStore();
+  const store = new SessionStore({ agentParent: readAgentParent });
   const hookServer = createHookServer(store);
   const { server: clientServer, subscribers } = createClientServer(store);
   const stopPolling = startTranscriptPolling(store);

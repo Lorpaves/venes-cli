@@ -79,12 +79,40 @@ Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok
 | `ping` | | `protocol` |
 | `sessions` | | `sessions`, `unattached` |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
-| `history` | `sessionId`, `limit` | `items`, the conversation from the transcript |
-| `respond` | `requestId`, `decision`, `message`, `answers` | Answers a request |
-| `send` | `sessionId`, `text` | Types into the session. Slash commands work too. |
+| `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
+| `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
+| `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. |
+| `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
 | `interrupt` | `sessionId` | Presses Esc |
+| `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
 
 To reconnect, pass the last `seq` you saw as `since`, together with `bootId` from the snapshot. A helper restart reports `gap: true`.
+
+### Sending during a turn
+
+`lane` says when a message sent during a turn should be read:
+
+| `lane` | Effect |
+|---|---|
+| `next`, or none | Typed now. Claude reads it at its next step, and the echo comes straight away. |
+| `later` | Held by the helper until the turn ends, then typed. An idle session gets it at once. Only held messages can be cancelled, because a message in Claude Code's own queue can't be taken back on its own. |
+
+Held messages go out one per turn, in order, including after an interrupted turn. If one can't be delivered, a `send.failed` event says why. They live in the helper's memory, so a restart loses them.
+
+`message.user` carries the `clientId` of the send it came from. A message typed in the terminal has none. Slash commands that Claude Code runs itself, such as `/compact`, fire no hook, so they never echo.
+
+### History
+
+Pass `before` from one reply to get the page before it. It counts items from the start of the transcript, so it stays valid while the session runs. Calls made by a subagent follow the call that started it, carry `parentToolUseId`, and don't count towards `limit`.
+
+| `role` | Fields |
+|---|---|
+| `user`, `assistant` | `text` |
+| `tool` | `toolUseId`, `name`, `input`, `result`, `isError`, `parentToolUseId` |
+| `thinking` | `text`, `durationMs` |
+| `turn_end` | `durationMs` |
+| `compact` | `trigger`, `preTokens`, `postTokens` |
+| `system` | `kind`: `interrupted` |
 
 ### Answering requests
 
@@ -92,11 +120,13 @@ To reconnect, pass the last `seq` you saw as `since`, together with `bootId` fro
 
 | `request.kind` | What to show | To approve |
 |---|---|---|
-| `permission` | `toolName`, `input` | `allow` |
+| `permission` | `toolName`, `input`, `permissionSuggestions` | `allow`, with `always: true` to not be asked again |
 | `question` | `input.questions` | `allow` with `answers`, mapping each question's text to the chosen label (join multi-select labels with commas) |
 | `plan` | `input.plan` | `allow` |
 
 The same prompt is open in the terminal at the same time, and the first answer wins. `request_closed` means the terminal got there first.
+
+`always` saves the rules in `permissionSuggestions`, usually to the project's `.claude/settings.local.json`. Show them before offering it. The list holds only rules: Claude Code also suggests switching the whole session to `acceptEdits`, which is more than "don't ask again for this", so those suggestions aren't passed on. If the list is empty, `always` is refused with `nothing_to_remember`.
 
 ### Events
 
@@ -104,25 +134,34 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 
 | `kind` | Fields |
 |---|---|
-| `session.discovered`, `session.started`, `session.attached` | `source`, `model`, `pane` |
+| `session.discovered`, `session.started`, `session.attached` | `source`, `model`, `pane`, `cwd` |
 | `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
 | `session.mode` | `permissionMode` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
-| `message.user` | `text` |
+| `message.user` | `text`, `clientId` |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
-| `tool.start` | `toolUseId`, `name`, `input`, `agentId` |
-| `tool.end` | `toolUseId`, `name`, `response`, `durationMs`, `isError`, `interrupted` |
+| `message.thinking` | `text`, `durationMs` |
+| `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
+| `tool.end` | `toolUseId`, `name`, `response`, `durationMs`, `isError`, `interrupted`, `parentToolUseId` |
 | `request.opened` | `request` |
 | `request.closed` | `requestId`, `decision`, `by` (`client`, `terminal`, `turn_end`, `session_end`) |
-| `turn.end` | `lastMessage`, `backgroundTasks` |
+| `turn.end` | `lastMessage`, `backgroundTasks` (a count), `tasks` (those running) |
 | `turn.interrupted`, `turn.error` | `error`, `details` |
-| `agent.start`, `agent.stop` | `agentId`, `agentType` |
-| `task.created`, `task.completed` | `taskId`, `subject` |
-| `task.notification` | A background task finished and Claude is resuming |
+| `agent.start`, `agent.stop` | `agentId`, `agentType`, `parentToolUseId` (on start) |
+| `task.created`, `task.completed` | `taskId`, `subject`: items on Claude's task list |
+| `background.task` | `task`: a background command, agent or workflow changed |
+| `task.notification` | `taskId`, `status`, `summary`: a background task finished and Claude is reading about it |
 | `notification` | `notificationType`, `message` |
-| `compact.start`, `compact.end` | `trigger` |
+| `compact.start` | `trigger` |
+| `compact.end` | `trigger`, `preTokens`, `postTokens` |
+| `model.refusal` | `id`, `model`, `fallbackModel`, `scope`, `category`, `explanation`, `text`, `prompt` |
+| `send.failed` | `clientId`, `code`, `message`: a held message couldn't be delivered |
 
-Order text by `messageId` and `index`, because hooks run as separate processes and a delta can arrive after `turn.end`.
+Order text by `messageId` and `index`, because hooks run as separate processes and a delta can arrive after `turn.end`. `message.thinking` comes from the transcript, so it can arrive after the text it came before.
+
+A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others), `status` (`running`, `completed`, `failed`, `killed`), `description`, `name`, `command`, `agentType`, `toolUseId`, `startedAt`, `finishedAt`, `summary`, `tokens`, `toolUses`, `durationMs` and `hasOutput`, as far as they're known. Snapshots list them under `sessions[].tasks`.
+
+`tool.end.response` is the tool's own result. For Bash it can include `gitOperation`, such as `{"commit":{"sha":"d95e564","kind":"committed","branch":"main"}}`.
 
 ### Errors worth handling
 
@@ -133,6 +172,8 @@ Order text by `messageId` and `index`, because hooks run as separate processes a
 | `no_pane` | The session isn't in tmux, so it can be watched and answered but not typed into |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
+| `nothing_to_remember` | `always` was sent for a request with no rule to save |
+| `unknown_task` | The helper hasn't seen that background task |
 
 ## Behaviour worth knowing
 
@@ -140,6 +181,7 @@ Order text by `messageId` and `index`, because hooks run as separate processes a
 - **Interrupts and terminal rejections fire no hook.** The helper finds them in the transcript, usually within half a second.
 - **`turn.end` doesn't mean all work is finished.** Check `backgroundTasks`.
 - **Long messages reach Claude as pasted text.** Past roughly 800 characters, or with many lines, Claude Code wraps a message in `<pasted_content>`. Claude still acts on it, and the helper shows the original text.
+- **Most thinking has no text.** Claude Code stores the text of only some thinking blocks, so `message.thinking` often has just `durationMs`.
 
 ## Known gaps
 
@@ -147,6 +189,9 @@ Order text by `messageId` and `index`, because hooks run as separate processes a
 - **A crashed session can leave a request open.** If Claude Code is killed outright, no event closes it, and answering has no effect.
 - **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated.
 - **Session state lives in memory.** After a helper restart, sessions reappear on their next event.
+- **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.
+- **Workflows report no progress.** A workflow appears as a task with a name and status, but its phases and agents aren't available to hooks.
+- **Refusals are untested against the real thing.** `model.refusal` is built from the record format, without a real refusal to check it on.
 
 ## Development
 

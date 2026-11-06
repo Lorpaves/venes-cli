@@ -19,12 +19,14 @@ Helper
 Control
   sessions                      List sessions
   watch                         Print live events
-  history SESSION [LIMIT]       Print a session's conversation
+  history SESSION [LIMIT] [BEFORE]  Print a page of a session's conversation
   send SESSION TEXT             Send a message to a session
   interrupt SESSION             Interrupt the running turn
   allow REQUEST                 Approve a permission request or plan
+  always REQUEST                Approve, and don't ask again for the same thing
   deny REQUEST [MESSAGE]        Reject a request
   answer REQUEST JSON           Answer a question: '{"Which color?":"Blue"}'
+  output SESSION TASK           Print a background task's output
 
 App transport
   attach                        Bridge stdin/stdout to the helper (used over SSH)
@@ -96,14 +98,19 @@ const commands = {
     await client.request('subscribe');
     await new Promise(() => {});
   },
-  history: ([sessionId, limit]) => withClient(async client => {
-    print((await client.request('history', { sessionId, limit: limit ? Number(limit) : undefined })).items);
+  history: ([sessionId, limit, before]) => withClient(async client => {
+    const toNumber = value => (value ? Number(value) : undefined);
+    print(await client.request('history', { sessionId, limit: toNumber(limit), before: toNumber(before) }));
   }),
   send: ([sessionId, ...text]) => withClient(client => client.request('send', { sessionId, text: text.join(' ') })),
   interrupt: ([sessionId]) => withClient(client => client.request('interrupt', { sessionId })),
   allow: ([requestId]) => withClient(client => client.request('respond', { requestId, decision: 'allow' })),
+  always: ([requestId]) => withClient(client => client.request('respond', { requestId, decision: 'allow', always: true })),
   deny: ([requestId, ...message]) => withClient(client => client.request('respond', { requestId, decision: 'deny', message: message.join(' ') })),
   answer: ([requestId, answers]) => withClient(client => client.request('respond', { requestId, decision: 'allow', answers: JSON.parse(answers) })),
+  output: ([sessionId, taskId]) => withClient(async client => {
+    console.log((await client.request('taskOutput', { sessionId, taskId })).output ?? '');
+  }),
   async attach() {
     await ensureRunning();
     const socket = net.connect(paths.clientSocket);

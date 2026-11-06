@@ -34,6 +34,7 @@ const exists = f => fs.existsSync(path.join(WS, f));
 const TOUCH = n => `Use the Bash tool to run exactly this command: touch e2e-${n}.txt -- then reply with only the word DONE.`;
 const ASK = 'Use the AskUserQuestion tool to ask me one question, "Which color?", with exactly two options: Red and Blue. After I answer, reply with only the color I picked.';
 const PLAN = n => `Make a one-step plan to create the file e2e-${n}.txt using touch, then call ExitPlanMode. Do not ask questions.`;
+const SLEEP = (s, word) => `Use the Bash tool in the foreground to run exactly this command: python3 -c 'import time; time.sleep(${s})' -- then reply with only the word ${word}.`;
 
 function startHelper() {
   spawn(process.execPath, [CLI, 'daemon'], { env: { ...process.env, VENES_HOME: HOME }, stdio: 'ignore', detached: true }).unref();
@@ -98,13 +99,13 @@ class Run {
   }
 }
 
-function launch(mode = 'default') {
+function launch({ mode = 'default', sources = 'project' } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`,
     'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
-    '--model', MODEL, '--permission-mode', mode, '--setting-sources', 'project', '--plugin-dir', shq(PLUGIN)].join(' ');
+    '--model', MODEL, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
   tmux('new-session', '-d', '-s', 'run', '-x', '110', '-y', '42', '-c', WS, 'sh', '-c', cmd);
 }
 
@@ -311,8 +312,147 @@ T('history', {}, async r => {
   await delay(1500);
   const { id } = await r.session();
   const { items } = await r.client.request('history', { sessionId: id });
-  assert.deepEqual([...new Set(items.map(i => i.role))].sort(), ['assistant', 'tool', 'user']);
+  for (const role of ['assistant', 'tool', 'turn_end', 'user']) assert.ok(items.some(i => i.role === role), role);
   assert.equal(items.find(i => i.role === 'tool').name, 'Bash');
+});
+
+T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissions' }, async r => {
+  await r.type(SLEEP(5, 'FIRST'));
+  await r.kind('tool.start', 30000);
+  const { id } = await r.session();
+  await r.client.request('send', { sessionId: id, text: 'Also say the word QUEUED.' });
+  await r.turnEnd(40000);
+  await delay(1500);
+  const all = await r.client.request('history', { sessionId: id, limit: 1000 });
+  assert.equal(all.hasMore, false);
+  assert.ok(all.items.some(i => i.role === 'user' && i.text === 'Also say the word QUEUED.'), 'a message sent during a turn is kept');
+  const page = await r.client.request('history', { sessionId: id, limit: 2 });
+  const older = await r.client.request('history', { sessionId: id, limit: 2, before: page.before });
+  assert.equal(page.hasMore, true);
+  assert.deepEqual([...older.items, ...page.items], all.items.slice(-4), 'pages join up with no overlap');
+});
+
+T('send_carries_a_client_id', {}, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  r.mark();
+  const { queued } = await r.client.request('send', { sessionId: id, text: 'Reply with only the word ECHO.', clientId: 'c1', lane: 'later' });
+  assert.equal(queued, false, 'an idle session takes it right away');
+  assert.equal((await r.kind('message.user', 12000)).clientId, 'c1');
+  await r.turnEnd(30000);
+});
+
+T('send_during_a_turn', { mode: 'bypassPermissions' }, async r => {
+  const echoed = clientId => r.wait(e => e.kind === 'message.user' && e.clientId === clientId, 12000, `echo of ${clientId}`);
+  await r.type(SLEEP(10, 'FIRST'));
+  await r.kind('tool.start', 30000);
+  const { id } = await r.session();
+
+  assert.equal((await r.client.request('send', { sessionId: id, text: 'Also say the word NEXT.', clientId: 'next', lane: 'next' })).queued, false);
+  await echoed('next');
+  assert.ok(!r.events.some(e => e.kind === 'tool.end'), 'the next lane reaches Claude while the tool still runs');
+
+  const later = { sessionId: id, lane: 'later' };
+  assert.equal((await r.client.request('send', { ...later, text: 'Reply with only the word LATER.', clientId: 'later' })).queued, true);
+  assert.equal((await r.client.request('send', { ...later, text: 'Reply with only the word DROPPED.', clientId: 'drop' })).queued, true);
+  assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'drop' })).cancelled, true);
+  assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'drop' })).cancelled, false);
+
+  await r.turnEnd(40000);
+  assert.ok(!r.events.some(e => e.clientId === 'later'), 'a held message waits for the turn to end');
+  await echoed('later');
+  await r.wait(e => e.kind === 'turn.end' && /LATER/.test(e.lastMessage), 30000, 'the held turn');
+  assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'later' })).cancelled, false, 'too late to cancel');
+  assert.ok(!r.events.some(e => e.kind === 'message.user' && /DROPPED/.test(e.text)), 'a cancelled message never reaches Claude');
+});
+
+T('held_message_follows_an_interrupt', { mode: 'bypassPermissions' }, async r => {
+  await r.type(SLEEP(20, 'FIRST'));
+  await r.kind('tool.start', 30000);
+  const { id } = await r.session();
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.', clientId: 'after', lane: 'later' });
+  await r.client.request('interrupt', { sessionId: id });
+  await r.kind('turn.interrupted', 8000);
+  await r.wait(e => e.kind === 'message.user' && e.clientId === 'after', 12000, 'held message');
+  await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'the held turn');
+});
+
+T('always_allow', { sources: 'project,local' }, async r => {
+  const prompt = `Use the Bash tool to run exactly this command: python3 -c 'print(40 + 2)' -- then reply with only the word DONE.`;
+  try {
+    await r.type(prompt);
+    const request = await r.request('permission');
+    assert.deepEqual(request.permissionSuggestions.map(s => s.type), ['addRules'], 'a rule for this command, nothing wider');
+    await r.client.request('respond', { requestId: request.id, decision: 'allow', always: true });
+    await r.turnEnd();
+    r.mark();
+    await r.type(prompt);
+    await r.turnEnd();
+    assert.ok(r.events.some(e => e.kind === 'tool.end' && /42/.test(e.response?.stdout)), 'the tool ran again');
+    assert.ok(!r.events.some(e => e.kind === 'request.opened'), 'without asking');
+    assert.equal((await r.session()).permissionMode, 'default', 'the mode is left alone');
+    const { permissions } = JSON.parse(fs.readFileSync(path.join(WS, '.claude/settings.local.json'), 'utf8'));
+    console.log(`      remembered: ${JSON.stringify(permissions.allow)}`);
+    assert.ok(permissions.allow.some(rule => rule.startsWith('Bash(python3')), 'as a rule in the project\'s local settings');
+  } finally {
+    fs.rmSync(path.join(WS, '.claude'), { recursive: true, force: true }); // the rule must not reach other cases
+  }
+});
+
+T('always_is_not_offered_for_a_mode_switch', {}, async r => {
+  await r.type(TOUCH('widen'));
+  const request = await r.request('permission');
+  assert.deepEqual(request.permissionSuggestions, [], 'touch only gets a mode suggestion, which is withheld');
+  await assert.rejects(r.client.request('respond', { requestId: request.id, decision: 'allow', always: true }), { code: 'nothing_to_remember' });
+  await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+  await r.turnEnd();
+  assert.equal((await r.session()).permissionMode, 'default');
+});
+
+T('background_command', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Use the Bash tool with run_in_background set to true to run exactly: sleep 3; echo BGDONE -- then reply with only the word STARTED and stop.');
+  const { task } = await r.wait(e => e.kind === 'background.task' && e.task.type === 'shell', 30000, 'launch');
+  assert.equal(task.status, 'running');
+  assert.ok(task.toolUseId);
+  const end = await r.turnEnd();
+  assert.deepEqual(end.tasks.map(t => t.id), [task.id]);
+  const finished = await r.wait(e => e.kind === 'background.task' && e.task.id === task.id && e.task.status !== 'running', 20000, 'finish');
+  assert.equal(finished.task.status, 'completed');
+  assert.equal(finished.task.hasOutput, true);
+  const { id, tasks } = await r.session();
+  assert.equal(tasks.find(t => t.id === task.id).status, 'completed');
+  assert.match((await r.client.request('taskOutput', { sessionId: id, taskId: task.id })).output, /BGDONE/);
+});
+
+T('subagent_calls_name_their_parent', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Use the Agent tool with subagent_type general-purpose and this prompt: "Use the Bash tool to run: echo hi. Then reply DONE." Then reply with only the word OK.');
+  const parent = await r.wait(e => e.kind === 'tool.start' && e.name === 'Agent', 30000, 'Agent call');
+  const inner = await r.wait(e => e.kind === 'tool.start' && e.agentId, 45000, 'subagent call');
+  assert.equal(inner.parentToolUseId, parent.toolUseId);
+  const { task } = await r.wait(e => e.kind === 'background.task' && e.task.type === 'subagent' && e.task.status !== 'running', 60000, 'finish');
+  assert.ok(task.tokens > 0);
+  assert.ok(task.toolUses >= 1);
+  const { id } = await r.session();
+  assert.match((await r.client.request('taskOutput', { sessionId: id, taskId: task.id })).output, /DONE/);
+  const { items } = await r.client.request('history', { sessionId: id });
+  assert.ok(items.some(i => i.parentToolUseId === parent.toolUseId && i.name === 'Bash'), 'history nests it too');
+});
+
+T('compaction_reports_its_size', {}, async r => {
+  const started = await r.kind('session.started', 8000);
+  assert.equal(started.cwd, fs.realpathSync(WS));
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  r.mark();
+  await r.client.request('send', { sessionId: id, text: '/compact' });
+  const end = await r.kind('compact.end', 120000);
+  assert.ok(end.preTokens > 0 && end.postTokens > 0, 'the sizes reach the event');
+  await delay(500);
+  const { items } = await r.client.request('history', { sessionId: id });
+  assert.ok(items.some(i => i.role === 'compact' && i.preTokens === end.preTokens));
+  assert.ok(!items.some(i => i.role === 'user' && /being continued/.test(i.text)), 'the summary is not shown as a user message');
 });
 
 T('clear_replaces_the_session', {}, async r => {
@@ -449,7 +589,7 @@ async function runCase(name) {
       run = new Run(client);
       await client.request('subscribe');
     }
-    launch(opts.mode);
+    launch(opts);
     await ready(run);
     await fn(run);
     console.log(`ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)}s)`);

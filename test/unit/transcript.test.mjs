@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { TranscriptTail, readHistory, signalsFrom, unwrapPasted } from '../../src/transcript.mjs';
+import { TranscriptTail, parseTaskNotification, readAgentParent, readHistory, readTail, signalsFrom, unwrapPasted } from '../../src/transcript.mjs';
 
 const line = record => `${JSON.stringify(record)}\n`;
 
@@ -95,9 +95,190 @@ test('history joins tool calls to results and hides internal records', () => {
     '{ broken\n',
   ].join(''));
   try {
-    const items = readHistory(file);
-    assert.deepEqual(items.map(i => i.role), ['user', 'assistant', 'tool', 'system']);
-    assert.equal(items[2].result, 'a.txt');
-    assert.equal(readHistory(file, 1).length, 1);
+    const { items } = readHistory(file);
+    assert.deepEqual(items.map(i => i.role), ['user', 'thinking', 'assistant', 'tool', 'system']);
+    assert.equal(items[3].result, 'a.txt');
+    assert.equal(readHistory(file, { limit: 1 }).items.length, 1);
+  } finally { cleanup(); }
+});
+
+const userText = text => line({ type: 'user', message: { content: text } });
+
+test('history pages backwards from a cursor without overlapping', () => {
+  const { file, cleanup } = tempFile(['a', 'b', 'c', 'd', 'e'].map(userText).join(''));
+  try {
+    const first = readHistory(file, { limit: 2 });
+    assert.deepEqual(first.items.map(i => i.text), ['d', 'e']);
+    assert.deepEqual([first.before, first.hasMore], [3, true]);
+    const second = readHistory(file, { limit: 2, before: first.before });
+    assert.deepEqual(second.items.map(i => i.text), ['b', 'c']);
+    const last = readHistory(file, { limit: 2, before: second.before });
+    assert.deepEqual(last.items.map(i => i.text), ['a']);
+    assert.deepEqual([last.before, last.hasMore], [0, false]);
+  } finally { cleanup(); }
+});
+
+test('a cursor still points at the same place after the session writes more', () => {
+  const { file, cleanup } = tempFile(['a', 'b', 'c'].map(userText).join(''));
+  try {
+    const { before } = readHistory(file, { limit: 1 });
+    fs.appendFileSync(file, userText('d'));
+    assert.deepEqual(readHistory(file, { limit: 1, before }).items.map(i => i.text), ['b']);
+  } finally { cleanup(); }
+});
+
+test('history includes messages sent during a turn, which have no user record', () => {
+  const queued = (prompt, extra) => line({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt, ...extra } });
+  const { file, cleanup } = tempFile([
+    userText('first'),
+    queued('typed while running', { origin: { kind: 'human' } }),
+    queued([{ type: 'text', text: 'with an image' }, { type: 'image' }], { origin: { kind: 'human' } }),
+    queued('from another session', { origin: { kind: 'peer' } }),
+    queued('<task-notification>x', { commandMode: 'task-notification' }),
+    line({ type: 'attachment', attachment: { type: 'date' } }),
+  ].join(''));
+  try {
+    assert.deepEqual(readHistory(file).items.map(i => i.text), ['first', 'typed while running', 'with an image']);
+  } finally { cleanup(); }
+});
+
+test('history marks turn ends and compaction, and hides the summary Claude reads', () => {
+  const { file, cleanup } = tempFile([
+    userText('hi'),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 1200 }),
+    line({ type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual', preTokens: 900, postTokens: 100 } }),
+    line({ type: 'user', isCompactSummary: true, message: { content: 'This session is being continued...' } }),
+    line({ type: 'system', subtype: 'stop_hook_summary' }),
+  ].join(''));
+  try {
+    const { items } = readHistory(file);
+    assert.deepEqual(items.map(i => i.role), ['user', 'turn_end', 'compact']);
+    assert.equal(items[1].durationMs, 1200);
+    assert.deepEqual([items[2].preTokens, items[2].postTokens], [900, 100]);
+  } finally { cleanup(); }
+});
+
+test('history keeps thinking that has a duration, even with no text', () => {
+  const think = (thinking, thinkingDurationMs) => line({
+    type: 'assistant', thinkingDurationMs, message: { content: [{ type: 'thinking', thinking }] },
+  });
+  const { file, cleanup } = tempFile(think('', 800) + think('', undefined) + think('why', 5));
+  try {
+    assert.deepEqual(readHistory(file).items.map(i => [i.text, i.durationMs]), [['', 800], ['why', 5]]);
+  } finally { cleanup(); }
+});
+
+function withSubagent(parent) {
+  const made = tempFile(parent);
+  const dir = made.file.replace(/\.jsonl$/, '/subagents');
+  fs.mkdirSync(dir, { recursive: true });
+  const write = (id, toolUseId, records) => {
+    fs.writeFileSync(path.join(dir, `agent-${id}.meta.json`), JSON.stringify({ toolUseId }));
+    fs.writeFileSync(path.join(dir, `agent-${id}.jsonl`), records.join(''));
+  };
+  return { ...made, write };
+}
+
+const toolCall = (id, name) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input: {} }] } });
+const toolResult = (id, text) => line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: text }] } });
+
+test('history puts a subagent\'s calls under the call that started it', () => {
+  const { file, cleanup, write } = withSubagent(userText('go') + toolCall('agent1', 'Agent') + toolCall('other', 'Read'));
+  write('a', 'agent1', [
+    line({ type: 'user', isSidechain: true, message: { content: 'the prompt' } }),
+    toolCall('sub1', 'Bash').replace('"type":"assistant"', '"isSidechain":true,"type":"assistant"'),
+    toolResult('sub1', 'out'),
+    line({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'what it wrote' }] } }),
+  ]);
+  try {
+    const { items } = readHistory(file);
+    assert.deepEqual(items.map(i => i.toolUseId ?? i.role), ['user', 'agent1', 'sub1', 'other']);
+    const sub = items[2];
+    assert.deepEqual([sub.parentToolUseId, sub.result], ['agent1', 'out']);
+    assert.equal(readHistory(file, { limit: 2 }).items.length, 3, 'subagent calls come with their parent, outside the limit');
+  } finally { cleanup(); }
+});
+
+test('nested subagents stay nested', () => {
+  const { file, cleanup, write } = withSubagent(toolCall('outer', 'Agent'));
+  write('a', 'outer', [toolCall('inner', 'Agent')]);
+  write('b', 'inner', [toolCall('leaf', 'Bash')]);
+  try {
+    assert.deepEqual(readHistory(file).items.map(i => [i.toolUseId, i.parentToolUseId]), [['outer', undefined], ['inner', 'outer'], ['leaf', 'inner']]);
+  } finally { cleanup(); }
+});
+
+test('a subagent\'s parent comes from its metadata file', () => {
+  const { file, cleanup, write } = withSubagent('');
+  write('a', 'toolu_1', []);
+  try {
+    assert.equal(readAgentParent(file, 'a'), 'toolu_1');
+    assert.equal(readAgentParent(file, 'missing'), undefined);
+  } finally { cleanup(); }
+});
+
+test('thinking is reported with whatever Claude Code stored', () => {
+  const record = (thinking, thinkingDurationMs) => ({ type: 'assistant', thinkingDurationMs, message: { content: [{ type: 'thinking', thinking }] } });
+  assert.deepEqual(signalsFrom(record('because', 900)), [{ type: 'thinking', text: 'because', durationMs: 900 }]);
+  assert.deepEqual(signalsFrom(record('', 900)), [{ type: 'thinking', text: '', durationMs: 900 }]);
+  assert.deepEqual(signalsFrom(record('', undefined)), []);
+});
+
+test('a subagent\'s records never count as the session\'s own', () => {
+  assert.deepEqual(signalsFrom({ type: 'user', isSidechain: true, message: { content: '[Request interrupted by user]' } }), []);
+});
+
+test('compaction sizes and refusals are read from system records', () => {
+  assert.deepEqual(
+    signalsFrom({ type: 'system', subtype: 'compact_boundary', compactMetadata: { preTokens: 900, postTokens: 100 } }),
+    [{ type: 'compacted', preTokens: 900, postTokens: 100 }],
+  );
+  const [refusal] = signalsFrom({
+    type: 'system', subtype: 'model_refusal_fallback', uuid: 'u', originalModel: 'big', fallbackModel: 'small',
+    apiRefusalCategory: 'cyber', content: 'Switched models',
+  });
+  assert.deepEqual([refusal.type, refusal.id, refusal.model, refusal.fallbackModel, refusal.category], ['refusal', 'u', 'big', 'small', 'cyber']);
+  assert.equal(signalsFrom({ type: 'system', subtype: 'model_refusal_no_fallback', originalModel: 'big' })[0].fallbackModel, undefined);
+  assert.deepEqual(signalsFrom({ type: 'system', subtype: 'turn_duration' }), []);
+});
+
+test('a background command\'s output file is found in its tool result', () => {
+  const content = 'Command running in background with ID: b1. Output is being written to: /tmp/x/tasks/b1.output. Keep going.';
+  const [signal] = signalsFrom({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content }] } });
+  assert.equal(signal.outputFile, '/tmp/x/tasks/b1.output');
+});
+
+test('a task notification is read, with or without a result', () => {
+  const shell = parseTaskNotification(`<task-notification>
+<task-id>b1</task-id>
+<tool-use-id>toolu_1</tool-use-id>
+<output-file>/tmp/b1.output</output-file>
+<status>completed</status>
+<summary>Background command "x" completed (exit code 0)</summary>
+</task-notification>`);
+  assert.deepEqual(
+    [shell.id, shell.toolUseId, shell.outputFile, shell.status, shell.result, shell.tokens],
+    ['b1', 'toolu_1', '/tmp/b1.output', 'completed', undefined, undefined],
+  );
+  const agent = parseTaskNotification(`<task-notification>
+<task-id>a1</task-id>
+<status>completed</status>
+<summary>Agent "x" finished</summary>
+<result>Line one
+<status>failed</status> is what the agent quoted
+<tool_uses>99</tool_uses></result>
+<usage><subagent_tokens>25719</subagent_tokens><tool_uses>1</tool_uses><duration_ms>3333</duration_ms></usage>
+</task-notification>`);
+  assert.equal(agent.status, 'completed', 'tags inside a result are not read');
+  assert.match(agent.result, /quoted/);
+  assert.deepEqual([agent.tokens, agent.toolUses, agent.durationMs], [25719, 1, 3333]);
+  assert.equal(parseTaskNotification('<task-notification>'), undefined);
+});
+
+test('a long output file is cut from the front, and says so', () => {
+  const { file, cleanup } = tempFile('0123456789');
+  try {
+    assert.deepEqual(readTail(file, 4), { output: '6789', truncated: true });
+    assert.deepEqual(readTail(file, 100), { output: '0123456789', truncated: false });
   } finally { cleanup(); }
 });

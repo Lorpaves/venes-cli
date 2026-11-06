@@ -176,7 +176,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `notification` | `notificationType`, `message` |
 | `compact.start` | `trigger` |
 | `compact.end` | `trigger`, `preTokens`, `postTokens` |
-| `compact.failed` | `trigger`, `message`: a `/compact` that didn't happen, such as `Not enough messages to compact.` |
+| `compact.failed` | `trigger`, `message`: a compaction ended with nothing compacted. `message` is Claude Code's reason, such as `Not enough messages to compact.`, and is missing if the compaction went silent for ten minutes. |
 | `model.refusal` | `id`, `model`, `fallbackModel`, `scope`, `category`, `explanation`, `text`, `prompt` |
 | `send.failed` | `clientId`, `code`, `message`: a held message couldn't be delivered |
 

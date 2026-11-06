@@ -300,6 +300,21 @@ test('a message behind a compaction waits for it to finish', () => {
   assert.equal(store.isBusy(s), true);
   assert.equal(store.isQuiet(), false);
   hook('PostCompact', { trigger: 'manual' });
+  assert.equal(store.nextHeld(s), undefined, 'compact.end is still waiting for its sizes, and must go first');
+  store.handleTranscriptRecord('a', { type: 'system', subtype: 'compact_boundary', compactMetadata: { preTokens: 9, postTokens: 1 } });
+  assert.equal(store.nextHeld(s).text, 'after');
+});
+
+test('a message behind a compaction still goes if its sizes never come', async () => {
+  const { store, hook, events } = setup({ compactWaitMs: 5 });
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  const s = store.get('a');
+  store.hold(s, { clientId: 'c', text: 'after' });
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  hook('PostCompact', { trigger: 'manual' });
+  await new Promise(resolve => { setTimeout(resolve, 30); });
+  assert.ok(events.some(e => e.kind === 'compact.end'));
   assert.equal(store.nextHeld(s).text, 'after');
 });
 
@@ -351,13 +366,75 @@ test('a turn that ends takes an unfinished compaction with it', () => {
   assert.equal(store.isBusy(store.get('a')), false);
 });
 
-test('a compaction that never reports back holds nothing up for ever', () => {
-  const { store, hook, s } = holding('after');
+const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
+const failures = events => events.filter(e => e.kind === 'compact.failed');
+
+test('a compaction that never reports back tells clients, and holds nothing up', async () => {
+  const { store, hook, events } = setup({ compactLimitMs: 5 });
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  const s = store.get('a');
+  store.hold(s, { clientId: 'c', text: 'after' });
   hook('Stop', {});
   hook('PreCompact', { trigger: 'manual' });
-  const now = Date.now();
-  assert.equal(store.nextHeld(s, now + 9 * 60_000), undefined);
-  assert.equal(store.nextHeld(s, now + 11 * 60_000).text, 'after');
+  assert.equal(store.nextHeld(s), undefined);
+  await pause(30);
+  const [failed] = failures(events);
+  assert.equal(failed.trigger, 'manual');
+  assert.equal(failed.message, undefined, 'clients use their own words, as nothing explained it');
+  assert.equal(store.nextHeld(s).text, 'after');
+});
+
+test('a compaction that finishes does not time out afterwards', async () => {
+  const { store, hook, events } = setup({ compactLimitMs: 5 });
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  hook('PostCompact', { trigger: 'manual' });
+  hook('PreCompact', { trigger: 'manual' });
+  store.handleTranscriptRecord('a', { type: 'system', subtype: 'compact_boundary', compactMetadata: {} });
+  await pause(30);
+  assert.deepEqual(failures(events), []);
+});
+
+test('a compaction that fails is only reported once', async () => {
+  const { store, hook, events } = setup({ compactLimitMs: 5 });
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  store.handleTranscriptRecord('a', { type: 'system', subtype: 'local_command', content: '<local-command-stdout>No.</local-command-stdout>' });
+  await pause(30);
+  assert.deepEqual(failures(events).map(e => e.message), ['No.']);
+});
+
+test('a turn or session that ends cancels the time limit', async () => {
+  for (const finish of [hook => hook('Stop', {}), hook => hook('SessionEnd', { reason: 'other' })]) {
+    const { hook, events } = setup({ compactLimitMs: 5 });
+    hook('UserPromptSubmit', { prompt: 'hi' });
+    hook('PreCompact', { trigger: 'auto' });
+    finish(hook);
+    await pause(30);
+    assert.deepEqual(failures(events), []);
+  }
+});
+
+test('a second compaction restarts the time limit', async () => {
+  const { hook, events } = setup({ compactLimitMs: 40 });
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  await pause(25);
+  hook('PreCompact', { trigger: 'manual' });
+  await pause(25);
+  assert.deepEqual(failures(events), [], 'the first one\'s timer is gone');
+  await pause(30);
+  assert.equal(failures(events).length, 1);
+});
+
+test('a compaction that was slower than the limit still reports its end', async () => {
+  const { store, hook, kinds } = setup({ compactLimitMs: 5 });
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  await pause(20);
+  hook('PostCompact', { trigger: 'manual' });
+  store.handleTranscriptRecord('a', { type: 'system', subtype: 'compact_boundary', compactMetadata: { preTokens: 9, postTokens: 1 } });
+  assert.deepEqual(kinds().filter(k => k.startsWith('compact.')), ['compact.start', 'compact.failed', 'compact.end']);
 });
 
 test('held messages keep a session busy, so a later one cannot overtake them', () => {

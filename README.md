@@ -41,11 +41,23 @@ Watch from a second terminal:
 
 Run `~/.venes/venes` for every command. Session ids accept a unique prefix. The launcher appears after your first session with the plugin.
 
+## Pairing the app
+
+Turn on Remote Login in System Settings > General > Sharing, then run this and scan the code in the app:
+
+```sh
+~/.venes/venes pair
+```
+
+The code holds this Mac's name, address and host key, and a one-time key. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password.
+
+To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
+
 ## What it does on your machine
 
 - **It stays local.** Your sessions never leave this Mac except over SSH to your own devices. The plugin opens no TCP ports, and events go over two Unix sockets in `~/.venes`, a `0700` directory.
 - **It checks for updates.** The only network traffic is `claude plugin` fetching this repository, and new versions install by themselves. See [Updates](#updates).
-- **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk.
+- **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk. So that a restart doesn't lose track of them, it keeps a list of open sessions in `~/.venes/sessions.json`: their ids, folders and tmux panes, with no conversation text.
 - **It can act for you.** Anyone who can log in to your Mac as you can approve tools and type into sessions through it. Use an SSH key, and consider turning password login off.
 - **It never touches your Claude credentials.**
 
@@ -227,7 +239,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 - **`send` has a short race.** A prompt that opens in the last moment before Enter can still be answered by it. Two checks narrow this to a few milliseconds but can't remove it.
 - **A crashed session can leave a request open.** If Claude Code is killed outright, no event closes it, and answering has no effect.
 - **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated.
-- **Session state lives in memory.** After a helper restart, sessions reappear on their next event.
+- **A restart forgets most of a session's state.** Sessions in tmux stay listed, as idle until they're next heard from. The rest reappear on their next event. Events, held messages and open requests are lost.
 - **A release reaches everyone at once.** Pushing a new `version` to `main` installs it everywhere within about six hours. A push that doesn't change `version` reaches no one.
 - **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.
 - **Workflows report no progress.** A workflow appears as a task with a name and status, but its phases and agents aren't available to hooks.

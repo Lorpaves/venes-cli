@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { SessionStore, HelperError } from './sessions.mjs';
+import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
 import { findClaudePanes, parseTmuxEnv, sendEscape, sendText } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
@@ -19,6 +20,9 @@ export const PROTOCOL_VERSION = 1;
 const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
 const HELD_CHECK_MS = 300;
+const REGISTRY_SAVE_MS = 2000;
+// Enough of the end of a transcript to find what was last said.
+const LAST_WORDS_ITEMS = 40;
 // Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux and
 // the native installer's claude.
 const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin')];
@@ -218,6 +222,39 @@ function startTranscriptPolling(store) {
   return () => clearInterval(timer);
 }
 
+function lastWords(file) {
+  try {
+    const { items } = readHistory(file, { limit: LAST_WORDS_ITEMS });
+    return {
+      lastPrompt: items.findLast(item => item.role === 'user')?.text,
+      lastMessage: items.findLast(item => item.role === 'assistant')?.text,
+    };
+  } catch {
+    return {};
+  }
+}
+
+// A pane that has gone, or no longer runs Claude, has nothing to come back to.
+async function restoreSessions(store, paths) {
+  const records = readRegistry(paths.sessionsFile);
+  const panes = await findClaudePanes(new Set(records.map(record => record.tmuxSocket ?? undefined)));
+  const running = new Set(panes.map(pane => `${pane.tmuxSocket}|${pane.pane}`));
+  const alive = records.filter(record => running.has(`${record.tmuxSocket ?? null}|${record.pane}`));
+  store.restore(alive.map(record => ({ ...record, ...lastWords(record.transcriptPath) })));
+}
+
+function startRegistrySaving(store, paths) {
+  let isDirty = false;
+  const save = () => {
+    if (isDirty) writeRegistry(paths.sessionsFile, store.registry());
+    isDirty = false;
+  };
+  store.on('event', () => { isDirty = true; });
+  const timer = setInterval(save, REGISTRY_SAVE_MS);
+  timer.unref();
+  return () => { clearInterval(timer); save(); };
+}
+
 export async function startDaemon(paths) {
   process.env.PATH = [...EXTRA_PATH, process.env.PATH].join(':');
   fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
@@ -225,6 +262,10 @@ export async function startDaemon(paths) {
   for (const file of [paths.hookSocket, paths.clientSocket]) fs.rmSync(file, { force: true });
 
   const store = new SessionStore({ agentParent: readAgentParent });
+  // A session missed here comes back with its next hook, but sessions.json outlives this
+  // start, so a failure that stopped the helper would stop it every time.
+  await restoreSessions(store, paths).catch(error => console.error(`restore: ${error.stack}`));
+  const stopSaving = startRegistrySaving(store, paths);
   const hookServer = createHookServer(store);
   const updater = startAutoUpdate(store, paths);
   const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check);
@@ -236,6 +277,7 @@ export async function startDaemon(paths) {
   return {
     store,
     stop() {
+      stopSaving();
       stopPolling();
       updater.stop();
       clearInterval(heldTimer);

@@ -69,6 +69,12 @@ const isAtWork = status => status === 'running' || status === 'waiting';
 // Late pieces of the turn before can sit between its end and these.
 const startsTurn = e => e.kind === 'message.user' || e.kind === 'task.notification' || (e.kind === 'session.status' && isAtWork(e.status));
 
+function blankSession(id) {
+  return {
+    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], backgroundTasks: 0,
+  };
+}
+
 function taskView({ result, outputFile, ...task }) {
   // A subagent's output file is its raw transcript, so only its result counts.
   return { ...task, hasOutput: result !== undefined || (!!outputFile && task.type !== 'subagent') };
@@ -98,6 +104,18 @@ export class SessionStore extends EventEmitter {
   requests() { return [...this.#requests.values()].map(r => this.#requestView(r)); }
 
   liveSessions() { return [...this.#sessions.values()].filter(s => s.status !== 'ended'); }
+
+  // Sessions a restart would lose. One outside tmux can't be found again or typed into, so it
+  // comes back with its next hook, as it always did.
+  registry() { return this.liveSessions().filter(s => s.pane); }
+
+  // Sessions from before a restart. Hooks only tell the helper about a session when it does
+  // something, so an idle one would otherwise stay gone.
+  restore(records) {
+    for (const record of records) {
+      if (!this.#sessions.has(record.id)) this.#sessions.set(record.id, { ...blankSession(record.id), ...record });
+    }
+  }
 
   isBusy(s) {
     return isAtWork(s.status) || s.held.length > 0 || isCompacting(s);
@@ -285,8 +303,7 @@ export class SessionStore extends EventEmitter {
     let s = this.#sessions.get(ev.session_id);
     if (!s) {
       s = {
-        id: ev.session_id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [],
-        backgroundTasks: 0, startedAt: Date.now(), cwd: ev.cwd, permissionMode: ev.permission_mode, transcriptPath: ev.transcript_path,
+        ...blankSession(ev.session_id), startedAt: Date.now(), cwd: ev.cwd, permissionMode: ev.permission_mode, transcriptPath: ev.transcript_path,
       };
       this.#sessions.set(s.id, s);
       this.#emit(s, 'session.discovered', { cwd: s.cwd });

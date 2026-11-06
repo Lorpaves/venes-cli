@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { writeLauncher } from '../src/setup.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
+import {
+  addPairingKey, authorizedKeysFile, enrollPhone, hasPairingKey, isPortOpen, localHostName, makeNonce, makeOneTimeKey, pairingLink,
+  qrModules, readHostKeyFingerprint, removePairingKey, renderQR,
+} from '../src/pairing.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
 const START_TIMEOUT_MS = 4000;
 const STOP_TIMEOUT_MS = 3000;
+const PAIRING_LIMIT_MS = 5 * 60_000;
+const PAIRING_CHECK_MS = 300;
 const USAGE = `venes <command>
 
 Helper
@@ -21,6 +28,7 @@ Helper
   version                       Print this version and the running helper's
   update                        Check for a new version now
   auto-update [on|off]          Show or change automatic updates
+  pair                          Show a QR code that pairs the Venes app
 
 Control
   sessions                      List sessions
@@ -83,6 +91,15 @@ async function withClient(run) {
 
 const print = value => console.log(JSON.stringify(value, null, 2));
 
+async function readLine(stream) {
+  let text = '';
+  for await (const chunk of stream) {
+    text += chunk;
+    if (text.includes('\n')) break;
+  }
+  return text.split('\n')[0].trim();
+}
+
 const commands = {
   // Runs at every session start, and from the old helper when it finds a new version.
   async setup() {
@@ -128,6 +145,46 @@ const commands = {
       fs.rmSync(paths.noAutoUpdate, { force: true });
     }
     console.log(autoUpdateEnabled(paths) ? 'on' : 'off');
+  },
+  async pair() {
+    const port = Number(process.env.VENES_SSH_PORT || 22);
+    if (!(await isPortOpen(port))) {
+      throw new Error('Turn on Remote Login first, in System Settings > General > Sharing.');
+    }
+    writeLauncher(paths);
+    const file = authorizedKeysFile();
+    const nonce = makeNonce();
+    const { seed, publicKey } = makeOneTimeKey();
+    // All of this can fail, so it comes before anything is added to authorized_keys.
+    const name = localHostName().replace(/\.local$/, '').replace(/-/g, ' ');
+    const link = pairingLink({
+      host: localHostName(), port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name,
+    });
+    const code = renderQR(qrModules(link));
+    // An override has to reach the command too, since sshd runs it with a clean environment.
+    const prefix = process.env.VENES_AUTHORIZED_KEYS ? `VENES_AUTHORIZED_KEYS='${file}' ` : '';
+    addPairingKey(file, publicKey, `${prefix}'${paths.launcher}' enroll ${nonce}`, nonce);
+    const cleanUp = () => removePairingKey(file, nonce);
+    // SIGHUP is what closing the terminal window sends.
+    for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
+      process.on(signal, () => { cleanUp(); process.exit(130); });
+    }
+    console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes.\n`);
+    const deadline = Date.now() + PAIRING_LIMIT_MS;
+    while (Date.now() < deadline) {
+      if (!hasPairingKey(file, nonce)) {
+        console.log('Paired.');
+        return;
+      }
+      await new Promise(resolve => { setTimeout(resolve, PAIRING_CHECK_MS); });
+    }
+    cleanUp();
+    throw new Error('That code has expired. Run this again for a new one.');
+  },
+  // What the one-time key in authorized_keys runs. It takes one line, the phone's public key.
+  async enroll([nonce]) {
+    enrollPhone(authorizedKeysFile(), nonce, await readLine(process.stdin));
+    console.log('ok');
   },
   sessions: () => withClient(async client => {
     const { sessions, unattached } = await client.request('sessions');

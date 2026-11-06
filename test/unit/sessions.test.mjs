@@ -838,3 +838,37 @@ test('a session reports its model and its last words for a list', () => {
   const [view] = store.sessions();
   assert.deepEqual([view.model, view.lastPrompt, view.lastMessage], ['claude-x', 'hi', 'done']);
 });
+
+test('a session from before a restart is listed again, idle and with nothing in progress', () => {
+  const { store } = setup();
+  store.restore([{ id: 'a', cwd: '/w', pane: '%1', transcriptPath: '/t', lastPrompt: 'hi', lastMessage: 'done', lastEventAt: 5 }]);
+  const [view] = store.sessions();
+  assert.deepEqual([view.id, view.status, view.pane, view.lastPrompt, view.lastMessage], ['a', 'idle', '%1', 'hi', 'done']);
+  assert.deepEqual([view.tasks, view.requests], [[], []]);
+});
+
+test('a restored session carries on when it is next heard from', () => {
+  const { store, hook, kinds } = setup();
+  store.restore([{ id: 'a', cwd: '/w', pane: '%1', transcriptPath: '/t' }]);
+  hook('UserPromptSubmit', { prompt: 'again' });
+  assert.equal(store.get('a').status, 'running');
+  assert.equal(store.get('a').pane, '%1', 'its pane is kept, so it can be typed into straight away');
+  assert.ok(!kinds().includes('session.discovered'));
+});
+
+test('restoring never overwrites a session already heard from', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'new' });
+  store.restore([{ id: 'a', cwd: '/old', pane: '%9' }]);
+  assert.equal(store.get('a').cwd, '/w');
+  assert.equal(store.get('a').status, 'running');
+});
+
+test('only sessions a restart could not find again are remembered', () => {
+  const { store } = setup();
+  store.handleHook({ session_id: 'tmux', cwd: '/w', hook_event_name: 'SessionStart' }, { pane: '%1' });
+  store.handleHook({ session_id: 'plain', cwd: '/w', hook_event_name: 'SessionStart' });
+  store.handleHook({ session_id: 'gone', cwd: '/w', hook_event_name: 'SessionStart' }, { pane: '%2' });
+  store.handleHook({ session_id: 'gone', hook_event_name: 'SessionEnd', reason: 'other' });
+  assert.deepEqual(store.registry().map(s => s.id), ['tmux']);
+});

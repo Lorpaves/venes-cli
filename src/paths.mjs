@@ -10,5 +10,6 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     pidFile: path.join(home, 'helper.pid'),
     logFile: path.join(home, 'helper.log'),
     noAutoUpdate: path.join(home, 'no-auto-update'),
+    sessionsFile: path.join(home, 'sessions.json'),
   };
 }

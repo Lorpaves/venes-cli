@@ -616,6 +616,43 @@ T('helper_down_is_silent', { noHelper: true }, async r => {
   client.close();
 });
 
+T('a_restart_keeps_idle_sessions', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word STAYS.');
+  await r.turnEnd();
+  const before = await r.session();
+  await stopHelper();
+  startHelper();
+  const client = await connect();
+  const { sessions } = await client.request('sessions');
+  const session = sessions.find(s => s.id === before.id);
+  assert.ok(session, 'an idle session is back without having done anything');
+  assert.deepEqual([session.pane, session.status], [before.pane, 'idle']);
+  assert.match(session.lastMessage, /STAYS/);
+  const joined = await client.request('join', { sessionId: before.id });
+  assert.ok(joined.items.some(i => i.role === 'assistant' && /STAYS/.test(i.text)));
+
+  const run = new Run(client);
+  await client.request('subscribe');
+  await client.request('send', { sessionId: before.id, text: 'Reply with only the word AGAIN.' });
+  await run.wait(e => e.kind === 'turn.end' && /AGAIN/.test(e.lastMessage), 30000, 'turn.end AGAIN');
+  client.close();
+});
+
+// sessions.json outlives a start, so one bad record mustn't keep the helper down for good.
+T('a_restart_survives_a_damaged_record', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word STAYS.');
+  await r.turnEnd();
+  const before = await r.session();
+  await stopHelper();
+  const records = JSON.parse(fs.readFileSync(paths.sessionsFile, 'utf8'));
+  fs.writeFileSync(paths.sessionsFile, JSON.stringify(records.map(record => ({ ...record, transcriptPath: HOME }))));
+  startHelper();
+  const client = await connect();
+  const { sessions } = await client.request('sessions');
+  assert.ok(sessions.some(s => s.id === before.id), 'still listed, with no last words to show');
+  client.close();
+});
+
 // Opt-in, because it needs key login to this Mac. Starts nothing locally: the
 // helper comes up through the same SSH command the app runs, with SSH's minimal PATH.
 if (process.env.VENES_E2E_SSH) T('over_real_ssh', { noHelper: true }, async r => {

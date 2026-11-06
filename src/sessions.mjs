@@ -14,6 +14,8 @@ const MAX_FINISHED_TASKS = 100;
 const MAX_ECHOES = 32;
 // PostCompact fires just before the transcript gets the sizes it can't report itself.
 const COMPACT_STATS_WAIT_MS = 2000;
+// A session this silent has probably crashed, and must not hold up an update for ever.
+const STALE_SESSION_MS = 60 * 60_000;
 
 export class HelperError extends Error {
   constructor(code, message, details) {
@@ -81,6 +83,12 @@ export class SessionStore extends EventEmitter {
   liveSessions() { return [...this.#sessions.values()].filter(s => s.status !== 'ended'); }
 
   isBusy(s) { return s.status === 'running' || s.status === 'waiting' || s.held.length > 0; }
+
+  // Whether the helper could restart now without losing anything in progress. Restarting
+  // forgets held messages, and turns an open request back into a terminal-only prompt.
+  isQuiet(now = Date.now()) {
+    return this.liveSessions().every(s => now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s) && !this.pendingFor(s).length));
+  }
 
   get(idOrPrefix) {
     const exact = this.#sessions.get(idOrPrefix);

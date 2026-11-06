@@ -9,5 +9,6 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     launcher: path.join(home, 'venes'),
     pidFile: path.join(home, 'helper.pid'),
     logFile: path.join(home, 'helper.log'),
+    noAutoUpdate: path.join(home, 'no-auto-update'),
   };
 }

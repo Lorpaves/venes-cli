@@ -43,12 +43,29 @@ Run `~/.venes/venes` for every command. Session ids accept a unique prefix. The 
 
 ## What it does on your machine
 
-- **It stays local.** The plugin makes no network calls and opens no TCP ports. Events go over two Unix sockets in `~/.venes`, a `0700` directory. Another device can reach them only by logging in over SSH.
+- **It stays local.** Your sessions never leave this Mac except over SSH to your own devices. The plugin opens no TCP ports, and events go over two Unix sockets in `~/.venes`, a `0700` directory.
+- **It checks for updates.** The only network traffic is `claude plugin` fetching this repository, and new versions install by themselves. See [Updates](#updates).
 - **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk.
 - **It can act for you.** Anyone who can log in to your Mac as you can approve tools and type into sessions through it. Use an SSH key, and consider turning password login off.
 - **It never touches your Claude credentials.**
 
 If the helper isn't running, the hooks do nothing and Claude Code behaves as usual.
+
+## Updates
+
+Every six hours the helper asks Claude Code for a new version of the plugin, using the same `claude plugin` commands you'd run yourself. When there is one, the helper restarts on it the next time nothing is in progress: no turn running, no open request and no held message. A session that has been silent for an hour doesn't count, so a crashed one can't hold an update back.
+
+Open sessions keep working through the restart. They go on using their old hooks until their next start or `/reload-plugins`, and a connected app sees its connection drop and reconnects.
+
+An update is new code running with the helper's access, which can approve tools and type into sessions. To review new versions yourself, turn this off:
+
+```sh
+~/.venes/venes auto-update off    # or on
+~/.venes/venes update             # check now, whatever the setting
+~/.venes/venes version
+```
+
+The helper also leaves updates alone when `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, unless `FORCE_AUTOUPDATE_PLUGINS` is too. If you update the plugin another way, the next session to start moves the helper to the new version.
 
 ## Uninstall
 
@@ -72,11 +89,12 @@ transcript ───── polled ────────┘     │
 
 A client runs `~/.venes/venes attach` over SSH and speaks newline-delimited JSON on stdin and stdout. SSH handles authentication. The launcher uses absolute paths because a command run over SSH gets a minimal PATH without node or tmux, and the plugin refreshes it at each session start because the plugin's path changes with every version. The helper starts on demand and outlives the connection.
 
-Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok":true,…}` reply. On failure, `ok` is false and `error` holds `{code, message, details}`. Replies can arrive out of order, so match them by `id`.
+The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok":true,…}` reply. On failure, `ok` is false and `error` holds `{code, message, details}`. Replies can arrive out of order, so match them by `id`.
 
 | Command | Fields | Reply or effect |
 |---|---|---|
-| `ping` | | `protocol` |
+| `ping` | | `protocol`, `version`, `quiet` (whether the helper could restart now) |
+| `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
@@ -86,7 +104,7 @@ Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok
 | `interrupt` | `sessionId` | Presses Esc |
 | `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
 
-To reconnect, pass the last `seq` you saw as `since`, together with `bootId` from the snapshot. A helper restart reports `gap: true`.
+To reconnect, pass the last `seq` you saw as `since`, together with `bootId` from the snapshot. A helper restart, which an update causes, closes the connection and reports `gap: true`.
 
 ### Sending during a turn
 
@@ -189,6 +207,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 - **A crashed session can leave a request open.** If Claude Code is killed outright, no event closes it, and answering has no effect.
 - **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated.
 - **Session state lives in memory.** After a helper restart, sessions reappear on their next event.
+- **A release reaches everyone at once.** Pushing a new `version` to `main` installs it everywhere within about six hours. A push that doesn't change `version` reaches no one.
 - **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.
 - **Workflows report no progress.** A workflow appears as a task with a name and status, but its phases and agents aren't available to hooks.
 - **Refusals are untested against the real thing.** `model.refusal` is built from the record format, without a real refusal to check it on.

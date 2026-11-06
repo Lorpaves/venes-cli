@@ -4,18 +4,23 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { SessionStore, HelperError } from './sessions.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
 import { findClaudePanes, parseTmuxEnv, sendEscape, sendText } from './tmux.mjs';
+import { startAutoUpdate } from './update.mjs';
+import { VERSION } from './version.mjs';
 
 export const PROTOCOL_VERSION = 1;
 const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
-// Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux.
-const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin'];
+// Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux and
+// the native installer's claude.
+const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin')];
 
 function listen(server, socketPath) {
   return new Promise((resolve, reject) => {
@@ -65,7 +70,7 @@ function createHookServer(store) {
   });
 }
 
-function createClientServer(store) {
+function createClientServer(store, checkForUpdate) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -115,7 +120,8 @@ function createClientServer(store) {
   };
 
   const commands = {
-    ping: () => ({ protocol: PROTOCOL_VERSION }),
+    ping: () => ({ protocol: PROTOCOL_VERSION, version: VERSION, quiet: store.isQuiet() }),
+    update: async () => ({ version: VERSION, available: (await checkForUpdate()) ?? null }),
     sessions: listSessions,
     subscribe: async (msg, socket) => {
       const { unattached } = await listSessions();
@@ -161,7 +167,7 @@ function createClientServer(store) {
   const server = net.createServer(socket => {
     socket.on('error', () => {});
     socket.on('close', () => subscribers.delete(socket));
-    write(socket, { type: 'hello', protocol: PROTOCOL_VERSION });
+    write(socket, { type: 'hello', protocol: PROTOCOL_VERSION, version: VERSION });
     const lines = readline.createInterface({ input: socket });
     lines.on('error', () => {}); // readline re-emits socket errors; a dropped client must not crash the helper
     lines.on('line', async line => {
@@ -204,7 +210,8 @@ export async function startDaemon(paths) {
 
   const store = new SessionStore({ agentParent: readAgentParent });
   const hookServer = createHookServer(store);
-  const { server: clientServer, subscribers } = createClientServer(store);
+  const updater = startAutoUpdate(store, paths);
+  const { server: clientServer, subscribers } = createClientServer(store, updater.check);
   const stopPolling = startTranscriptPolling(store);
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -214,6 +221,7 @@ export async function startDaemon(paths) {
     store,
     stop() {
       stopPolling();
+      updater.stop();
       for (const socket of subscribers) socket.destroy();
       hookServer.closeAllConnections();
       hookServer.close();

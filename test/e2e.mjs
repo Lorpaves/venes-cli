@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { HelperClient } from '../src/client.mjs';
 import { findClaudePanes } from '../src/tmux.mjs';
+import { VERSION } from '../src/version.mjs';
 
 const WS = process.env.VENES_E2E_WS;
 if (!WS || !path.isAbsolute(WS)) throw new Error('VENES_E2E_WS must be an absolute path');
@@ -36,8 +37,10 @@ const ASK = 'Use the AskUserQuestion tool to ask me one question, "Which color?"
 const PLAN = n => `Make a one-step plan to create the file e2e-${n}.txt using touch, then call ExitPlanMode. Do not ask questions.`;
 const SLEEP = (s, word) => `Use the Bash tool in the foreground to run exactly this command: python3 -c 'import time; time.sleep(${s})' -- then reply with only the word ${word}.`;
 
-function startHelper() {
-  spawn(process.execPath, [CLI, 'daemon'], { env: { ...process.env, VENES_HOME: HOME }, stdio: 'ignore', detached: true }).unref();
+function startHelper(cli = CLI) {
+  // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
+  const env = { ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1' };
+  spawn(process.execPath, [cli, 'daemon'], { env, stdio: 'ignore', detached: true }).unref();
 }
 function helperPid() {
   try { return Number(fs.readFileSync(paths.pidFile, 'utf8')); } catch { return undefined; }
@@ -101,7 +104,7 @@ class Run {
 
 function launch({ mode = 'default', sources = 'project' } = {}) {
   const env = [
-    `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`,
+    `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
@@ -508,6 +511,31 @@ T('plugin_starts_the_helper', { noHelper: true }, async r => {
   client.close();
 });
 
+// A copy of this plugin that says it's older, as an install from before an update would be.
+function startOlderHelper() {
+  const dir = `${HOME}-older`;
+  fs.rmSync(dir, { recursive: true, force: true });
+  for (const part of ['src', 'cli', '.claude-plugin', 'package.json']) fs.cpSync(path.join(PLUGIN, part), path.join(dir, part), { recursive: true });
+  const manifest = path.join(dir, '.claude-plugin/plugin.json');
+  fs.writeFileSync(manifest, JSON.stringify({ ...JSON.parse(fs.readFileSync(manifest, 'utf8')), version: '0.0.1' }));
+  startHelper(path.join(dir, 'cli/venes.mjs'));
+}
+
+T('a_new_session_replaces_an_older_helper', { noHelper: true, before: startOlderHelper }, async r => {
+  const client = await connect();
+  assert.equal((await client.request('ping')).version, VERSION, 'the plugin\'s session start swapped it');
+  const run = new Run(client);
+  await client.request('subscribe');
+  const { sessions } = await client.request('sessions');
+  assert.equal(sessions.length, 1, 'and its own SessionStart reached the new helper');
+  assert.ok(sessions[0].pane);
+  assert.match(fs.readFileSync(paths.launcher, 'utf8'), new RegExp(CLI.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  await r.type('Reply with only the word SWAPPED.');
+  assert.match((await run.turnEnd(30000)).lastMessage, /SWAPPED/);
+  client.close();
+  fs.rmSync(`${HOME}-older`, { recursive: true, force: true });
+});
+
 T('helper_down_is_silent', { noHelper: true }, async r => {
   (await connect()).close();
   await stopHelper();
@@ -582,6 +610,8 @@ async function runCase(name) {
   const started = Date.now();
   try {
     if (opts.noHelper) {
+      opts.before?.();
+      if (opts.before) (await connect()).close();
       run = new Run({ on() {} });
     } else {
       startHelper();

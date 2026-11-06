@@ -7,14 +7,20 @@ import { helperPaths } from '../src/paths.mjs';
 import { writeLauncher } from '../src/setup.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
+import { autoUpdateEnabled } from '../src/update.mjs';
+import { VERSION, isNewer } from '../src/version.mjs';
 
 const START_TIMEOUT_MS = 4000;
+const STOP_TIMEOUT_MS = 3000;
 const USAGE = `venes <command>
 
 Helper
   start | stop | status         Manage the background helper
   daemon                        Run the helper in the foreground
   setup                         Refresh the launcher and start the helper (run by the plugin)
+  version                       Print this version and the running helper's
+  update                        Check for a new version now
+  auto-update [on|off]          Show or change automatic updates
 
 Control
   sessions                      List sessions
@@ -55,6 +61,20 @@ async function ensureRunning() {
   throw new Error(`The helper did not start. See ${paths.logFile}`);
 }
 
+async function runningHelper() {
+  if (!(await isRunning())) return undefined;
+  const client = await HelperClient.connect(paths.clientSocket);
+  try { return await client.request('ping'); } finally { client.close(); }
+}
+
+async function stopRunningHelper() {
+  process.kill(Number(fs.readFileSync(paths.pidFile, 'utf8')), 'SIGTERM');
+  const deadline = Date.now() + STOP_TIMEOUT_MS;
+  while (Date.now() < deadline && await isRunning()) {
+    await new Promise(resolve => { setTimeout(resolve, 50); });
+  }
+}
+
 async function withClient(run) {
   await ensureRunning();
   const client = await HelperClient.connect(paths.clientSocket);
@@ -64,8 +84,13 @@ async function withClient(run) {
 const print = value => console.log(JSON.stringify(value, null, 2));
 
 const commands = {
+  // Runs at every session start, and from the old helper when it finds a new version.
   async setup() {
+    const running = await runningHelper();
+    // A session that's still on an older version must not take the helper back with it.
+    if (isNewer(running?.version, VERSION)) return;
     writeLauncher(paths);
+    if (running && isNewer(VERSION, running.version) && running.quiet !== false) await stopRunningHelper();
     await ensureRunning();
   },
   async daemon() {
@@ -81,11 +106,28 @@ const commands = {
   },
   async stop() {
     if (!(await isRunning())) { console.log('not running'); return; }
-    process.kill(Number(fs.readFileSync(paths.pidFile, 'utf8')), 'SIGTERM');
+    await stopRunningHelper();
     console.log('stopped');
   },
   async status() {
     console.log((await isRunning()) ? 'running' : 'not running');
+  },
+  async version() {
+    const running = await runningHelper();
+    console.log(`${VERSION}${running ? ` (running: ${running.version ?? 'unknown'})` : ''}`);
+  },
+  update: () => withClient(async client => {
+    const { version, available } = await client.request('update');
+    console.log(available ? `${version} -> ${available}, once nothing is in progress` : `${version} is the latest`);
+  }),
+  'auto-update': async ([state]) => {
+    if (state === 'off') {
+      fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(paths.noAutoUpdate, '');
+    } else if (state === 'on') {
+      fs.rmSync(paths.noAutoUpdate, { force: true });
+    }
+    console.log(autoUpdateEnabled(paths) ? 'on' : 'off');
   },
   sessions: () => withClient(async client => {
     const { sessions, unattached } = await client.request('sessions');

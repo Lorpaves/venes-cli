@@ -16,6 +16,11 @@ const MAX_ECHOES = 32;
 const COMPACT_STATS_WAIT_MS = 2000;
 // A session this silent has probably crashed, and must not hold up an update for ever.
 const STALE_SESSION_MS = 60 * 60_000;
+// A prompt says so when it starts a turn, but a local command says nothing at all, so a
+// sent message gets this long to show which it was before the next one follows.
+const HELD_SETTLE_MS = 2000;
+// In case a compaction ends in a way the transcript doesn't show.
+const COMPACT_LIMIT_MS = 10 * 60_000;
 
 export class HelperError extends Error {
   constructor(code, message, details) {
@@ -52,6 +57,8 @@ function rememberableRules(suggestions = []) {
   return suggestions.filter(suggestion => suggestion.type === 'addRules' && suggestion.behavior === 'allow');
 }
 
+const isCompacting = (s, now) => !!s.compacting && now - s.compacting.since < COMPACT_LIMIT_MS;
+
 const normalized = text => text.trim().split(/\s+/).join(' ');
 
 function taskView({ result, outputFile, ...task }) {
@@ -82,12 +89,14 @@ export class SessionStore extends EventEmitter {
 
   liveSessions() { return [...this.#sessions.values()].filter(s => s.status !== 'ended'); }
 
-  isBusy(s) { return s.status === 'running' || s.status === 'waiting' || s.held.length > 0; }
+  isBusy(s, now = Date.now()) {
+    return s.status === 'running' || s.status === 'waiting' || s.held.length > 0 || isCompacting(s, now);
+  }
 
   // Whether the helper could restart now without losing anything in progress. Restarting
   // forgets held messages, and turns an open request back into a terminal-only prompt.
   isQuiet(now = Date.now()) {
-    return this.liveSessions().every(s => now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s) && !this.pendingFor(s).length));
+    return this.liveSessions().every(s => now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s, now) && !this.pendingFor(s).length));
   }
 
   get(idOrPrefix) {
@@ -120,7 +129,13 @@ export class SessionStore extends EventEmitter {
 
   hold(s, message) { s.held.push(message); }
 
-  nextHeld(s) { return s.held.shift(); }
+  // The message that can go out now, if any.
+  nextHeld(s, now = Date.now()) {
+    if (!s.held.length || s.status !== 'idle' || isCompacting(s, now)) return undefined;
+    if (now - (s.lastHeldAt ?? 0) < HELD_SETTLE_MS) return undefined;
+    s.lastHeldAt = now;
+    return s.held.shift();
+  }
 
   cancelHeld(s, clientId) {
     const position = s.held.findIndex(message => message.clientId === clientId);
@@ -212,9 +227,11 @@ export class SessionStore extends EventEmitter {
         this.#emit(s, 'notification', { notificationType: ev.notification_type, message: ev.message });
         break;
       case 'PreCompact':
+        s.compacting = { trigger: ev.trigger, since: Date.now() };
         this.#emit(s, 'compact.start', { trigger: ev.trigger });
         break;
       case 'PostCompact':
+        s.compacting = undefined;
         this.#onCompactEnd(s, ev.trigger);
         break;
       default:
@@ -231,6 +248,7 @@ export class SessionStore extends EventEmitter {
       else if (type === 'toolResult') this.#onToolResult(s, signal);
       else if (type === 'thinking') this.#emit(s, 'message.thinking', signal);
       else if (type === 'compacted') this.#onCompactStats(s, signal);
+      else if (type === 'localOutput') this.#onLocalOutput(s, signal);
       else if (type === 'refusal') this.#emit(s, 'model.refusal', { ...signal, prompt: s.lastPrompt });
     }
   }
@@ -368,8 +386,17 @@ export class SessionStore extends EventEmitter {
   }
 
   #onCompactStats(s, stats) {
+    s.compacting = undefined;
     if (s.compactWait) this.#finishCompact(s, stats);
     else s.compactStats = stats;
+  }
+
+  // A /compact that fails fires no PostCompact and only says so in its output. One that
+  // works writes its boundary first, which has already cleared this by the time it gets here.
+  #onLocalOutput(s, { text }) {
+    if (s.compacting?.trigger !== 'manual') return;
+    s.compacting = undefined;
+    this.#emit(s, 'compact.failed', { trigger: 'manual', message: text });
   }
 
   #finishCompact(s, stats) {
@@ -452,6 +479,7 @@ export class SessionStore extends EventEmitter {
   }
 
   #setStatus(s, status) {
+    if (status === 'idle') s.compacting = undefined; // whatever happened to it, the turn is over
     if (s.status === status) return;
     s.status = status;
     this.#emit(s, 'session.status', { status });

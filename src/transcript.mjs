@@ -9,6 +9,7 @@ const INTERRUPTED = /^\[Request interrupted by user/;
 const HIDDEN_USER_TEXT = /^<(task-notification|command-|local-command|system-reminder)/;
 const REFUSAL = /^model_refusal_(no_)?fallback$/;
 const BACKGROUND_OUTPUT = /Output is being written to: (\S+\.output)/;
+const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr)>([\s\S]*?)<\/local-command-\1>/;
 const DEFAULT_HISTORY_LIMIT = 200;
 
 // Long or many-line pastes reach Claude wrapped in these tags; the id pairs them.
@@ -41,9 +42,16 @@ function userSignals(record) {
       });
     } else if (block?.type === 'text' && INTERRUPTED.test(block.text ?? '')) {
       signals.push({ type: 'interrupted' });
+    } else if (block?.type === 'text') {
+      signals.push(...localOutputSignals(block.text));
     }
   }
   return signals;
+}
+
+function localOutputSignals(text) {
+  const output = text?.match(LOCAL_COMMAND_OUTPUT);
+  return output ? [{ type: 'localOutput', text: output[2] }] : [];
 }
 
 // Most thinking blocks are stored without their text, so the duration may be all there is.
@@ -64,11 +72,11 @@ function systemSignals(record) {
       scope: record.scope, category: record.apiRefusalCategory, explanation: record.apiRefusalExplanation, text: record.content,
     }];
   }
-  return [];
+  return record.subtype === 'local_command' ? localOutputSignals(record.content) : [];
 }
 
 // Hooks don't report any of these, so these transcript records are the only signal
-// that they happened: interrupts, terminal rejections, thinking, compaction sizes, refusals.
+// that they happened: interrupts, terminal rejections, thinking, compaction results, refusals.
 export function signalsFrom(record) {
   if (record?.isSidechain) return [];
   switch (record?.type) {

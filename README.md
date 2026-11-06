@@ -106,6 +106,8 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 
 To reconnect, pass the last `seq` you saw as `since`, together with `bootId` from the snapshot. A helper restart, which an update causes, closes the connection and reports `gap: true`.
 
+On `gap: true`, throw away everything built from earlier events, including any decoder state, and rebuild from the snapshot and `history`. Events were lost, so text from a new turn could otherwise be mistaken for a late piece of an old one.
+
 ### Sending during a turn
 
 `lane` says when a message sent during a turn should be read:
@@ -115,7 +117,7 @@ To reconnect, pass the last `seq` you saw as `since`, together with `bootId` fro
 | `next`, or none | Typed now. Claude reads it at its next step, and the echo comes straight away. |
 | `later` | Held by the helper until the turn ends, then typed. An idle session gets it at once. Only held messages can be cancelled, because a message in Claude Code's own queue can't be taken back on its own. |
 
-Held messages go out one per turn, in order, including after an interrupted turn. If one can't be delivered, a `send.failed` event says why. They live in the helper's memory, so a restart loses them.
+Held messages go out in order, each once the session is idle and any compaction has finished, including after an interrupted turn. If one can't be delivered, a `send.failed` event says why, and the next one still goes. They live in the helper's memory, so a restart loses them.
 
 `message.user` carries the `clientId` of the send it came from. A message typed in the terminal has none. Slash commands that Claude Code runs itself, such as `/compact`, fire no hook, so they never echo.
 
@@ -152,7 +154,9 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 
 | `kind` | Fields |
 |---|---|
-| `session.discovered`, `session.started`, `session.attached` | `source`, `model`, `pane`, `cwd` |
+| `session.discovered` | `cwd` |
+| `session.started` | `source`, `model`, `cwd` |
+| `session.attached` | `pane` |
 | `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
 | `session.mode` | `permissionMode` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
@@ -172,6 +176,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `notification` | `notificationType`, `message` |
 | `compact.start` | `trigger` |
 | `compact.end` | `trigger`, `preTokens`, `postTokens` |
+| `compact.failed` | `trigger`, `message`: a `/compact` that didn't happen, such as `Not enough messages to compact.` |
 | `model.refusal` | `id`, `model`, `fallbackModel`, `scope`, `category`, `explanation`, `text`, `prompt` |
 | `send.failed` | `clientId`, `code`, `message`: a held message couldn't be delivered |
 

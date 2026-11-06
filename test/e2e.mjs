@@ -381,6 +381,29 @@ T('held_message_follows_an_interrupt', { mode: 'bypassPermissions' }, async r =>
   await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'the held turn');
 });
 
+T('held_messages_get_past_a_local_command', { mode: 'bypassPermissions' }, async r => {
+  await r.type(SLEEP(5, 'FIRST'));
+  await r.kind('tool.start', 30000);
+  const { id } = await r.session();
+  const later = { sessionId: id, lane: 'later' };
+  await r.client.request('send', { ...later, text: '/compact', clientId: 'compact' });
+  await r.client.request('send', { ...later, text: 'Reply with only the word AFTER.', clientId: 'after' });
+  const compacted = await r.kind('compact.end', 120000);
+  const echo = await r.wait(e => e.kind === 'message.user' && e.clientId === 'after', 15000, 'the message behind the command');
+  assert.ok(echo.seq > compacted.seq, 'it waits for the compaction to finish');
+  await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'its turn');
+});
+
+T('a_compaction_that_fails_ends', {}, async r => {
+  const { id } = await r.session();
+  await r.client.request('send', { sessionId: id, text: '/compact' });
+  const failed = await r.kind('compact.failed', 15000);
+  assert.match(failed.message, /Not enough messages/);
+  assert.ok(!r.events.some(e => e.kind === 'compact.end'));
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word STILL.', lane: 'later', clientId: 'still' });
+  await r.wait(e => e.kind === 'turn.end' && /STILL/.test(e.lastMessage), 30000, 'a message after it');
+});
+
 T('always_allow', { sources: 'project,local' }, async r => {
   const prompt = `Use the Bash tool to run exactly this command: python3 -c 'print(40 + 2)' -- then reply with only the word DONE.`;
   try {

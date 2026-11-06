@@ -242,6 +242,18 @@ test('compaction sizes and refusals are read from system records', () => {
   assert.deepEqual(signalsFrom({ type: 'system', subtype: 'turn_duration' }), []);
 });
 
+test('a local command\'s output is read from either kind of record', () => {
+  assert.deepEqual(
+    signalsFrom({ type: 'system', subtype: 'local_command', content: '<local-command-stdout>Not enough messages to compact.</local-command-stdout>' }),
+    [{ type: 'localOutput', text: 'Not enough messages to compact.' }],
+  );
+  assert.deepEqual(
+    signalsFrom({ type: 'user', message: { content: '<local-command-stderr>failed\nbadly</local-command-stderr>' } }),
+    [{ type: 'localOutput', text: 'failed\nbadly' }],
+  );
+  assert.deepEqual(signalsFrom({ type: 'system', subtype: 'local_command', content: '<command-name>/usage</command-name>' }), []);
+});
+
 test('a background command\'s output file is found in its tool result', () => {
   const content = 'Command running in background with ID: b1. Output is being written to: /tmp/x/tasks/b1.output. Keep going.';
   const [signal] = signalsFrom({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content }] } });

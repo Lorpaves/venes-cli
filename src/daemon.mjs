@@ -18,6 +18,7 @@ import { VERSION } from './version.mjs';
 export const PROTOCOL_VERSION = 1;
 const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
+const HELD_CHECK_MS = 300;
 // Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux and
 // the native installer's claude.
 const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin')];
@@ -87,9 +88,9 @@ function createClientServer(store, checkForUpdate) {
     }
   };
 
-  // Held messages go out one at a time, each when the turn before it has ended.
-  const deliverHeld = async sessionId => {
-    const session = store.get(sessionId);
+  // Checked on a timer, not when a turn ends: a local command or a failed delivery leaves
+  // the status where it was, so the messages behind it would have nothing to wake them.
+  const deliverHeld = async session => {
     const message = store.nextHeld(session);
     if (!message) return;
     try {
@@ -99,9 +100,11 @@ function createClientServer(store, checkForUpdate) {
     }
   };
 
+  const heldTimer = setInterval(() => { for (const session of store.liveSessions()) deliverHeld(session); }, HELD_CHECK_MS);
+  heldTimer.unref();
+
   store.on('event', event => {
     for (const socket of subscribers) write(socket, { type: 'event', event });
-    if (event.kind === 'session.status' && event.status === 'idle') deliverHeld(event.sessionId);
   });
 
   const sessionWithPane = sessionId => {
@@ -185,7 +188,7 @@ function createClientServer(store, checkForUpdate) {
       }
     });
   });
-  return { server, subscribers };
+  return { server, subscribers, heldTimer };
 }
 
 function startTranscriptPolling(store) {
@@ -211,7 +214,7 @@ export async function startDaemon(paths) {
   const store = new SessionStore({ agentParent: readAgentParent });
   const hookServer = createHookServer(store);
   const updater = startAutoUpdate(store, paths);
-  const { server: clientServer, subscribers } = createClientServer(store, updater.check);
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check);
   const stopPolling = startTranscriptPolling(store);
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -222,6 +225,7 @@ export async function startDaemon(paths) {
     stop() {
       stopPolling();
       updater.stop();
+      clearInterval(heldTimer);
       for (const socket of subscribers) socket.destroy();
       hookServer.closeAllConnections();
       hookServer.close();

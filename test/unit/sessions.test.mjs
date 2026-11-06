@@ -250,8 +250,114 @@ test('a held message can be cancelled once, and only by its id', () => {
   assert.equal(store.cancelHeld(s, 'nope'), false);
   assert.equal(store.cancelHeld(s, 'c1'), true);
   assert.equal(store.cancelHeld(s, 'c1'), false);
+  hook('Stop', {});
   assert.equal(store.nextHeld(s).clientId, 'c2');
   assert.equal(store.nextHeld(s), undefined);
+});
+
+function holding(...texts) {
+  const context = setup();
+  context.hook('UserPromptSubmit', { prompt: 'hi' });
+  const s = context.store.get('a');
+  texts.forEach((text, i) => context.store.hold(s, { clientId: `c${i}`, text }));
+  return { ...context, s, next: at => context.store.nextHeld(s, at)?.text };
+}
+
+test('a held message waits for the turn, and for an open request', () => {
+  const { store, hook, s, next } = holding('one');
+  assert.equal(next(), undefined, 'a turn is running');
+  hook('PreToolUse', { ...bash, tool_use_id: 't1', agent_id: 'bg' });
+  const held = hook('PermissionRequest', bash);
+  assert.equal(next(), undefined, 'a request is open');
+  store.respond(held.request.id, { decision: 'deny' });
+  hook('Stop', {});
+  assert.equal(store.nextHeld(s).text, 'one');
+});
+
+test('a message behind a local command goes out, though nothing changed the status', () => {
+  const { hook, next } = holding('/context', 'after');
+  hook('Stop', {});
+  assert.equal(next(1_000_000), '/context');
+  assert.equal(next(1_001_000), undefined, 'the first gets time to show whether it started a turn');
+  assert.equal(next(1_002_500), 'after');
+});
+
+test('a message behind a prompt waits for the turn the prompt started', () => {
+  const { hook, next } = holding('one', 'two');
+  hook('Stop', {});
+  assert.equal(next(1_000_000), 'one');
+  hook('UserPromptSubmit', { prompt: 'one' });
+  assert.equal(next(1_002_500), undefined);
+  hook('Stop', {});
+  assert.equal(next(1_002_600), 'two');
+});
+
+test('a message behind a compaction waits for it to finish', () => {
+  const { store, hook, s } = holding('after');
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  assert.equal(store.nextHeld(s), undefined);
+  assert.equal(store.isBusy(s), true);
+  assert.equal(store.isQuiet(), false);
+  hook('PostCompact', { trigger: 'manual' });
+  assert.equal(store.nextHeld(s).text, 'after');
+});
+
+const localOutput = text => ({ type: 'system', subtype: 'local_command', content: `<local-command-stdout>${text}</local-command-stdout>` });
+
+test('a /compact that fails ends, since no PostCompact will come', () => {
+  const { store, hook, s, events, kinds } = holding('after');
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  store.handleTranscriptRecord('a', localOutput('Not enough messages to compact.'));
+  const failed = events.find(e => e.kind === 'compact.failed');
+  assert.deepEqual([failed.trigger, failed.message], ['manual', 'Not enough messages to compact.']);
+  assert.ok(!kinds().includes('compact.end'));
+  assert.equal(store.nextHeld(s).text, 'after');
+});
+
+test('a /compact that works is not mistaken for a failure by its output', () => {
+  const { store, hook, kinds } = setup();
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  store.handleTranscriptRecord('a', { type: 'system', subtype: 'compact_boundary', compactMetadata: { preTokens: 9, postTokens: 1 } });
+  store.handleTranscriptRecord('a', { type: 'user', message: { content: '<local-command-stdout>Compacted</local-command-stdout>' } });
+  hook('PostCompact', { trigger: 'manual' });
+  assert.ok(!kinds().includes('compact.failed'));
+  assert.equal(kinds().filter(k => k === 'compact.end').length, 1);
+});
+
+test('other commands\' output means nothing when no compaction is running', () => {
+  const { store, hook, kinds } = setup();
+  hook('Stop', {});
+  store.handleTranscriptRecord('a', localOutput('Settings dialog dismissed'));
+  assert.ok(!kinds().includes('compact.failed'));
+});
+
+test('a local command during an automatic compaction does not fail it', () => {
+  const { store, hook, kinds } = setup();
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  hook('PreCompact', { trigger: 'auto' });
+  store.handleTranscriptRecord('a', localOutput('Settings dialog dismissed'));
+  assert.ok(!kinds().includes('compact.failed'));
+  assert.equal(store.isBusy(store.get('a')), true);
+});
+
+test('a turn that ends takes an unfinished compaction with it', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  hook('PreCompact', { trigger: 'auto' });
+  hook('StopFailure', { error: 'server_error' });
+  assert.equal(store.isBusy(store.get('a')), false);
+});
+
+test('a compaction that never reports back holds nothing up for ever', () => {
+  const { store, hook, s } = holding('after');
+  hook('Stop', {});
+  hook('PreCompact', { trigger: 'manual' });
+  const now = Date.now();
+  assert.equal(store.nextHeld(s, now + 9 * 60_000), undefined);
+  assert.equal(store.nextHeld(s, now + 11 * 60_000).text, 'after');
 });
 
 test('held messages keep a session busy, so a later one cannot overtake them', () => {

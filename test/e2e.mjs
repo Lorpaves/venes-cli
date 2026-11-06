@@ -27,6 +27,9 @@ const SOCK = 'venes-e2e';
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(PLUGIN, 'cli/venes.mjs');
 const paths = helperPaths(HOME);
+// Kept between runs, so that a run doesn't download the SDK for each case.
+const SDK_DIR = process.env.VENES_E2E_SDK || `${HOME}-sdk`;
+const RESUME_ARGS = ['--model', MODEL, '--permission-mode', 'default', '--setting-sources', 'project', '--plugin-dir', PLUGIN];
 
 const delay = ms => new Promise(r => { setTimeout(r, ms); });
 const shq = s => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -39,7 +42,10 @@ const SLEEP = (s, word) => `Use the Bash tool in the foreground to run exactly t
 
 function startHelper(cli = CLI) {
   // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
-  const env = { ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1' };
+  const env = {
+    ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR,
+    VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
+  };
   spawn(process.execPath, [cli, 'daemon'], { env, stdio: 'ignore', detached: true }).unref();
 }
 function helperPid() {
@@ -650,6 +656,65 @@ T('a_restart_survives_a_damaged_record', { mode: 'bypassPermissions' }, async r 
   const client = await connect();
   const { sessions } = await client.request('sessions');
   assert.ok(sessions.some(s => s.id === before.id), 'still listed, with no last words to show');
+  client.close();
+});
+
+// The helper forgets a session when it restarts, which leaves it as Claude Code stored it.
+async function forgetSessions() {
+  await stopHelper();
+  fs.rmSync(paths.sessionsFile, { force: true });
+  startHelper();
+  const client = await connect();
+  const run = new Run(client);
+  await client.request('subscribe');
+  return { client, run };
+}
+
+T('a_stored_session_can_be_listed_read_and_continued', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word STORED.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  tmux('kill-session', '-t', 'run');
+  await delay(1500);
+  const { client, run } = await forgetSessions();
+
+  const { items } = await client.request('library', { limit: 20 });
+  const entry = items.find(item => item.id === id);
+  assert.ok(entry, 'it is listed with nothing running');
+  assert.equal(entry.status, null);
+  assert.ok(entry.title && entry.cwd && entry.lastActiveAt);
+
+  const joined = await client.request('join', { sessionId: id, limit: 20 });
+  assert.ok(joined.items.some(item => item.role === 'assistant' && /STORED/.test(item.text)));
+  assert.deepEqual([joined.turn, joined.requests, joined.sessions[0].status], [[], [], 'ended']);
+
+  // A leading "-" would be a flag on the command line, were it not kept apart from them.
+  const reply = await client.request('send', { sessionId: id, text: '- Reply with only the word AGAIN.', clientId: 'first' });
+  assert.equal(reply.resumed, true);
+  const said = await run.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'message.user');
+  assert.equal(said.clientId, 'first');
+  await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /AGAIN/.test(e.lastMessage), 30000, 'turn.end AGAIN');
+
+  const { sessions } = await client.request('sessions');
+  assert.ok(sessions.find(s => s.id === id).pane, 'it keeps its id, and now has a pane to type into');
+  await client.request('send', { sessionId: id, text: 'Reply with only the word THIRD.' });
+  await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /THIRD/.test(e.lastMessage), 30000, 'turn.end THIRD');
+  const older = await client.request('history', { sessionId: id, limit: 50 });
+  assert.ok(older.items.some(item => item.role === 'assistant' && /STORED/.test(item.text)), 'the conversation carried on from where it was');
+  tmux('kill-session', '-t', `venes-${id.slice(0, 8)}`);
+  client.close();
+});
+
+T('a_session_running_elsewhere_is_listed_but_not_resumed', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word ELSEWHERE.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  const { client } = await forgetSessions();
+  const { items } = await client.request('library', { limit: 20 });
+  assert.equal(items.find(item => item.id === id)?.status, 'idle', 'claude agents knows it even though the helper doesn\'t');
+  const joined = await client.request('join', { sessionId: id, limit: 20 });
+  assert.equal(joined.sessions[0].status, 'idle');
+  await assert.rejects(client.request('send', { sessionId: id, text: 'hello' }), { code: 'no_pane' });
   client.close();
 });
 

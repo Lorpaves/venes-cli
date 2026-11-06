@@ -32,6 +32,7 @@ Helper
 
 Control
   sessions                      List sessions
+  library                       List every session Claude Code has stored
   watch                         Print live events
   history SESSION [LIMIT] [BEFORE]  Print a page of a session's conversation
   send SESSION TEXT             Send a message to a session
@@ -186,6 +187,9 @@ const commands = {
     enrollPhone(authorizedKeysFile(), nonce, await readLine(process.stdin));
     console.log('ok');
   },
+  library: () => withClient(async client => {
+    print(await client.request('library'));
+  }),
   sessions: () => withClient(async client => {
     const { sessions, unattached } = await client.request('sessions');
     print({ sessions, unattached });

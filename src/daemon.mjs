@@ -9,14 +9,23 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
+import { Library } from './library.mjs';
+import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
-import { findClaudePanes, parseTmuxEnv, sendEscape, sendText } from './tmux.mjs';
+import { findClaudePanes, hasOpenDialog, isSessionOpen, parseTmuxEnv, sendEscape, sendText, startSession } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
 
 export const PROTOCOL_VERSION = 1;
+// What Claude Code sets for its own child processes, and the session that happened to start the
+// helper left behind. They'd say the wrong thing to any Claude the helper starts.
+const PARENT_SESSION_ENV = [
+  'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_EFFORT', 'CLAUDE_ENV_FILE',
+  'CLAUDE_PID', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_PLUGIN_ROOT', 'CLAUDE_PROJECT_DIR',
+];
 const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
 const HELD_CHECK_MS = 300;
@@ -25,7 +34,7 @@ const REGISTRY_SAVE_MS = 2000;
 const LAST_WORDS_ITEMS = 40;
 // Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux and
 // the native installer's claude.
-const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin')];
+const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin'), path.dirname(process.execPath)];
 
 function listen(server, socketPath) {
   return new Promise((resolve, reject) => {
@@ -75,7 +84,7 @@ function createHookServer(store) {
   });
 }
 
-function createClientServer(store, checkForUpdate) {
+function createClientServer(store, checkForUpdate, library) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -118,6 +127,26 @@ function createClientServer(store, checkForUpdate) {
     return session;
   };
 
+  // A message for a session that's resuming waits for it, and then goes the usual way.
+  const resuming = new Map();
+  const resume = msg => {
+    const tmux = { hasOpenDialog, isSessionOpen, startSession };
+    const started = resumeSession({ store, library, tmux }, msg.sessionId, msg).finally(() => resuming.delete(msg.sessionId));
+    resuming.set(msg.sessionId, started);
+    return started;
+  };
+
+  const joinStored = async ({ sessionId, limit }) => {
+    const seq = store.seq;
+    const [page, info, running] = await Promise.all([
+      library.history(sessionId, { limit }),
+      library.info(sessionId).catch(() => undefined),
+      library.running().catch(() => []),
+    ]);
+    const status = running.find(session => session.id === sessionId)?.status ?? 'ended';
+    return { ...page, turn: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, tasks: [], backgroundTasks: 0 }] };
+  };
+
   const listSessions = async () => {
     const sessions = store.sessions();
     const sockets = new Set([undefined, ...sessions.map(s => s.tmuxSocket ?? undefined)]);
@@ -142,10 +171,16 @@ function createClientServer(store, checkForUpdate) {
       subscribers.add(socket);
       return { gap: gap || !sameBoot };
     },
-    history: msg => readHistory(store.get(msg.sessionId).transcriptPath, msg),
-    // Nothing here awaits, so every event is either in this reply or follows it on the wire.
+    library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
+    history: msg => {
+      const file = store.find(msg.sessionId)?.transcriptPath;
+      return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);
+    },
+    // Nothing here awaits for a session the helper knows, so every event is either in this
+    // reply or follows it on the wire.
     join: msg => {
-      const session = store.get(msg.sessionId);
+      const session = store.find(msg.sessionId);
+      if (!session?.transcriptPath) return joinStored(msg);
       const turn = store.openTurn(session);
       const [first] = turn;
       const start = first && { at: first.at, prompt: first.kind === 'message.user' ? first.text : undefined };
@@ -160,6 +195,9 @@ function createClientServer(store, checkForUpdate) {
     send: async msg => {
       if (typeof msg.text !== 'string' || !msg.text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
       if (msg.lane !== undefined && msg.lane !== 'next' && msg.lane !== 'later') throw new HelperError('bad_lane', `Unknown lane: ${msg.lane}`);
+      await resuming.get(msg.sessionId)?.catch(() => {});
+      const known = store.find(msg.sessionId);
+      if (!known || known.status === 'ended') return resume(msg);
       const session = sessionWithPane(msg.sessionId);
       const message = { clientId: msg.clientId, text: msg.text };
       if (msg.lane === 'later' && store.isBusy(session)) {
@@ -255,8 +293,13 @@ function startRegistrySaving(store, paths) {
   return () => { clearInterval(timer); save(); };
 }
 
+export function dropParentSession(env) {
+  for (const name of PARENT_SESSION_ENV) delete env[name];
+}
+
 export async function startDaemon(paths) {
   process.env.PATH = [...EXTRA_PATH, process.env.PATH].join(':');
+  dropParentSession(process.env);
   fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   if (await socketIsLive(paths.clientSocket)) throw new HelperError('already_running', 'The helper is already running.');
   for (const file of [paths.hookSocket, paths.clientSocket]) fs.rmSync(file, { force: true });
@@ -268,7 +311,11 @@ export async function startDaemon(paths) {
   const stopSaving = startRegistrySaving(store, paths);
   const hookServer = createHookServer(store);
   const updater = startAutoUpdate(store, paths);
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check);
+  const library = new Library(paths);
+  fs.mkdirSync(paths.sdkDir, { recursive: true, mode: 0o700 });
+  // Ready before the first time it's asked for. If this fails, the next request tries again.
+  library.prepare().catch(error => console.error(`library: ${error.message}`));
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library);
   const stopPolling = startTranscriptPolling(store);
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);

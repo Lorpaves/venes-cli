@@ -6,6 +6,8 @@ import { HelperError } from './sessions.mjs';
 const exec = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 5000;
 const PASTE_SETTLE_MS = 150;
+const NEW_SESSION_COLUMNS = 120;
+const NEW_SESSION_ROWS = 40;
 
 // Pressing Enter while one of these is open picks its highlighted option, which
 // for a permission prompt means approving the tool.
@@ -27,7 +29,7 @@ async function tmux(socket, args, input) {
   return stdout;
 }
 
-async function hasOpenDialog({ pane, tmuxSocket }) {
+export async function hasOpenDialog({ pane, tmuxSocket }) {
   const screen = await tmux(tmuxSocket, ['capture-pane', '-p', '-t', pane]);
   const lines = screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES);
   return DIALOG_FOOTER.test(lines.join('\n'));
@@ -51,6 +53,28 @@ export async function sendText(session, text, isBlocked) {
   await new Promise(resolve => { setTimeout(resolve, PASTE_SETTLE_MS); });
   await refuseIfBlocked(session, isBlocked);
   await tmux(tmuxSocket, ['send-keys', '-t', pane, 'Enter']);
+}
+
+// Runs a command in a new detached session and returns its pane. The session closes with it.
+export async function startSession({ name, cwd, command, env, tmuxSocket }) {
+  const variables = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+  const size = ['-x', String(NEW_SESSION_COLUMNS), '-y', String(NEW_SESSION_ROWS)];
+  try {
+    const output = await tmux(tmuxSocket, ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', name, ...size, '-c', cwd, ...variables, '--', ...command]);
+    return output.trim();
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new HelperError('no_tmux', 'Install tmux on your Mac to continue this session.');
+    throw error;
+  }
+}
+
+export async function isSessionOpen(name, tmuxSocket) {
+  try {
+    await tmux(tmuxSocket, ['has-session', '-t', `=${name}`]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function sendEscape({ pane, tmuxSocket }) {

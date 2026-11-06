@@ -56,9 +56,10 @@ To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
 ## What it does on your machine
 
 - **It stays local.** Your sessions never leave this Mac except over SSH to your own devices. The plugin opens no TCP ports, and events go over two Unix sockets in `~/.venes`, a `0700` directory.
-- **It checks for updates.** The only network traffic is `claude plugin` fetching this repository, and new versions install by themselves. See [Updates](#updates).
+- **It checks for updates.** `claude plugin` fetches this repository, and new versions install by themselves. See [Updates](#updates).
+- **It downloads one thing.** The first time it starts, it runs `npm install` for Anthropic's [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), into `~/.venes/sdk`, to list your stored sessions. It leaves out the SDK's Claude Code binary, runs no install scripts, and needs no account: the SDK only reads files on this Mac here. Without it, the app still shows what's running.
 - **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk. So that a restart doesn't lose track of them, it keeps a list of open sessions in `~/.venes/sessions.json`: their ids, folders and tmux panes, with no conversation text.
-- **It can act for you.** Anyone who can log in to your Mac as you can approve tools and type into sessions through it. Use an SSH key, and consider turning password login off.
+- **It can act for you.** Anyone who can log in to your Mac as you can approve tools, type into sessions and resume stored sessions through it. Use an SSH key, and consider turning password login off.
 - **It never touches your Claude credentials.**
 
 If the helper isn't running, the hooks do nothing and Claude Code behaves as usual.
@@ -108,11 +109,12 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `ping` | | `protocol`, `version`, `quiet` (whether the helper could restart now) |
 | `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
+| `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
-| `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. |
+| `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. A session that isn't running is resumed. See [The library](#the-library). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
 | `interrupt` | `sessionId` | Presses Esc |
 | `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
@@ -133,6 +135,19 @@ On `gap: true`, throw away everything built from earlier events, including any d
 | `sessions`, `requests` | This session's current state, in the form a snapshot has it |
 
 Every event up to `seq` is covered by the reply, and every later one follows it on the wire. So drop what arrives for a session while its `join` is on its way, and apply what comes after. A turn that ended within the last two seconds counts as current, because the transcript can lag behind `turn.end`. A turn older than the event log comes back with an empty `turn`, and shows as history.
+
+### The library
+
+`library` lists sessions the helper may never have heard from, newest first. It comes from `claude agents --json` for what's running, and the Agent SDK's `listSessions()` for what's stored. Pass `offset` from one reply to get the next page.
+
+| Field | Contents |
+|---|---|
+| `items` | `id`, `title`, `cwd`, `lastActiveAt`, `startedAt`, and `status`: `running`, `waiting`, `idle`, or null if it isn't running. What's running comes first, on the first page, wherever it would otherwise have been. |
+| `offset`, `hasMore` | Where the next page starts, and whether there is one |
+
+`join` and `history` work on any of these. For a session the helper doesn't know, `turn` is empty and the session's `status` is `ended` unless it's running somewhere.
+
+`send` to a session that isn't running runs `claude --resume` in a new tmux session named `venes-<id>`, in the session's folder, with the message as its first prompt. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside tmux is refused with `no_pane`, because resuming it would put two processes on one transcript.
 
 ### Sending during a turn
 
@@ -221,6 +236,10 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `request_pending`, `dialog_open` | `send` was refused because Enter would have answered an open prompt |
 | `request_closed` | That request was already answered |
 | `no_pane` | The session isn't in tmux, so it can be watched and answered but not typed into |
+| `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
+| `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
+| `no_tmux` | tmux isn't installed, so a stored session can't be resumed |
+| `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels through tmux. Later ones don't. |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
 | `nothing_to_remember` | `always` was sent for a request with no rule to save |
@@ -238,7 +257,9 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 
 - **`send` has a short race.** A prompt that opens in the last moment before Enter can still be answered by it. Two checks narrow this to a few milliseconds but can't remove it.
 - **A crashed session can leave a request open.** If Claude Code is killed outright, no event closes it, and answering has no effect.
-- **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated.
+- **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated. The SDK's `getSessionMessages()` doesn't have this problem, but it stops at the last compaction, which can be nearly all of a long session, so `history` reads the transcript.
+- **A session outside tmux can't be typed into.** It's listed, and if it started with the plugin it can be watched and answered. One started before the plugin was installed shows only what's in its transcript.
+- **A dialog can stop a resume.** If Claude Code asks something first, such as whether to continue a long conversation, `send` fails with `dialog_open`, and someone at the Mac has to answer it in the `venes-<id>` tmux session.
 - **A restart forgets most of a session's state.** Sessions in tmux stay listed, as idle until they're next heard from. The rest reappear on their next event. Events, held messages and open requests are lost.
 - **A release reaches everyone at once.** Pushing a new `version` to `main` installs it everywhere within about six hours. A push that doesn't change `version` reaches no one.
 - **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.

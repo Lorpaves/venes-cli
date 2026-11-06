@@ -135,6 +135,34 @@ export class SessionStore extends EventEmitter {
     throw new HelperError(matches.length ? 'ambiguous_session' : 'unknown_session', `No single session matches ${idOrPrefix}`);
   }
 
+  find(idOrPrefix) {
+    try {
+      return this.get(idOrPrefix);
+    } catch (error) {
+      if (error.code === 'unknown_session') return undefined;
+      throw error;
+    }
+  }
+
+  // A session about to be resumed, so that it can expect messages before its first hook.
+  reopen(id, { cwd, startedAt }) {
+    let s = this.#sessions.get(id);
+    if (!s) {
+      s = { ...blankSession(id), startedAt: startedAt ?? Date.now(), cwd };
+      this.#sessions.set(id, s);
+      this.#emit(s, 'session.discovered', { cwd });
+    } else if (s.status === 'ended') {
+      this.#setStatus(s, 'idle');
+    }
+    s.pane = undefined;
+    s.tmuxSocket = undefined;
+    s.lastEventAt = Date.now();
+    return s;
+  }
+
+  // Resuming it didn't work out.
+  abandon(s) { this.#endSession(s, 'resume_failed'); }
+
   pendingFor(session) {
     return [...this.#requests.values()].filter(r => r.sessionId === session.id);
   }

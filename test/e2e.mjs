@@ -389,6 +389,15 @@ function solidPng(size) {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', pixels), chunk('IEND', Buffer.alloc(0))]);
 }
 
+T('a_task_claude_stops_is_over', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Use the Bash tool with run_in_background set to true to run exactly: sleep 300 -- then use the TaskStop tool to stop that task, then reply with only the word STOPPED.');
+  await r.wait(e => e.kind === 'turn.end' && /STOPPED/.test(e.lastMessage ?? ''), 60000, 'turn.end STOPPED');
+  const tasks = r.events.filter(e => e.kind === 'background.task').map(e => e.task);
+  assert.ok(tasks.some(task => task.status === 'running'), 'it was running');
+  assert.equal(tasks.at(-1).status, 'killed');
+  assert.deepEqual(r.events.findLast(e => e.kind === 'turn.end').tasks, [], 'nothing is left running');
+});
+
 T('the_macs_login_picture_comes_small_or_not_at_all', { noHelper: false }, async r => {
   const picture = await r.client.request('avatar');
   if (!picture.data) return;

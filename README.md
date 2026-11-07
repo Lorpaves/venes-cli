@@ -272,7 +272,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `turn.interrupted`, `turn.error` | `error`, `details` |
 | `agent.start`, `agent.stop` | `agentId`, `agentType`, `parentToolUseId` (on start) |
 | `task.created`, `task.completed` | `taskId`, `subject`: items on Claude's task list |
-| `background.task` | `task`: a background command, agent or workflow changed |
+| `background.task` | `task`: a background command, agent or workflow changed. One Claude stopped is `killed`, and one still running when its session ended is `stopped` |
 | `task.notification` | `taskId`, `status`, `summary`: a background task finished and Claude is reading about it |
 | `notification` | `notificationType`, `message` |
 | `compact.start` | `trigger` |

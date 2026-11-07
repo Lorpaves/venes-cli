@@ -768,6 +768,59 @@ test('stop lists running tasks, and adds what only it knows', () => {
   assert.deepEqual(end.tasks.map(t => [t.id, t.type, t.name]), [['w1', 'workflow', 'review-changes']]);
 });
 
+const stopTask = (hook, input, { fails = false } = {}) => {
+  hook('PreToolUse', { tool_name: 'TaskStop', tool_input: input, tool_use_id: 'stop' });
+  hook(fails ? 'PostToolUseFailure' : 'PostToolUse', { tool_name: 'TaskStop', tool_input: input, tool_use_id: 'stop', tool_response: {}, error: 'no' });
+};
+
+test('a task Claude stops is over, though no notification will say so', () => {
+  const { store, hook, events } = setup();
+  launchShell(hook);
+  stopTask(hook, { task_id: 'b1' });
+  const task = store.task('a', 'b1');
+  assert.equal(task.status, 'killed');
+  assert.ok(task.finishedAt);
+  assert.equal(taskEvents(events).at(-1).status, 'killed');
+  hook('Stop', { background_tasks: [] });
+  assert.deepEqual(events.findLast(e => e.kind === 'turn.end').tasks, []);
+});
+
+test('the older tool that stopped a shell counts too', () => {
+  const { store, hook } = setup();
+  launchShell(hook);
+  hook('PreToolUse', { tool_name: 'KillShell', tool_input: { shell_id: 'b1' }, tool_use_id: 'kill' });
+  hook('PostToolUse', { tool_name: 'KillShell', tool_input: { shell_id: 'b1' }, tool_use_id: 'kill', tool_response: {} });
+  assert.equal(store.task('a', 'b1').status, 'killed');
+});
+
+test('a stop that failed leaves the task running', () => {
+  const { store, hook } = setup();
+  launchShell(hook);
+  stopTask(hook, { task_id: 'b1' }, { fails: true });
+  assert.equal(store.task('a', 'b1').status, 'running');
+});
+
+test('stopping a task that already finished, or one never seen, changes nothing', () => {
+  const { store, hook, events } = setup();
+  launchShell(hook);
+  hook('UserPromptSubmit', { prompt: finishedShell });
+  const before = taskEvents(events).length;
+  stopTask(hook, { task_id: 'b1' });
+  stopTask(hook, { task_id: 'nope' });
+  assert.equal(store.task('a', 'b1').status, 'completed');
+  assert.equal(taskEvents(events).length, before);
+  assert.throws(() => store.task('a', 'nope'), { code: 'unknown_task' });
+});
+
+test('a session that ends takes its running tasks with it', () => {
+  const { store, hook } = setup();
+  launchShell(hook);
+  hook('Stop', { background_tasks: [{ id: 'w1', type: 'workflow', status: 'running' }] });
+  hook('UserPromptSubmit', { prompt: '<task-notification>\n<task-id>old</task-id>\n<status>completed</status>\n</task-notification>' });
+  hook('SessionEnd', { reason: 'other' });
+  assert.deepEqual(['b1', 'w1', 'old'].map(id => store.task('a', id).status), ['stopped', 'stopped', 'completed']);
+});
+
 test('a finished task is not listed as running at the next stop', () => {
   const { hook, events } = setup();
   launchShell(hook);

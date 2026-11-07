@@ -69,6 +69,8 @@ function rememberableRules(suggestions = []) {
 const isCompacting = s => !!(s.compacting || s.compactWait);
 
 const isAtWork = status => status === 'running' || status === 'waiting';
+// The tools that stop a background task. KillShell is the older name.
+const STOP_TOOLS = new Set(['TaskStop', 'KillShell']);
 
 // Late pieces of the turn before can sit between its end and these.
 const startsTurn = e => e.kind === 'message.user' || e.kind === 'task.notification' || (e.kind === 'session.status' && isAtWork(e.status));
@@ -417,6 +419,10 @@ export class SessionStore extends EventEmitter {
 
   #endSession(s, reason) {
     this.#closeRequests(s, { decision: 'unknown', by: 'session_end' });
+    // What it left running goes with it, and nothing will say so.
+    for (const task of [...s.tasks.values()].filter(task => task.status === 'running')) {
+      this.#updateTask(s, task.id, { status: 'stopped' });
+    }
     const ended = { code: 'session_ended', message: 'This session has ended.' };
     for (const message of s.held.splice(0)) this.failSend(s, message, ended);
     this.#dropQueued(s, ended);
@@ -502,6 +508,13 @@ export class SessionStore extends EventEmitter {
     for (const { id, type, status, description, command, name, agent_type: agentType } of tasks) {
       this.#updateTask(s, id, { type, status: status ?? 'running', description, command, name, agentType });
     }
+  }
+
+  // A task Claude stops sends no notification, so its stop is the only word that it ended.
+  #trackStop(s, { name, input }) {
+    if (!STOP_TOOLS.has(name)) return;
+    const id = input?.task_id ?? input?.shell_id;
+    if (s.tasks.get(id)?.status === 'running') this.#updateTask(s, id, { status: 'killed' });
   }
 
   #trackLaunch(s, toolUseId, { input }, response) {
@@ -617,6 +630,7 @@ export class SessionStore extends EventEmitter {
     const request = [...this.#requests.values()].find(r => r.toolUseId === toolUseId);
     if (request) this.#closeRequest(request, { decision: data.isError ? 'unknown' : 'allow', by: 'terminal' });
     this.#trackLaunch(s, toolUseId, tool, data.response);
+    if (!data.isError) this.#trackStop(s, tool);
     const { response, ...rest } = data;
     this.#emit(s, 'tool.end', {
       toolUseId, name: tool.name, parentToolUseId: this.#parentOf(s, data.agentId), ...rest, ...(response !== undefined && { response: withoutImageData(response) }),

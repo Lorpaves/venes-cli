@@ -160,11 +160,11 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 | `commands` | `name`, `description`, `argumentHint` |
 | `models` | `value`, `displayName`, `description`, `resolvedModel`, `effortLevels`. Pass `value` to `configure`. `resolvedModel` is the name a session reports. `effortLevels` is empty for a model with no effort setting. |
 
-`configure` types `/model` and `/effort` into a running session, which takes effect at once, even during a turn. Claude Code stops to ask before these give up a warm prompt cache, and the helper says yes for the reader: a `PreModelSwitch` hook for the model, and a key press for the effort level, which has no hook. A switch made at the terminal still asks there.
+`configure` changes a running session for that session alone, the way a person would: it opens the model picker with Option+P, moves to the model and the effort level, and presses `s`, which [leaves the defaults for new sessions unchanged](https://code.claude.com/docs/en/model-config#setting-your-model). It takes effect at once, even during a turn, and anything being typed at the terminal stays where it is. Each key is checked on the screen before the next, and if the picker isn't as expected it's closed with nothing changed, and `configure` fails with `picker_failed`. `model` has to be one that `capabilities` lists.
 
-A command that opens a page in the terminal, like `/config` or `/usage`, can't be used from a client. The helper closes the page again, because the next message would otherwise act on it, and `send` fails with `terminal_only`. To see whether one does, the reply to any slash command comes about a second and a half later. A `/model` or `/effort` sent as a message gets its question answered too. What a local command prints isn't sent to clients.
+A command that opens a page in the terminal, like `/config` or `/usage`, can't be used from a client. The helper closes the page again, because the next message would otherwise act on it, and `send` fails with `terminal_only`. To see whether one does, the reply to any slash command comes about a second and a half later. A `/model` or `/effort` with a value, sent as a message, is a `configure`. What a local command prints isn't sent to clients.
 
-A session that isn't running keeps the choice for its next `send`, which passes it as `--model` and `--effort`. A session running outside tmux is refused with `no_pane`.
+A session that isn't running keeps the choice for its next `send`, which passes it as `--model` and `--effort`, so it stays with that session too. A session running outside tmux is refused with `no_pane`.
 
 A session reports its model and effort through `session.model`, `session.effort`, and `model` and `effort` in `sessions`. Effort is only known from the first hook that carries it, usually the end of the first turn. For a session that isn't running, `join` gives the model that last replied.
 
@@ -261,7 +261,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | tmux isn't installed, so a stored session can't be resumed |
 | `no_claude` | Claude Code isn't on the PATH, so `capabilities` has nothing to ask |
-| `bad_model`, `bad_effort` | `configure` was given something that isn't a model name or an effort level |
+| `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
+| `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels through tmux. Later ones don't. |
 | `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
 | `not_running` | There's nothing to interrupt |
@@ -284,8 +285,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 - **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated. The SDK's `getSessionMessages()` doesn't have this problem, but it stops at the last compaction, which can be nearly all of a long session, so `history` reads the transcript.
 - **A session outside tmux can't be typed into.** It's listed, and if it started with the plugin it can be watched and answered. One started before the plugin was installed shows only what's in its transcript.
 - **A dialog can stop a resume.** If Claude Code asks something first, such as whether to continue a long conversation, `send` fails with `dialog_open`, and someone at the Mac has to answer it in the `venes-<id>` tmux session.
-- **`configure` also changes the defaults for new sessions.** `/model` and `/effort` save themselves, apart from `/effort max`, and Claude Code has no typed form that applies to one session. Only a resumed session's choice stays with that session.
-- **The cache question is read off the screen.** If Claude Code rewords it, `configure` won't see it, and it stays open in the terminal until someone answers. Model changes don't depend on this, unless the session started before this version was installed.
+- **`configure` reads the picker off the screen.** Its keys are documented but what it draws isn't, so a Claude Code update could stop `configure` working. It would then fail with `picker_failed` and change nothing. A rebound `modelPicker:thisSessionOnly` or `chat:modelPicker` key does the same. Changing a session's effort also needs its model to be a row in the picker.
 - **A restart forgets most of a session's state.** Sessions in tmux stay listed, as idle until they're next heard from. The rest reappear on their next event. Events, held messages and open requests are lost.
 - **A release reaches everyone at once.** Pushing a new `version` to `main` installs it everywhere within about six hours. A push that doesn't change `version` reaches no one.
 - **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.
@@ -299,7 +299,7 @@ npm test                                     # unit tests, no Claude needed
 VENES_E2E_WS=/abs/workspace npm run e2e      # real Claude Code, in an isolated tmux
 ```
 
-The end-to-end suite loads this folder with `--plugin-dir`, so nothing gets installed, and it uses a small amount of model usage. The cases that change a model write to `~/.claude/settings.json`, as `/model` does, and put it back afterwards. Set `VENES_E2E_SSH=1` to add a case that goes through real SSH to this Mac, which needs key login to `localhost`.
+The end-to-end suite loads this folder with `--plugin-dir`, so nothing gets installed, and it uses a small amount of model usage. A few cases use `/model` at the terminal, which writes to `~/.claude/settings.json`, and they put it back afterwards. Set `VENES_E2E_SSH=1` to add a case that goes through real SSH to this Mac, which needs key login to `localhost`.
 
 ## License
 

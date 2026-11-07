@@ -24,9 +24,6 @@ const COMPACT_LIMIT_MS = 30 * 60_000;
 // Stop can fire before the turn's last words reach the transcript.
 const TRANSCRIPT_SETTLE_MS = 2000;
 const ENDS_TURN = new Set(['turn.end', 'turn.interrupted', 'turn.error', 'session.ended']);
-// Long enough for a command typed into a busy session to reach its hook.
-const MODEL_SWITCH_WINDOW_MS = 10_000;
-const ALLOW_MODEL_SWITCH = { hookSpecificOutput: { hookEventName: 'PreModelSwitch', permissionDecision: 'allow' } };
 
 export class HelperError extends Error {
   constructor(code, message, details) {
@@ -186,11 +183,6 @@ export class SessionStore extends EventEmitter {
     s.echoes = s.echoes.filter(echo => echo.clientId !== clientId);
   }
 
-  // The next switch is a reader's, who can't answer what the terminal would ask about it.
-  expectModelSwitch(s, now = Date.now()) {
-    s.modelSwitchDeadline = now + MODEL_SWITCH_WINDOW_MS;
-  }
-
   hold(s, message) { s.held.push(message); }
 
   // The message that can go out now, if any.
@@ -239,11 +231,6 @@ export class SessionStore extends EventEmitter {
         s.model = ev.model ?? (ev.source === 'resume' ? undefined : s.model);
         this.#emit(s, 'session.started', { source: ev.source, model: ev.model, cwd: s.cwd });
         break;
-      case 'PreModelSwitch': {
-        const isExpected = Date.now() < s.modelSwitchDeadline;
-        s.modelSwitchDeadline = undefined;
-        return isExpected ? { decision: ALLOW_MODEL_SWITCH } : undefined;
-      }
       case 'PostModelSwitch':
         if (ev.to_model) this.#setModel(s, ev.to_model);
         break;

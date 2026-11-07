@@ -23,17 +23,6 @@
         ]
       }
     ],
-    "PreModelSwitch": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" fast",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
     "PostModelSwitch": [
       {
         "hooks": [

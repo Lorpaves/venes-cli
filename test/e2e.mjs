@@ -736,7 +736,7 @@ function keepingDefaults(fn) {
   };
 }
 
-T('a_reader_can_change_the_model_and_effort', {}, keepingDefaults(async r => {
+T('a_reader_can_change_the_model_and_effort', {}, keepingDefaults(async (r, before) => {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
   const { id, model } = await r.session();
@@ -750,27 +750,47 @@ T('a_reader_can_change_the_model_and_effort', {}, keepingDefaults(async r => {
   assert.ok(!(await r.client.request('sessions')).sessions.some(session => session.id !== id && session.status !== 'ended'), 'asking leaves no session behind');
 
   await assert.rejects(r.client.request('configure', { sessionId: id, model: 'two words' }), { code: 'bad_model' });
+  await assert.rejects(r.client.request('configure', { sessionId: id, model: 'not-on-offer' }), { code: 'bad_model' });
   await assert.rejects(r.client.request('configure', { sessionId: id, effort: 'extreme' }), { code: 'bad_effort' });
 
   r.mark();
   await r.client.request('configure', { sessionId: id, model: 'sonnet' });
   assert.equal((await r.kind('session.model', 5000)).model, sonnet.resolvedModel);
-  await r.waitForPane(/Set model to Sonnet/, 5000);
+  await r.waitForPane(/for this session only/, 5000);
 
   await r.client.request('configure', { sessionId: id, effort: 'low' });
-  await r.waitForPane(/Set effort level to low/, 5000);
   await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
   await r.wait(e => e.kind === 'session.effort' && e.effort === 'low', 30000, 'session.effort low');
   await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'turn.end AFTER');
 
-  const session = await r.session();
-  assert.deepEqual([session.model, session.effort], [sonnet.resolvedModel, 'low']);
-  assert.deepEqual(r.events.filter(e => e.kind === 'message.user').map(e => e.text), ['Reply with only the word AFTER.'], 'none of it shows as a message');
+  r.mark();
+  await r.client.request('configure', { sessionId: id, model: 'haiku', effort: 'high' });
+  await r.wait(e => e.kind === 'session.model' && e.model === models.find(option => option.value === 'haiku').resolvedModel, 5000, 'session.model haiku');
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word THIRD.' });
+  await r.wait(e => e.kind === 'session.effort' && e.effort === 'high', 30000, 'session.effort high');
+  await r.wait(e => e.kind === 'turn.end' && /THIRD/.test(e.lastMessage), 30000, 'turn.end THIRD');
+
+  assert.deepEqual(readDefaults(), before, 'all of it for this session alone');
+  assert.deepEqual(r.events.filter(e => e.kind === 'message.user').map(e => e.text), ['Reply with only the word THIRD.'], 'none of it shows as a message');
   const { items } = await r.client.request('history', { sessionId: id, limit: 50 });
   assert.ok(!items.some(item => /^\/(model|effort)/.test(item.text ?? '')), 'or in the history');
 }));
 
-T('a_change_during_a_turn_applies_at_once', { mode: 'bypassPermissions' }, keepingDefaults(async r => {
+T('a_row_that_starts_out_of_sight_can_be_chosen', {}, keepingDefaults(async (r, before) => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  const { models } = await r.client.request('capabilities', { sessionId: id });
+  r.mark();
+  await r.client.request('configure', { sessionId: id, model: models.at(-1).value });
+  assert.equal((await r.kind('session.model', 5000)).model, models.at(-1).resolvedModel);
+  r.mark();
+  await r.client.request('configure', { sessionId: id, model: 'sonnet' });
+  assert.equal((await r.kind('session.model', 5000)).model, models.find(option => option.value === 'sonnet').resolvedModel);
+  assert.deepEqual(readDefaults(), before);
+}));
+
+T('a_change_during_a_turn_applies_at_once', { mode: 'bypassPermissions' }, keepingDefaults(async (r, before) => {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
   const { id } = await r.session();
@@ -781,16 +801,40 @@ T('a_change_during_a_turn_applies_at_once', { mode: 'bypassPermissions' }, keepi
   await r.kind('session.model', 5000);
   assert.equal((await r.session()).status, 'running', 'without waiting for the turn to end');
   await r.wait(e => e.kind === 'turn.end' && /SLEPT/.test(e.lastMessage), 45000, 'turn.end SLEPT');
+  assert.deepEqual(readDefaults(), before);
 }));
 
-T('a_question_about_the_cache_is_answered_for_a_reader', { model: 'claude-sonnet-5' }, keepingDefaults(async r => {
+T('a_warm_cache_doesnt_stop_a_change', { model: 'claude-sonnet-5' }, keepingDefaults(async (r, before) => {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
   const { id } = await r.session();
   await r.client.request('configure', { sessionId: id, effort: 'low' });
-  await r.waitForPane(/Set effort level to low/, 5000);
   await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
   await r.wait(e => e.kind === 'session.effort' && e.effort === 'low', 30000, 'session.effort low');
+  assert.deepEqual(readDefaults(), before);
+}));
+
+T('a_message_sent_with_a_change_waits_for_it', {}, keepingDefaults(async (r, before) => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  await Promise.all([
+    r.client.request('configure', { sessionId: id, model: 'sonnet', effort: 'low' }),
+    r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' }),
+  ]);
+  await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'turn.end AFTER');
+  assert.deepEqual(readDefaults(), before, 'its Enter never reached the picker');
+}));
+
+T('a_draft_at_the_terminal_survives_a_change', {}, keepingDefaults(async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  tmux('send-keys', '-t', 'run', '-l', 'half a thought');
+  await delay(300);
+  await r.client.request('configure', { sessionId: id, effort: 'low' });
+  await r.waitForPane(/half a thought/, 3000);
+  r.key('C-u');
 }));
 
 T('a_page_opened_from_here_is_closed_again', {}, async r => {
@@ -807,12 +851,15 @@ T('a_page_opened_from_here_is_closed_again', {}, async r => {
   assert.equal(fs.readFileSync(USER_SETTINGS, 'utf8'), before, 'what was typed next reached Claude, and no setting');
 });
 
-T('a_model_typed_as_a_message_goes_through_too', {}, keepingDefaults(async r => {
+T('a_change_typed_as_a_message_is_for_this_session_too', {}, keepingDefaults(async (r, before) => {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
   const { id } = await r.session();
   await r.client.request('send', { sessionId: id, text: '/model sonnet' });
   await r.wait(e => e.kind === 'session.model', 5000, 'session.model');
+  await r.client.request('send', { sessionId: id, text: '/effort low' });
+  await assert.rejects(r.client.request('send', { sessionId: id, text: '/model not-on-offer' }), { code: 'bad_model' });
+  assert.deepEqual(readDefaults(), before);
 }));
 
 T('a_switch_made_at_the_terminal_still_asks_there', {}, keepingDefaults(async r => {

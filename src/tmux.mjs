@@ -42,9 +42,10 @@ async function tmux(socket, args, input) {
   return stdout;
 }
 
-const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
-const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
-const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-t', pane]);
+export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
+export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
+export const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-t', pane]);
+export const pressKey = ({ pane, tmuxSocket }, key) => tmux(tmuxSocket, ['send-keys', '-t', pane, key]);
 
 export function showsDialog(screen) {
   const bottom = bottomOf(screen);
@@ -55,12 +56,12 @@ export async function hasOpenDialog(session) {
   return showsDialog(await readScreen(session));
 }
 
-function refuseIfRequested(isBlocked) {
+export function refuseIfRequested(isBlocked) {
   const pending = isBlocked();
   if (pending) throw new HelperError('request_pending', 'Answer the open request first.', { requestId: pending.id });
 }
 
-async function refuseIfBlocked(session, isBlocked) {
+export async function refuseIfBlocked(session, isBlocked) {
   refuseIfRequested(isBlocked);
   if (await hasOpenDialog(session)) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
 }
@@ -76,14 +77,15 @@ export async function sendText(session, text, isBlocked) {
   await tmux(tmuxSocket, ['paste-buffer', '-p', '-d', '-b', 'venes', '-t', pane]);
   await pause(PASTE_SETTLE_MS);
   await refuseIfBlocked(session, isBlocked);
-  await tmux(tmuxSocket, ['send-keys', '-t', pane, 'Enter']);
+  await pressKey(session, 'Enter');
 }
 
-async function closePage(session, settle) {
+// Only while a footer says Esc will close something: with nothing open it'd interrupt the turn.
+export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {
   for (let press = 0; press < PAGE_CLOSE_PRESSES; press++) {
+    if (!PAGE_FOOTER.test(bottomOf(await readScreen(session)))) return;
     await sendEscape(session);
     await pause(settle);
-    if (!PAGE_FOOTER.test(bottomOf(await readScreen(session)))) return;
   }
 }
 
@@ -104,7 +106,7 @@ export async function settleCommand(session, isBlocked, {
       await pause(requestSettle);
       if (isBlocked()) return;
       if (isQuestion) {
-        await tmux(session.tmuxSocket, ['send-keys', '-t', session.pane, 'Enter']);
+        await pressKey(session, 'Enter');
         return;
       }
       await closePage(session, pageSettle);
@@ -136,9 +138,7 @@ export async function isSessionOpen(name, tmuxSocket) {
   }
 }
 
-export async function sendEscape({ pane, tmuxSocket }) {
-  await tmux(tmuxSocket, ['send-keys', '-t', pane, 'Escape']);
-}
+export const sendEscape = session => pressKey(session, 'Escape');
 
 function isClaude(command) {
   return path.basename(command) === 'claude';

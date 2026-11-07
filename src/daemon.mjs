@@ -9,8 +9,9 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
-import { configureSession } from './configure.mjs';
+import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { Library } from './library.mjs';
+import { switchInPicker } from './picker.mjs';
 import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
@@ -92,7 +93,9 @@ function createClientServer(store, checkForUpdate, library) {
   const subscribers = new Set();
   const write = (socket, message) => socket.write(`${JSON.stringify(message)}\n`);
 
-  const deliver = async (session, { clientId, text }) => {
+  const typing = oneAtATime();
+
+  const deliver = (session, { clientId, text }) => typing(session.id, async () => {
     if (clientId) store.expectEcho(session, clientId, text);
     const isBlocked = () => store.pendingFor(session)[0];
     try {
@@ -102,7 +105,7 @@ function createClientServer(store, checkForUpdate, library) {
       if (clientId) store.forgetEcho(session, clientId);
       throw error;
     }
-  };
+  });
 
   // Checked on a timer, not when a turn ends: a local command or a failed delivery leaves
   // the status where it was, so the messages behind it would have nothing to wake them.
@@ -146,8 +149,8 @@ function createClientServer(store, checkForUpdate, library) {
   // A change waits for a resume on its way, or it would find a session with no pane yet.
   const configure = async msg => {
     await resuming.get(msg.sessionId)?.catch(() => {});
-    const tell = (session, text) => deliver(session, { text });
-    return configureSession({ store, library, sessionWithPane, tell, chosenForResume }, msg);
+    const switchTo = (session, change) => typing(session.id, () => switchInPicker(session, change, () => store.pendingFor(session)[0]));
+    return configureSession({ store, library, sessionWithPane, switchTo, chosenForResume }, msg);
   };
 
   const joinStored = async ({ sessionId, limit }) => {
@@ -214,6 +217,11 @@ function createClientServer(store, checkForUpdate, library) {
     send: async msg => {
       if (typeof msg.text !== 'string' || !msg.text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
       if (msg.lane !== undefined && msg.lane !== 'next' && msg.lane !== 'later') throw new HelperError('bad_lane', `Unknown lane: ${msg.lane}`);
+      const change = readSwitch(msg.text);
+      if (change) {
+        await configure({ sessionId: msg.sessionId, ...change });
+        return { queued: false };
+      }
       await resuming.get(msg.sessionId)?.catch(() => {});
       const known = store.find(msg.sessionId);
       if (!known || known.status === 'ended') return resume(msg);

@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { hasOpenDialog, settleCommand, showsDialog } from '../../src/tmux.mjs';
+import { hasTmux, startPane } from '../pane.mjs';
+import { closePage, hasOpenDialog, settleCommand, showsDialog } from '../../src/tmux.mjs';
 
 const FAST = { limit: 400, check: 10, requestSettle: 20, pageSettle: 60 };
 const screen = (...lines) => [...lines, '────', '❯ ', '────', '  ⏸ manual mode on · ? for shortcuts', '', ''].join('\n');
@@ -38,14 +35,10 @@ test('what has scrolled well up the screen no longer counts', () => {
   assert.ok(!showsDialog(screen('  ❯ 1. Yes, switch to low', ...Array(20).fill('⏺ more words'))));
 });
 
-const hasTmux = (() => {
-  try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true; } catch { return false; }
-})();
-
 // Shows each screen in turn, moving on at each Esc, and writes down every key.
 const PANE = `
 const fs = require('node:fs');
-const [screens, log] = [JSON.parse(process.argv[2]), process.argv[3]];
+const [log, screens] = [process.argv[2], JSON.parse(process.argv[3])];
 let index = 0;
 const show = () => process.stdout.write('\\x1b[2J\\x1b[H' + screens[index] + '\\n');
 process.stdin.setRawMode(true);
@@ -57,28 +50,7 @@ show();
 fs.writeFileSync(log + '.ready', '');
 `;
 
-async function paneShowing(t, ...screens) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-tmux-'));
-  const tmuxSocket = path.join(dir, 's');
-  const log = path.join(dir, 'keys');
-  const script = path.join(dir, 'pane.cjs');
-  fs.writeFileSync(script, PANE);
-  fs.writeFileSync(log, '');
-  const tmux = (...args) => execFileSync('tmux', ['-S', tmuxSocket, '-f', '/dev/null', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  const pane = tmux('new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '80', '-y', '24', process.execPath, script, JSON.stringify(screens), log).trim();
-  t.after(() => {
-    try { tmux('kill-server'); } catch { /* it had already gone */ }
-    fs.rmSync(dir, { recursive: true });
-  });
-  for (let tries = 0; !fs.existsSync(`${log}.ready`); tries++) {
-    assert.ok(tries < 300, 'the pane never started');
-    await pause(10);
-  }
-  await pause(50);
-  return { session: { pane, tmuxSocket }, keys: async () => { await pause(80); return fs.readFileSync(log, 'utf8'); } };
-}
-
-const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
+const paneShowing = (t, ...screens) => startPane(t, PANE, screens);
 const ENTER = '0d';
 const ESC = '1b';
 const nothingOpen = () => undefined;
@@ -117,6 +89,12 @@ test('a sentence about Esc stops anything being typed, but nothing gets pressed 
 test('a command that takes its pane with it has finished, not failed', { skip: !hasTmux }, async t => {
   const { session } = await paneShowing(t, 'plain');
   await settleCommand({ ...session, pane: '%99' }, nothingOpen, FAST);
+});
+
+test('with nothing open, closing presses nothing, because Esc would interrupt the turn', { skip: !hasTmux }, async t => {
+  const { session, keys } = await paneShowing(t, 'plain');
+  await closePage(session, 20);
+  assert.equal(await keys(), '');
 });
 
 test('a page that won\'t close isn\'t pressed for ever', { skip: !hasTmux }, async t => {

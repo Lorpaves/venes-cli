@@ -923,34 +923,10 @@ test('a subagent\'s effort is its own', () => {
   assert.equal(store.get('a').effort, 'high');
 });
 
-const ALLOWED = { hookSpecificOutput: { hookEventName: 'PreModelSwitch', permissionDecision: 'allow' } };
-
-test('a switch someone makes at the terminal gets no answer, so it asks there as usual', () => {
+test('a switch about to happen gets no answer, so Claude Code does what it would anyway', () => {
   const { hook } = setup();
   hook('SessionStart', {});
   assert.equal(hook('PreModelSwitch', { to_model: 'claude-sonnet-5-5' }), undefined);
-});
-
-test('a switch a reader asked for goes through, once', () => {
-  const { store, hook } = setup();
-  hook('SessionStart', {});
-  store.expectModelSwitch(store.get('a'));
-  assert.deepEqual(hook('PreModelSwitch', { to_model: 'claude-sonnet-5-5' }).decision, ALLOWED);
-  assert.equal(hook('PreModelSwitch', { to_model: 'claude-opus-5-5' }), undefined);
-});
-
-test('a switch that never came doesn\'t leave the next one unasked for long', () => {
-  const { store, hook } = setup();
-  hook('SessionStart', {});
-  store.expectModelSwitch(store.get('a'), Date.now() - 60_000);
-  assert.equal(hook('PreModelSwitch', { to_model: 'claude-sonnet-5-5' }), undefined);
-});
-
-test('one session\'s expected switch says nothing about another\'s', () => {
-  const { store, hook } = setup();
-  hook('SessionStart', {});
-  store.expectModelSwitch(store.get('a'));
-  assert.equal(hook('PreModelSwitch', { session_id: 'b', to_model: 'claude-sonnet-5-5' }), undefined);
 });
 
 const replyFrom = model => ({ type: 'assistant', message: { model, content: [{ type: 'text', text: 'hi' }] } });

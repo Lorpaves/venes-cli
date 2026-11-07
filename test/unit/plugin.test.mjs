@@ -51,9 +51,9 @@ test('only PermissionRequest waits, and every hook runs the bundled script', () 
   assert.ok(fs.statSync(hookScript).mode & 0o100);
 });
 
-test('a model switch is heard before and after, without waiting on the helper for long', () => {
+test('a model switch is heard, without waiting on the helper for long', () => {
   const { hooks } = readJson('hooks/hooks.json');
-  for (const event of ['PreModelSwitch', 'PostModelSwitch']) assert.ok(hooks[event][0].hooks[0].command.endsWith(' fast'), event);
+  assert.ok(hooks.PostModelSwitch[0].hooks[0].command.endsWith(' fast'));
 });
 
 test('the marketplace lists this plugin from the repository root', () => {

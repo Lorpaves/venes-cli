@@ -233,8 +233,8 @@ function createClientServer(store, checkForUpdate, library) {
       const known = store.find(msg.sessionId);
       if (!known || known.status === 'ended') return resume(msg);
       const session = sessionWithPane(msg.sessionId);
-      const message = { clientId: msg.clientId, text: msg.text };
-      if (msg.lane === 'later' && store.isBusy(session)) {
+      const message = { clientId: msg.clientId, text: msg.text, lane: msg.lane ?? 'next' };
+      if (store.mustHold(session, msg.lane)) {
         store.hold(session, message);
         return { queued: true };
       }

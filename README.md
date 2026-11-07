@@ -202,12 +202,12 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 
 | `lane` | Effect |
 |---|---|
-| `next`, or none | Typed now. Claude reads it at its next step, and the echo comes straight away. |
+| `next`, or none | Typed now, or as soon as an open request is answered. Claude Code queues it, and Claude reads it when the tool calls running now finish, in the same turn. With none left to finish, it starts the next turn. |
 | `later` | Held by the helper until the turn ends, then typed. An idle session gets it at once. Only held messages can be cancelled, because a message in Claude Code's own queue can't be taken back on its own. |
 
 Held messages go out in order, each once the session is idle and any compaction has finished, including after an interrupted turn. If one can't be delivered, a `send.failed` event says why, and the next one still goes. They live in the helper's memory, so a restart loses them.
 
-`message.user` carries the `clientId` of the send it came from. A message typed in the terminal has none. Slash commands that Claude Code runs itself, such as `/compact`, fire no hook, so they never echo.
+`message.user` carries the `clientId` of the send it came from. A message typed in the terminal has none. For a message sent during a turn it comes when Claude reads it, not when it's typed, so a client can show it as waiting until then, as Claude Code does. If someone takes it back at the terminal, `send.failed` with `taken_back` comes instead. Slash commands that Claude Code runs itself, such as `/compact`, fire no hook, so they never echo.
 
 ### History
 

@@ -21,6 +21,13 @@ test('interrupts are recognised in both content shapes', () => {
   }), [{ type: 'interrupted' }]);
 });
 
+test('the queue says when a message typed during a turn was read or taken back', () => {
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'remove', content: 'more', reason: 'absorbed_mid_turn' }), [{ type: 'queueRead', text: 'more' }]);
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'dequeue' }), [{ type: 'queueRead', text: undefined }]);
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'popAll', content: 'more' }), [{ type: 'queueTakenBack' }]);
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'enqueue', content: 'more' }), []);
+});
+
 test('ordinary and unknown records produce no signal', () => {
   assert.deepEqual(signalsFrom({ type: 'user', message: { content: 'hello' } }), []);
   assert.deepEqual(signalsFrom({ type: 'assistant', message: { content: '[Request interrupted by user]' } }), []);

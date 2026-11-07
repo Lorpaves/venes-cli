@@ -211,6 +211,7 @@ test('a message typed in the terminal has no client id, and leaves the wait open
   hook('Stop', {});
   store.expectEcho(store.get('a'), 'c1', 'from the phone');
   hook('UserPromptSubmit', { prompt: 'from the terminal' });
+  hook('Stop', {});
   hook('UserPromptSubmit', { prompt: 'from the phone' });
   assert.deepEqual(userEvents(events).map(e => e.clientId), [undefined, 'c1']);
 });
@@ -221,8 +222,158 @@ test('identical messages echo in the order they were sent', () => {
   store.expectEcho(store.get('a'), 'c1', 'same');
   store.expectEcho(store.get('a'), 'c2', 'same');
   hook('UserPromptSubmit', { prompt: 'same' });
+  hook('Stop', {});
   hook('UserPromptSubmit', { prompt: 'same' });
   assert.deepEqual(userEvents(events).map(e => e.clientId), ['c1', 'c2']);
+});
+
+const queue = (store, operation, content) => store.handleTranscriptRecord('a', { type: 'queue-operation', operation, content });
+
+function working(options) {
+  const context = setup(options);
+  context.hook('UserPromptSubmit', { prompt: 'one' });
+  context.hook('PreToolUse', { tool_use_id: 't', ...bash });
+  return { ...context, session: context.store.get('a'), sent: () => userEvents(context.events).slice(1).map(e => e.text) };
+}
+
+test('a message typed during a turn joins the conversation when Claude reads it, not when it\'s typed', () => {
+  const { store, hook, events, session, sent } = working();
+  store.expectEcho(session, 'c1', 'more');
+  hook('UserPromptSubmit', { prompt: 'more' });
+  queue(store, 'enqueue', 'more');
+  assert.deepEqual(sent(), []);
+  hook('PostToolUse', { tool_use_id: 't', ...bash, tool_response: {} });
+  queue(store, 'remove', 'more');
+  assert.deepEqual(sent(), ['more']);
+  assert.equal(userEvents(events).at(-1).clientId, 'c1');
+  assert.ok(events.findIndex(e => e.kind === 'tool.end') < events.findIndex(e => e.text === 'more'), 'it comes after what Claude was doing');
+  assert.equal(session.status, 'running');
+});
+
+test('the list shows a queued message as the last prompt only once it\'s read', () => {
+  const { store, hook, session } = working();
+  hook('UserPromptSubmit', { prompt: 'more' });
+  assert.equal(session.lastPrompt, 'one');
+  queue(store, 'remove', 'more');
+  assert.equal(session.lastPrompt, 'more');
+});
+
+test('queued messages join in the order Claude reads them', () => {
+  const { store, hook, sent } = working();
+  hook('UserPromptSubmit', { prompt: 'a' });
+  hook('UserPromptSubmit', { prompt: 'b' });
+  queue(store, 'remove', 'b');
+  queue(store, 'remove', 'a');
+  assert.deepEqual(sent(), ['b', 'a']);
+});
+
+test('a record that says nothing of the text reads the oldest', () => {
+  const { store, hook, sent } = working();
+  hook('UserPromptSubmit', { prompt: 'a' });
+  hook('UserPromptSubmit', { prompt: 'b' });
+  queue(store, 'dequeue');
+  assert.deepEqual(sent(), ['a']);
+  queue(store, 'remove', '[Pasted text #1 +3 lines]');
+  assert.deepEqual(sent(), ['a', 'b']);
+});
+
+test('a finished task leaving the queue isn\'t a message being read', () => {
+  const { store, hook, sent } = working();
+  hook('UserPromptSubmit', { prompt: 'a' });
+  queue(store, 'remove', '<task-notification>\n<task-id>1</task-id>');
+  assert.deepEqual(sent(), []);
+});
+
+test('nothing queued, nothing to read', () => {
+  const { store, sent } = working();
+  queue(store, 'dequeue');
+  queue(store, 'remove', 'a');
+  assert.deepEqual(sent(), []);
+});
+
+test('what\'s queued when a turn ends starts the next one, one at a time', () => {
+  const { store, hook, events, session, sent } = working();
+  hook('UserPromptSubmit', { prompt: 'a' });
+  hook('UserPromptSubmit', { prompt: 'b' });
+  hook('Stop', {});
+  assert.deepEqual(sent(), ['a']);
+  assert.ok(events.findIndex(e => e.kind === 'turn.end') < events.findIndex(e => e.text === 'a'));
+  assert.equal(session.status, 'running', 'nothing else will say it\'s at work');
+  queue(store, 'dequeue');
+  assert.deepEqual(sent(), ['a', 'b'], 'the record that it was read changes nothing for the one already out');
+  hook('Stop', {});
+  assert.equal(session.status, 'idle');
+});
+
+test('a turn with nothing queued ends as usual', () => {
+  const { hook, session, sent } = working();
+  hook('Stop', {});
+  assert.deepEqual(sent(), []);
+  assert.equal(session.status, 'idle');
+});
+
+test('an interrupted turn hands on what\'s queued', () => {
+  const { store, hook, sent, session } = working();
+  hook('UserPromptSubmit', { prompt: 'a' });
+  store.handleTranscriptRecord('a', { type: 'user', message: { content: '[Request interrupted by user]' } });
+  assert.deepEqual(sent(), ['a']);
+  assert.equal(session.status, 'running');
+});
+
+test('a message taken back at the terminal never joins, and its send hears why', () => {
+  const { store, hook, events, session, sent } = working();
+  store.expectEcho(session, 'c1', 'mine');
+  hook('UserPromptSubmit', { prompt: 'mine' });
+  hook('UserPromptSubmit', { prompt: 'typed there' });
+  queue(store, 'popAll', 'mine');
+  hook('Stop', {});
+  assert.deepEqual(sent(), []);
+  const failures = events.filter(e => e.kind === 'send.failed');
+  assert.deepEqual(failures.map(e => [e.clientId, e.code]), [['c1', 'taken_back']], 'one typed at the terminal has no send to tell');
+  assert.equal(session.status, 'idle');
+});
+
+test('a session that ends takes what\'s queued with it', () => {
+  const { store, hook, events, session, sent } = working();
+  store.expectEcho(session, 'c1', 'mine');
+  hook('UserPromptSubmit', { prompt: 'mine' });
+  hook('SessionEnd', { reason: 'other' });
+  assert.deepEqual(sent(), []);
+  assert.equal(events.find(e => e.kind === 'send.failed').code, 'session_ended');
+});
+
+test('what has to wait depends on the lane', () => {
+  const { store, hook, session } = working();
+  assert.equal(store.mustHold(session, 'later'), true, 'a running turn');
+  assert.equal(store.mustHold(session, 'next'), false);
+  assert.equal(store.mustHold(session, undefined), false);
+  hook('PermissionRequest', bash);
+  assert.equal(store.mustHold(session, 'next'), true, 'Enter would answer the request');
+});
+
+test('nothing overtakes what\'s held', () => {
+  const { store, session } = working();
+  store.hold(session, { clientId: 'c1', text: 'first', lane: 'later' });
+  assert.equal(store.mustHold(session, 'next'), true);
+});
+
+test('held for a request, a message goes as soon as it\'s answered, while the turn runs', async () => {
+  const { store, hook, session } = working();
+  hook('PermissionRequest', bash);
+  store.hold(session, { clientId: 'c1', text: 'more', lane: 'next' });
+  assert.equal(store.nextHeld(session), undefined);
+  const [request] = store.pendingFor(session);
+  store.respond(request.id, { decision: 'allow' });
+  assert.equal(session.status, 'running');
+  assert.equal(store.nextHeld(session).text, 'more');
+});
+
+test('held for the end of the turn, a message stays until then', () => {
+  const { store, hook, session } = working();
+  store.hold(session, { clientId: 'c1', text: 'more', lane: 'later' });
+  assert.equal(store.nextHeld(session), undefined);
+  hook('Stop', {});
+  assert.equal(store.nextHeld(session).text, 'more');
 });
 
 test('a send that failed no longer claims a later message', () => {
@@ -739,6 +890,7 @@ test('a message sent during a turn stays inside it', () => {
   hook('UserPromptSubmit', { prompt: 'one' });
   hook('PreToolUse', { tool_use_id: 't', ...bash });
   hook('UserPromptSubmit', { prompt: 'and another thing' });
+  store.handleTranscriptRecord('a', { type: 'queue-operation', operation: 'remove', content: 'and another thing' });
   const turn = store.openTurn(store.get('a'));
   assert.equal(turn[0].text, 'one');
   assert.equal(turn.filter(e => e.kind === 'message.user').length, 2);
@@ -827,6 +979,7 @@ test('a turn that started before the log did is replayed from what is left', () 
   }
   assert.deepEqual(store.openTurn(store.get('a')), [], 'nothing left says where it began, so history stands alone');
   hook('UserPromptSubmit', { prompt: 'still going' });
+  store.handleTranscriptRecord('a', { type: 'queue-operation', operation: 'remove', content: 'still going' });
   assert.equal(store.openTurn(store.get('a'))[0].text, 'still going');
 });
 

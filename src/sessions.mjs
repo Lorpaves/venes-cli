@@ -71,7 +71,7 @@ const startsTurn = e => e.kind === 'message.user' || e.kind === 'task.notificati
 
 function blankSession(id) {
   return {
-    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], backgroundTasks: 0,
+    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0,
   };
 }
 
@@ -198,9 +198,17 @@ export class SessionStore extends EventEmitter {
 
   hold(s, message) { s.held.push(message); }
 
+  // `later` waits for the turn to end. Anything else waits only for what's ahead of it, and for an
+  // open request, which Enter would answer.
+  mustHold(s, lane) {
+    return lane === 'later' ? this.isBusy(s) : s.held.length > 0 || this.pendingFor(s).length > 0;
+  }
+
   // The message that can go out now, if any.
   nextHeld(s, now = Date.now()) {
-    if (!s.held.length || s.status !== 'idle' || isCompacting(s)) return undefined;
+    const [first] = s.held;
+    if (!first || isCompacting(s)) return undefined;
+    if (first.lane === 'next' ? this.pendingFor(s).length > 0 : s.status !== 'idle') return undefined;
     if (now - (s.lastHeldAt ?? 0) < HELD_SETTLE_MS) return undefined;
     s.lastHeldAt = now;
     return s.held.shift();
@@ -253,6 +261,8 @@ export class SessionStore extends EventEmitter {
       case 'UserPromptSubmit':
         // A finished background task re-enters as a synthetic prompt; it isn't the user talking.
         if (ev.prompt?.startsWith('<task-notification>')) this.#onTaskNotification(s, ev.prompt);
+        // This runs as a message is typed. During a turn, Claude only reads it later.
+        else if (isAtWork(s.status)) s.queued.push(unwrapPasted(ev.prompt ?? ''));
         else this.#onUserMessage(s, unwrapPasted(ev.prompt ?? ''));
         this.#setStatus(s, 'running');
         break;
@@ -288,6 +298,7 @@ export class SessionStore extends EventEmitter {
           lastMessage: ev.last_assistant_message, backgroundTasks: s.backgroundTasks,
           tasks: [...s.tasks.values()].filter(task => task.status === 'running').map(taskView),
         });
+        this.#startQueued(s);
         break;
       case 'StopFailure':
         this.#setStatus(s, 'idle');
@@ -335,6 +346,8 @@ export class SessionStore extends EventEmitter {
       else if (type === 'localOutput') this.#onLocalOutput(s, signal);
       else if (type === 'model') this.#onModelReplied(s, signal);
       else if (type === 'refusal') this.#emit(s, 'model.refusal', { ...signal, prompt: s.lastPrompt });
+      else if (type === 'queueRead') this.#onQueueRead(s, signal.text);
+      else if (type === 'queueTakenBack') this.#dropQueued(s, { code: 'taken_back', message: 'Taken back in the terminal.' });
     }
   }
 
@@ -389,18 +402,44 @@ export class SessionStore extends EventEmitter {
 
   #endSession(s, reason) {
     this.#closeRequests(s, { decision: 'unknown', by: 'session_end' });
-    for (const message of s.held.splice(0)) {
-      this.failSend(s, message, { code: 'session_ended', message: 'This session has ended.' });
-    }
+    const ended = { code: 'session_ended', message: 'This session has ended.' };
+    for (const message of s.held.splice(0)) this.failSend(s, message, ended);
+    this.#dropQueued(s, ended);
     this.#setStatus(s, 'ended');
     this.#emit(s, 'session.ended', { reason });
   }
 
+  #takeEcho(s, text) {
+    const position = s.echoes.findIndex(echo => echo.text === normalized(text));
+    return position < 0 ? undefined : s.echoes.splice(position, 1)[0].clientId;
+  }
+
   #onUserMessage(s, text) {
     s.lastPrompt = text;
-    const position = s.echoes.findIndex(echo => echo.text === normalized(text));
-    const clientId = position < 0 ? undefined : s.echoes.splice(position, 1)[0].clientId;
-    this.#emit(s, 'message.user', { text, clientId });
+    this.#emit(s, 'message.user', { text, clientId: this.#takeEcho(s, text) });
+  }
+
+  // Claude has a queued message, which `text` may not name. It joins the conversation here, where
+  // the transcript will have it too.
+  #onQueueRead(s, text = '') {
+    if (text.startsWith('<task-notification>')) return;
+    const position = Math.max(s.queued.findIndex(queued => normalized(queued) === normalized(text)), 0);
+    const [message] = s.queued.splice(position, 1);
+    if (message !== undefined) this.#onUserMessage(s, message);
+  }
+
+  // What's queued when a turn ends goes out by itself, as the next turn, with no hook to say so.
+  #startQueued(s) {
+    if (!s.queued.length) return;
+    this.#onUserMessage(s, s.queued.shift());
+    this.#setStatus(s, 'running');
+  }
+
+  #dropQueued(s, error) {
+    for (const text of s.queued.splice(0)) {
+      const clientId = this.#takeEcho(s, text);
+      if (clientId) this.failSend(s, { clientId }, error);
+    }
   }
 
   #onTaskNotification(s, prompt) {
@@ -584,6 +623,7 @@ export class SessionStore extends EventEmitter {
     for (const id of [...s.tools.keys()]) this.#endTool(s, id, { isError: true, interrupted: true });
     this.#setStatus(s, 'idle');
     this.#emit(s, 'turn.interrupted', {});
+    this.#startQueued(s);
   }
 
   #closeRequests(s, result, filter = () => true) {

@@ -323,13 +323,13 @@ T('send_messages', {}, async r => {
   }
 });
 
-T('send_is_blocked_during_a_request', {}, async r => {
+T('send_is_held_during_a_request', {}, async r => {
   await r.type(TOUCH('guard'));
   const request = await r.request('permission');
   const { id } = await r.session();
-  await assert.rejects(r.client.request('send', { sessionId: id, text: 'stray message' }), { code: 'request_pending' });
+  assert.equal((await r.client.request('send', { sessionId: id, text: 'stray message' })).queued, true);
   await delay(1500);
-  assert.ok(!exists('e2e-guard.txt'), 'the blocked send must not approve the tool');
+  assert.ok(!exists('e2e-guard.txt'), 'the held send must not approve the tool');
   r.denyEverything('Denied from the phone.');
   await r.closed(request.id);
   await r.turnEnd();
@@ -439,8 +439,8 @@ T('send_during_a_turn', { mode: 'bypassPermissions' }, async r => {
   const { id } = await r.session();
 
   assert.equal((await r.client.request('send', { sessionId: id, text: 'Also say the word NEXT.', clientId: 'next', lane: 'next' })).queued, false);
-  await echoed('next');
-  assert.ok(!r.events.some(e => e.kind === 'tool.end'), 'the next lane reaches Claude while the tool still runs');
+  await delay(1500);
+  assert.ok(!r.events.some(e => e.clientId === 'next'), 'it waits in Claude Code\'s queue while the tool runs');
 
   const later = { sessionId: id, lane: 'later' };
   assert.equal((await r.client.request('send', { ...later, text: 'Reply with only the word LATER.', clientId: 'later' })).queued, true);
@@ -448,12 +448,53 @@ T('send_during_a_turn', { mode: 'bypassPermissions' }, async r => {
   assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'drop' })).cancelled, true);
   assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'drop' })).cancelled, false);
 
+  await r.kind('tool.end', 20000);
+  await echoed('next');
+  assert.ok(!r.events.some(e => e.kind === 'turn.end'), 'the next lane is read in the same turn, once the tool is done');
+
   await r.turnEnd(40000);
   assert.ok(!r.events.some(e => e.clientId === 'later'), 'a held message waits for the turn to end');
   await echoed('later');
   await r.wait(e => e.kind === 'turn.end' && /LATER/.test(e.lastMessage), 30000, 'the held turn');
   assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'later' })).cancelled, false, 'too late to cancel');
   assert.ok(!r.events.some(e => e.kind === 'message.user' && /DROPPED/.test(e.text)), 'a cancelled message never reaches Claude');
+});
+
+T('a_message_with_no_tool_to_wait_for_starts_the_next_turn', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Write a 400 word story about a lighthouse. Use no tools.');
+  await r.kind('session.status', 30000);
+  const { id } = await r.session();
+  await delay(800);
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word QUEUED.', clientId: 'q', lane: 'next' });
+  await r.wait(e => e.clientId === 'q', 40000, 'the echo');
+  assert.ok(r.events.some(e => e.kind === 'turn.end'), 'it comes after the turn it waited for');
+  assert.equal((await r.session()).status, 'running', 'and the session is at work on it');
+  await r.wait(e => e.kind === 'turn.end' && /QUEUED/.test(e.lastMessage ?? ''), 30000, 'the turn it started');
+});
+
+T('a_message_taken_back_at_the_terminal_never_joins_the_conversation', { mode: 'bypassPermissions' }, async r => {
+  await r.type(SLEEP(8, 'FIRST'));
+  await r.kind('tool.start', 30000);
+  const { id } = await r.session();
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word GONE.', clientId: 'q', lane: 'next' });
+  await delay(1000);
+  r.key('Up');
+  const failed = await r.wait(e => e.kind === 'send.failed' && e.clientId === 'q', 8000, 'send.failed');
+  assert.equal(failed.code, 'taken_back');
+  await r.turnEnd(40000);
+  assert.ok(!r.events.some(e => e.kind === 'message.user' && /GONE/.test(e.text)));
+});
+
+T('a_message_during_a_request_waits_for_the_answer', {}, async r => {
+  await r.type(TOUCH('during'));
+  const request = await r.request('permission');
+  const { id } = await r.session();
+  const { queued } = await r.client.request('send', { sessionId: id, text: 'Also say the word WAITED.', clientId: 'q', lane: 'next' });
+  assert.equal(queued, true, 'Enter would have answered the request');
+  await delay(1500);
+  assert.ok(r.events.some(e => e.kind === 'request.opened') && !r.events.some(e => e.kind === 'request.closed'), 'the request is still open');
+  await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+  await r.wait(e => e.clientId === 'q', 30000, 'the echo');
 });
 
 T('held_message_follows_an_interrupt', { mode: 'bypassPermissions' }, async r => {
@@ -1050,11 +1091,11 @@ if (hasRex) {
     await r.kind('turn.interrupted', 15000);
   });
 
-  T('in_rex_a_prompt_on_the_screen_stops_a_message', { rex: true }, async r => {
+  T('in_rex_a_prompt_on_the_screen_holds_a_message', { rex: true }, async r => {
     await r.type(TOUCH('rex'));
     const request = await r.request('permission');
     const { id } = await r.session();
-    await assert.rejects(r.client.request('send', { sessionId: id, text: 'stray message' }), { code: 'request_pending' });
+    assert.equal((await r.client.request('send', { sessionId: id, text: 'stray message' })).queued, true);
     await r.client.request('respond', { requestId: request.id, decision: 'allow' });
     await r.turnEnd();
     assert.ok(exists('e2e-rex.txt'), 'answered from here, in a session in Rex');

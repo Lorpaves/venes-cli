@@ -92,6 +92,13 @@ function systemSignals(record) {
   return record.subtype === 'local_command' ? localOutputSignals(record.content) : [];
 }
 
+// What became of a message typed during a turn. `remove` is Claude reading it in that turn, `dequeue`
+// is it starting the next one, and `popAll` is someone taking back all that's queued.
+function queueSignals({ operation, content }) {
+  if (operation === 'remove' || operation === 'dequeue') return [{ type: 'queueRead', text: content }];
+  return operation === 'popAll' ? [{ type: 'queueTakenBack' }] : [];
+}
+
 // Hooks don't report any of these, so these transcript records are the only signal
 // that they happened: interrupts, terminal rejections, thinking, compaction results, refusals.
 export function signalsFrom(record) {
@@ -100,6 +107,7 @@ export function signalsFrom(record) {
     case 'user': return userSignals(record);
     case 'assistant': return [...thinkingSignals(record), ...modelSignals(record)];
     case 'system': return systemSignals(record);
+    case 'queue-operation': return queueSignals(record);
     default: return [];
   }
 }

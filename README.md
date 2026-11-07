@@ -56,7 +56,7 @@ The phone reaches this Mac in one of two ways, and `pair` picks for you:
 
 Through Rex, the code holds this Mac's name, its address on your tailnet, and the Tailscale account Rex is signed in with, and no credential: Rex asks Tailscale who's calling and lets in only the account that signed in. To stop a phone reaching this Mac, sign it out of that account or turn Tailscale off in Rex.
 
-Over SSH, the code holds this Mac's name, address and host key, and a one-time key. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password. To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
+Over SSH, the code holds this Mac's name, address and host key, and a one-time key. The address is this Mac's on your tailnet while its Tailscale app is on, so the phone reaches it from anywhere, signed in to Tailscale in the app as any account the tailnet lets reach it. With Tailscale off, it's the Mac's name on the local network. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password. To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
 
 ## What it does on your machine
 

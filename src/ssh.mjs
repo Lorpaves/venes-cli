@@ -30,13 +30,17 @@ function runJson(command, args) {
   });
 }
 
-async function tailscaleStatus() {
+export async function tailscaleStatus() {
   for (const command of TAILSCALE_COMMANDS) {
     const status = await runJson(command, ['status', '--json']);
     if (status) return status;
   }
   return undefined;
 }
+
+// Where a pairing code over SSH sends the phone: this Mac's address on its tailnet while its
+// Tailscale is on, which reaches it from anywhere, or else its name on the local network.
+export const pairingHost = (status, localName) => tailnetAddressOf(status) ?? localName;
 
 // Lets the phone's key in, and says where to log in with it: by tailnet first, which works from
 // anywhere, then by name on the local network. None while Remote Login is off.

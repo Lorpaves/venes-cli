@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { makeOneTimeKey } from '../../src/pairing.mjs';
-import { readUpload, sshAccess, tailnetAddressOf } from '../../src/ssh.mjs';
+import { pairingHost, readUpload, sshAccess, tailnetAddressOf } from '../../src/ssh.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
 
@@ -91,4 +91,10 @@ test('a file that ends early or stops coming is turned away', async () => {
   const waited = readUpload(stalled, { idleMs: 30 });
   stalled.write(`${about({ size: 10 })}abc`);
   await assert.rejects(waited, { code: 'bad_upload' });
+});
+
+test('a pairing code over SSH sends the phone to the tailnet while this Mac is on it', () => {
+  assert.equal(pairingHost(running, 'Mini.local'), '100.96.228.46');
+  assert.equal(pairingHost({ ...running, BackendState: 'Stopped' }, 'Mini.local'), 'Mini.local');
+  assert.equal(pairingHost(undefined, 'Mini.local'), 'Mini.local');
 });

@@ -13,7 +13,7 @@ import {
   pairingLink, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink,
 } from '../src/pairing.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAccount, tailnetAddress } from '../src/rex.mjs';
-import { readUpload } from '../src/ssh.mjs';
+import { pairingHost, readUpload, tailscaleStatus } from '../src/ssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
@@ -168,9 +168,10 @@ const commands = {
     const file = authorizedKeysFile();
     const nonce = makeNonce();
     const { seed, publicKey } = makeOneTimeKey();
+    const host = pairingHost(await tailscaleStatus(), localHostName());
     // All of this can fail, so it comes before anything is added to authorized_keys.
     const link = pairingLink({
-      host: localHostName(), port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
+      host, port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
     });
     const code = renderQR(qrModules(link));
     // An override has to reach the command too, since sshd runs it with a clean environment.
@@ -181,7 +182,11 @@ const commands = {
     for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
       process.on(signal, () => { cleanUp(); process.exit(130); });
     }
-    console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes.\n`);
+    // On the tailnet, the phone signs in to Tailscale in the app first, as any account that reaches this Mac.
+    const reach = host.endsWith('.local')
+      ? 'Tailscale is off on this Mac, so the phone can only reach it on this network. Turn Tailscale on to reach it from anywhere.'
+      : 'The phone reaches this Mac on your tailnet: sign in to Tailscale in the app when it asks.';
+    console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes. ${reach}\n`);
     const deadline = Date.now() + PAIRING_LIMIT_MS;
     while (Date.now() < deadline) {
       if (!hasPairingKey(file, nonce)) {

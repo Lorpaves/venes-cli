@@ -471,6 +471,32 @@ test('a background command\'s output file is found in its tool result', () => {
   assert.equal(signal.outputFile, '/tmp/x/tasks/b1.output');
 });
 
+test('a command moved to the background, by a message or its timeout, has its output file found too', () => {
+  const outputOf = content => signalsFrom({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content }] } })[0].outputFile;
+  assert.equal(outputOf(
+    'Command was moved to the background (ID: bljlg8ger) so that a message that arrived while it was running can reach you; it was not interrupted. '
+    + 'Output is being written to: /private/tmp/c/tasks/bljlg8ger.output. You will be notified when it completes.',
+  ), '/private/tmp/c/tasks/bljlg8ger.output');
+  assert.equal(outputOf(
+    "0.3.11 ['tmux', 'rex']\nℹ tests 333\nCommand did not complete within its 590s timeout and was moved to the background (ID: b0rvd96r6). "
+    + 'Output is being written to: /private/tmp/c/tasks/b0rvd96r6.output',
+  ), '/private/tmp/c/tasks/b0rvd96r6.output', 'after what it printed before it moved');
+});
+
+test('a result that only mentions an output file, like source code that matches it, starts no task', () => {
+  const outputOf = content => signalsFrom({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content }] } })[0].outputFile;
+  for (const content of [
+    'const BACKGROUND_OUTPUT = /Output is being written to: (\\S+\\.output)/;',
+    '11:const BACKGROUND_OUTPUT = /Output is being written to: (\\S+\\.output)/;',
+    'Output is being written to: /t/b1.output',
+    'Command running in background with ID: b1. Output is being written to: /tmp/x/tasks/b2.output.',
+    '[… earlier output omitted; full output: /private/tmp/c/tasks/bgfouusel.output]',
+    'see: Command running in background with ID: b1. Output is being written to: /tmp/x/tasks/b1.output',
+  ]) {
+    assert.equal(outputOf(content), undefined, content);
+  }
+});
+
 test('a task notification is read, with or without a result', () => {
   const shell = parseTaskNotification(`<task-notification>
 <task-id>b1</task-id>

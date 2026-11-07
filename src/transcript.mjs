@@ -8,7 +8,11 @@ import { splitAttachments } from './uploads.mjs';
 const INTERRUPTED = /^\[Request interrupted by user/;
 const HIDDEN_USER_TEXT = /^<(task-notification|command-|local-command|system-reminder)/;
 const REFUSAL = /^model_refusal_(no_)?fallback$/;
-const BACKGROUND_OUTPUT = /Output is being written to: (\S+\.output)/;
+// Claude Code's own word that a command went on in the background, at the start of a line of its
+// result: with `run_in_background`, or moved there by a message or by its timeout, after whatever it
+// printed first. The output file is named for the command's ID. Anything else that says as much, like
+// this line in a result that printed it, isn't one.
+const BACKGROUND_OUTPUT = /^Command [^\n]*?\bID: ([\w-]+)\b[^\n]*? Output is being written to: (\/[^\n]*?\/\1\.output)(?=[.\s]|$)/m;
 const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr)>([\s\S]*?)<\/local-command-\1>/;
 // What ends a turn among a transcript's items, whether it finished or was stopped.
 const TURN_ENDS = new Set(['turn_end', 'system']);
@@ -79,7 +83,7 @@ function userSignals(record) {
       const text = resultText(block);
       signals.push({
         type: 'toolResult', toolUseId: block.tool_use_id, isError: !!block.is_error, text,
-        outputFile: text.match(BACKGROUND_OUTPUT)?.[1],
+        outputFile: text.match(BACKGROUND_OUTPUT)?.[2],
       });
     } else if (block?.type === 'text' && INTERRUPTED.test(block.text ?? '')) {
       signals.push({ type: 'interrupted' });

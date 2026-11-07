@@ -840,7 +840,7 @@ test('a launch read from the transcript after the finish does not reopen the tas
   const { store, hook } = setup();
   hook('UserPromptSubmit', { prompt: finishedShell });
   store.handleTranscriptRecord('a', {
-    type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Output is being written to: /t/b1.output' }] },
+    type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Command running in background with ID: b1. Output is being written to: /t/b1.output. Keep going.' }] },
   });
   assert.equal(store.task('a', 'b1').status, 'completed');
 });
@@ -849,7 +849,7 @@ test('a running command\'s output file comes from its tool result', () => {
   const { store, hook } = setup();
   launchShell(hook);
   store.handleTranscriptRecord('a', {
-    type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Output is being written to: /t/b1.output' }] },
+    type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Command running in background with ID: b1. Output is being written to: /t/b1.output. Keep going.' }] },
   });
   assert.equal(store.task('a', 'b1').outputFile, '/t/b1.output');
 });

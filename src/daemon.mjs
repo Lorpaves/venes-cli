@@ -14,7 +14,7 @@ import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession } from './remove.mjs';
 import { resumeSession } from './resume.mjs';
-import { SessionStore, HelperError } from './sessions.mjs';
+import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from './terminal.mjs';
@@ -130,7 +130,7 @@ function createClientServer(store, checkForUpdate, library) {
 
   const sessionWithPane = sessionId => {
     const session = store.get(sessionId);
-    if (!session.pane) throw new HelperError('no_pane', 'This session is not running in tmux or Rex.');
+    if (!session.pane) throw notTypable();
     if (session.status === 'ended') throw new HelperError('session_ended', 'This session has ended.');
     return session;
   };

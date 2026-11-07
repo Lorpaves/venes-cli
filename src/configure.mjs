@@ -1,7 +1,7 @@
 // Changing the model and effort of a session, for that session alone. One that's running changes
 // through its model picker, and one that isn't keeps the choice for when it's resumed.
 
-import { HelperError } from './sessions.mjs';
+import { HelperError, notTypable } from './sessions.mjs';
 
 // Passed on a command line, so there's no room for anything else.
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]*$/;
@@ -39,7 +39,7 @@ export async function configureSession({ store, library, sessionWithPane, switch
   const known = store.find(sessionId);
   if (!known || known.status === 'ended') {
     const running = await library.running();
-    if (running.some(session => session.id === sessionId)) throw new HelperError('no_pane', 'This session is running outside tmux and Rex.');
+    if (running.some(session => session.id === sessionId)) throw notTypable();
     chosenForResume.set(sessionId, { ...chosenForResume.get(sessionId), ...(model && { model }), ...(effort && { effort }) });
     return {};
   }

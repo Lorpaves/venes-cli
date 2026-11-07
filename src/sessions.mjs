@@ -33,6 +33,10 @@ export class HelperError extends Error {
   }
 }
 
+// Only Rex and tmux can be typed into, and a session started before the plugin was installed sends
+// no hooks to say where it is, so a restart is the way out of both.
+export const notTypable = () => new HelperError('no_pane', 'This session can\'t be typed into from here. Restart it in Rex or tmux.');
+
 function permissionDecision(decision) {
   return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };
 }

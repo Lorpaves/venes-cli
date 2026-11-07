@@ -285,7 +285,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 |---|---|
 | `request_pending`, `dialog_open` | `send` or `configure` was refused because Enter would have answered an open prompt |
 | `request_closed` | That request was already answered |
-| `no_pane` | The session isn't in Rex or tmux, so it can be watched and answered but not typed into |
+| `no_pane` | The session isn't in Rex or tmux, or started before the plugin was installed, so it can't be typed into until it's restarted |
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed |

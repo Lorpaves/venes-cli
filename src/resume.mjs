@@ -4,7 +4,7 @@
 
 import os from 'node:os';
 import fs from 'node:fs';
-import { HelperError } from './sessions.mjs';
+import { HelperError, notTypable } from './sessions.mjs';
 
 const START_LIMIT_MS = 20_000;
 const CHECK_MS = 500;
@@ -56,7 +56,7 @@ async function waitForPrompt({ prompted, terminal, name, target, limit, check })
 export async function resumeSession({ store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS }, sessionId, { clientId, text }, chosen) {
   if (Buffer.byteLength(text) > FIRST_MESSAGE_LIMIT_BYTES) throw new HelperError('message_too_long', 'Send something shorter first, to start this session.');
   const running = await library.running();
-  if (running.some(session => session.id === sessionId)) throw new HelperError('no_pane', 'This session is running outside tmux and Rex.');
+  if (running.some(session => session.id === sessionId)) throw notTypable();
   const info = await library.info(sessionId);
   if (!info) throw new HelperError('unknown_session', `No stored session ${sessionId}`);
   const session = store.reopen(sessionId, { cwd: info.cwd, startedAt: info.createdAt });

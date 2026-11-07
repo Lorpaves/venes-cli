@@ -122,6 +122,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
+| `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
 | `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |

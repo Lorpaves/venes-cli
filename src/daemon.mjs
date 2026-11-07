@@ -17,6 +17,7 @@ import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
+import { avatarSource } from './avatar.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from './terminal.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
 import { findClaudePanes } from './tmux.mjs';
@@ -96,6 +97,7 @@ function createClientServer(store, checkForUpdate, library) {
   const write = (socket, message) => socket.write(`${JSON.stringify(message)}\n`);
 
   const typing = oneAtATime();
+  const avatar = avatarSource();
 
   const deliver = (session, { clientId, text }) => typing(session.id, async () => {
     if (clientId) store.expectEcho(session, clientId, text);
@@ -205,6 +207,8 @@ function createClientServer(store, checkForUpdate, library) {
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);
     },
+    // Empty when the account has no picture.
+    avatar: async () => (await avatar()) ?? {},
     // `imageId`, because `id` is the request's own.
     image: async msg => {
       const file = store.find(msg.sessionId)?.transcriptPath;

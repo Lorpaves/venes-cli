@@ -389,6 +389,15 @@ function solidPng(size) {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', pixels), chunk('IEND', Buffer.alloc(0))]);
 }
 
+T('the_macs_login_picture_comes_small_or_not_at_all', { noHelper: false }, async r => {
+  const picture = await r.client.request('avatar');
+  if (!picture.data) return;
+  const bytes = Buffer.from(picture.data, 'base64');
+  assert.equal(picture.mediaType, 'image/jpeg');
+  assert.deepEqual([...bytes.subarray(0, 2)], [0xff, 0xd8]);
+  assert.ok(bytes.length < 200_000, 'small enough to send at every connection');
+});
+
 T('an_image_claude_reads_can_be_fetched_and_stays_out_of_events', { mode: 'bypassPermissions' }, async r => {
   const png = solidPng(64);
   fs.writeFileSync(path.join(WS, 'e2e-solid.png'), png);

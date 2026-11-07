@@ -1210,6 +1210,34 @@ if (hasRex) {
 
   T('in_rex_an_attached_picture_and_file_reach_claude', { rex: true }, sendsAPictureAndAFile);
 
+  // Rex can have Claude Code name the session it's in after its task, and Claude Code resumed in
+  // the helper's session does that too. The helper keeps it by id, and names it back.
+  T('in_rex_the_helpers_session_is_found_again_after_something_renames_it', { rex: true, mode: 'bypassPermissions' }, async r => {
+    await r.type('Reply with only the word STORED.');
+    await r.turnEnd();
+    const { id } = await r.session();
+    rex('kill', inRex.session);
+    await delay(1500);
+    const { client, run } = await forgetSessions();
+    const named = label => JSON.parse(rex('session', 'ls', '--json')).sessions.filter(session => session.label === label);
+    await client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.' });
+    await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /AGAIN/.test(e.lastMessage), 30000, 'turn.end AGAIN');
+    const [own] = named('Venes');
+    rex('session', 'rename', own.session_id, 'fix-login-redirect');
+    const first = (await client.request('sessions')).sessions.find(s => s.id === id).pane;
+    rex('block', 'close', '-s', own.session_id, first);
+    await run.wait(e => e.kind === 'session.ended' && e.sessionId === id, 20000, 'session.ended');
+    run.mark();
+    await client.request('send', { sessionId: id, text: 'Reply with only the word THIRD.' });
+    await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /THIRD/.test(e.lastMessage), 30000, 'turn.end THIRD');
+    const { pane } = (await client.request('sessions')).sessions.find(s => s.id === id);
+    const { blocks } = JSON.parse(rex('block', 'ls', '-s', own.session_id, '--json'));
+    assert.ok(blocks.some(block => block.block_id === pane), 'it opened in the same session');
+    assert.deepEqual(named('Venes').map(session => session.session_id), [own.session_id], 'with its name back, and no other');
+    rex('kill', own.session_id);
+    client.close();
+  });
+
   T('in_rex_a_prompt_on_the_screen_holds_a_message', { rex: true }, async r => {
     await r.type(TOUCH('rex'));
     const request = await r.request('permission');

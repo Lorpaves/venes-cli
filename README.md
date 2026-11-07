@@ -159,7 +159,7 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 
 `join` and `history` work on any of these. For a session the helper doesn't know, `turn` is empty and the session's `status` is `ended` unless it's running somewhere. `claude agents` calls a session busy for as long as a background shell runs, so `join` checks the transcript and says `idle` once the turn is over, though `library` still says `running`.
 
-`send` to a session that isn't running runs `claude --resume` in the session's folder, with the message as its first prompt: in a window labelled `venes-<id>` of a Rex session called `Venes` if Rex is on this Mac, and otherwise in a tmux session named `venes-<id>`. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside both is refused with `no_pane`, because resuming it would put two processes on one transcript.
+`send` to a session that isn't running runs `claude --resume` in the session's folder, with the message as its first prompt: in a window labelled `venes-<id>` of a Rex session called `Venes` if Rex is on this Mac, and otherwise in a tmux session named `venes-<id>`. The helper keeps that Rex session's id in `~/.venes/rex-session` and gives it its name back, because Rex can have a Claude Code in it rename it after its task. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside both is refused with `no_pane`, because resuming it would put two processes on one transcript.
 
 ### Commands and models
 
@@ -188,7 +188,7 @@ A session started before this version was installed has none of those variables,
 
 A client on the same tailnet can reach the helper with no SSH. It runs `attach --pipe` in a terminal of Rex's that no window shows, and uses that terminal's input and output as the pipe. `GET /llms.txt` on a Rex server documents the calls:
 
-1. Open `/api/control`, and find or create the session labelled `Venes`, the one the helper starts sessions in. `session.attach` to it.
+1. Open `/api/control`, and find or create the session labelled `Venes`, the one the helper starts sessions in. `session.attach` to it. Its label can change, because Rex can have Claude Code name the session it's in, so keep its id and look for that first, as the helper does.
 2. `session.new_block` with `{"shell":"none","login":false,"command":["/bin/bash","-c","read -t 60 _ && ~/.venes/venes attach --pipe"]}`. The `read` holds the helper back until the client is watching, because Rex closes a terminal the moment its program exits, and a client needs to see why it did. It also ends a terminal nobody came for. `login` has to be off, because `login` hides the status a program exits with.
 3. `data.connect`, and open `/api/data`. Skip what comes before the first `resize`, which is a picture of the screen.
 4. Write a newline with `com.superlogical.terminal.write`, and the helper starts. After that, what goes in with `terminal.write` is its stdin, and what comes out is its stdout, with each line ending in `\r\n` and Rex's own messages to skip. A `child_exited` of 127 means there's no helper.

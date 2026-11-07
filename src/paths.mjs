@@ -13,6 +13,8 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     sessionsFile: path.join(home, 'sessions.json'),
     // What clients attach to messages, by session and then by upload.
     uploads: path.join(home, 'uploads'),
+    // The Rex session the helper starts sessions in, by id, since its label can change.
+    rexSession: path.join(home, 'rex-session'),
     sdkDir: process.env.VENES_SDK_DIR || path.join(home, 'sdk'),
   };
 }

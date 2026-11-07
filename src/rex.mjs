@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { helperPaths } from './paths.mjs';
 import { HelperError } from './sessions.mjs';
 
 const exec = promisify(execFile);
@@ -66,11 +67,31 @@ export async function tailnetAddress() {
   }
 }
 
+function keptSession() {
+  try { return fs.readFileSync(helperPaths().rexSession, 'utf8').trim(); } catch { return undefined; }
+}
+
+// Not knowing it next time costs one more session, which is no reason to stop this one.
+function keepSession(id) {
+  try { fs.writeFileSync(helperPaths().rexSession, `${id}\n`, { mode: 0o600 }); } catch { /* found by its label instead */ }
+}
+
+// The helper's session goes by its id, because its label changes: Rex can ask every Claude Code it
+// starts to name the session it's in after its task. The label is put back, so it's still the one
+// to look for, which is how a client finds it, and how the first helper to use it did.
 async function ownSession() {
   const { sessions } = JSON.parse(await rex({}, ['session', 'ls', '--json']));
-  const known = sessions.find(session => session.label === SESSION_LABEL);
-  if (known) return known.session_id;
-  return JSON.parse(await rex({}, ['api', 'call', 'session.create', JSON.stringify({ label: SESSION_LABEL })])).session_id;
+  const kept = keptSession();
+  const own = sessions.find(session => kept && session.session_id === kept)
+    ?? sessions.find(session => session.label === SESSION_LABEL);
+  if (!own) {
+    const created = JSON.parse(await rex({}, ['api', 'call', 'session.create', JSON.stringify({ label: SESSION_LABEL })])).session_id;
+    keepSession(created);
+    return created;
+  }
+  if (own.session_id !== kept) keepSession(own.session_id);
+  if (own.label !== SESSION_LABEL) await rex({}, ['session', 'rename', own.session_id, SESSION_LABEL]).catch(() => {});
+  return own.session_id;
 }
 
 // Runs a command in a window of its own, and returns its block. The window closes with it.

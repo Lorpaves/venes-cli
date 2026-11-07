@@ -8,6 +8,14 @@ import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } fro
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
 
+// Where the helper keeps which Rex session is its own, for every test here: never the real one.
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-home-'));
+process.env.VENES_HOME = HOME;
+test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+const KEPT = path.join(HOME, 'rex-session');
+const keep = id => (id === undefined ? fs.rmSync(KEPT, { force: true }) : fs.writeFileSync(KEPT, `${id}\n`));
+const kept = () => (fs.existsSync(KEPT) ? fs.readFileSync(KEPT, 'utf8').trim() : undefined);
+
 // A rex command that writes down how it was called, and answers from `replies` by the words in it.
 function fakeRex(t, replies = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-rex-'));
@@ -90,6 +98,44 @@ test('the first one makes the session they share, with nothing in it', async t =
   assert.equal(target.rexSession, 'session:8');
   const create = calls().find(({ args }) => args.includes('session.create'));
   assert.deepEqual(JSON.parse(create.args.at(-1)), { label: 'Venes' });
+});
+
+test('the helper knows its session by id, and names it back after something renamed it', async t => {
+  keep('session:7');
+  const calls = fakeRex(t, { ls: listing([{ session_id: 'session:2', label: 'Venes' }, { session_id: 'session:7', label: 'fix-login' }]), run: ran });
+  const target = await startSession({ name: 'venes-1', cwd: '/w', command: ['claude'], env: {} });
+  assert.equal(target.rexSession, 'session:7');
+  assert.ok(calls().some(({ args }) => args.join(' ') === 'session rename session:7 Venes'));
+  assert.ok(!calls().some(({ args }) => args.includes('session.create')));
+  assert.equal(kept(), 'session:7');
+});
+
+test('with nothing kept, the session called Venes is the helper\'s, and is kept from then on', async t => {
+  keep(undefined);
+  const calls = fakeRex(t, { ls: listing([{ session_id: 'session:1', label: 'mine' }, { session_id: 'session:3', label: 'Venes' }]), run: ran });
+  assert.equal((await startSession({ name: 'venes-1', cwd: '/w', command: ['claude'], env: {} })).rexSession, 'session:3');
+  assert.equal(kept(), 'session:3');
+  assert.ok(!calls().some(({ args }) => args.includes('rename')), 'its name is right already');
+});
+
+test('a kept session that has gone is replaced: by one called Venes, or else by a new one', async t => {
+  keep('session:9');
+  fakeRex(t, { ls: listing([{ session_id: 'session:4', label: 'Venes' }]), run: ran });
+  assert.equal((await startSession({ name: 'venes-1', cwd: '/w', command: ['claude'], env: {} })).rexSession, 'session:4');
+  assert.equal(kept(), 'session:4');
+});
+
+test('a new session is kept', async t => {
+  keep('session:9');
+  fakeRex(t, { ls: listing([]), 'session.create': JSON.stringify({ session_id: 'session:5' }), run: ran });
+  assert.equal((await startSession({ name: 'venes-1', cwd: '/w', command: ['claude'], env: {} })).rexSession, 'session:5');
+  assert.equal(kept(), 'session:5');
+});
+
+test('a name that can\'t be put back doesn\'t stop the session from starting', async t => {
+  keep('session:7');
+  fakeRex(t, { ls: listing([{ session_id: 'session:7', label: 'renamed' }]), rename: 'fail', run: ran });
+  assert.equal((await startSession({ name: 'venes-1', cwd: '/w', command: ['claude'], env: {} })).rexSession, 'session:7');
 });
 
 test('a session that came with no terminal is a failure to resume', async t => {

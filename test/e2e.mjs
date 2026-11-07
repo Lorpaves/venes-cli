@@ -379,7 +379,7 @@ T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissi
   const page = await r.client.request('history', { sessionId: id, limit: 2 });
   const older = await r.client.request('history', { sessionId: id, limit: 2, before: page.before });
   assert.equal(page.hasMore, true);
-  assert.deepEqual([...older.items, ...page.items], all.items.slice(-4), 'pages join up with no overlap');
+  assert.deepEqual([...older.items, ...page.items], all.items.slice(older.before), 'pages join up with no overlap');
 });
 
 T('join_replays_the_running_turn_and_nothing_twice', { mode: 'bypassPermissions' }, async r => {

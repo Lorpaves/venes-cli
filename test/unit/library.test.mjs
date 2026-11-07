@@ -84,9 +84,12 @@ test('a stored session is read from wherever its project keeps it', t => {
 });
 
 test('a page of a stored session stops where it was asked to', t => {
-  const reply = read(configDir(t), { op: 'history', sessionId: ID, limit: 1 });
-  assert.deepEqual(reply.items.map(item => item.text), ['hi']);
-  assert.deepEqual([reply.before, reply.hasMore], [1, true]);
+  const dir = configDir(t);
+  const next = { type: 'user', timestamp: '2026-11-06T10:00:02.000Z', message: { role: 'user', content: 'again' } };
+  fs.appendFileSync(path.join(dir, 'projects', '-Users-me-app', `${ID}.jsonl`), `\n${JSON.stringify(next)}`);
+  const reply = read(dir, { op: 'history', sessionId: ID, limit: 1 });
+  assert.deepEqual(reply.items.map(item => item.text), ['again']);
+  assert.deepEqual([reply.before, reply.hasMore], [2, true]);
 });
 
 test('a session that isn\'t stored is reported as unknown', t => {

@@ -98,7 +98,6 @@ test('history joins tool calls to results and hides internal records', () => {
     const { items } = readHistory(file);
     assert.deepEqual(items.map(i => i.role), ['user', 'thinking', 'assistant', 'tool', 'system']);
     assert.equal(items[3].result, 'a.txt');
-    assert.equal(readHistory(file, { limit: 1 }).items.length, 1);
   } finally { cleanup(); }
 });
 
@@ -115,6 +114,80 @@ test('history pages backwards from a cursor without overlapping', () => {
     const last = readHistory(file, { limit: 2, before: second.before });
     assert.deepEqual(last.items.map(i => i.text), ['a']);
     assert.deepEqual([last.before, last.hasMore], [0, false]);
+  } finally { cleanup(); }
+});
+
+const assistantText = text => line({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+const bash = id => line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: {} }] } });
+const turnEnd = line({ type: 'system', subtype: 'turn_duration', durationMs: 5 });
+const compaction = line({ type: 'system', subtype: 'compact_boundary', compactMetadata: {} });
+const shown = page => page.items.map(item => item.text ?? item.toolUseId ?? item.role);
+
+test('a page reaches back to the start of the turn its limit lands in', () => {
+  const { file, cleanup } = tempFile([
+    userText('old'), assistantText('old reply'), turnEnd,
+    userText('ask'), assistantText('on it'), bash('t1'), bash('t2'), assistantText('done'), turnEnd,
+  ].join(''));
+  try {
+    const page = readHistory(file, { limit: 2 });
+    assert.deepEqual(shown(page), ['ask', 'on it', 't1', 't2', 'done', 'turn_end']);
+    assert.deepEqual([page.before, page.hasMore], [3, true]);
+    assert.deepEqual(shown(readHistory(file, { limit: 2, before: page.before })), ['old', 'old reply', 'turn_end']);
+  } finally { cleanup(); }
+});
+
+test('the page above ends where the one below begins, so no turn is cut', () => {
+  const { file, cleanup } = tempFile([
+    userText('a'), bash('t1'), bash('t2'), bash('t3'), turnEnd,
+    userText('b'), bash('t4'), bash('t5'), bash('t6'), turnEnd,
+    userText('c'), bash('t7'),
+  ].join(''));
+  try {
+    const seen = [];
+    let before;
+    do {
+      const page = readHistory(file, { limit: 3, before });
+      assert.equal(page.items[0].role, 'user', 'every page opens at a prompt');
+      seen.unshift(...shown(page));
+      ({ before } = page);
+    } while (before > 0);
+    assert.deepEqual(seen, ['a', 't1', 't2', 't3', 'turn_end', 'b', 't4', 't5', 't6', 'turn_end', 'c', 't7']);
+  } finally { cleanup(); }
+});
+
+test('a limit that lands where a turn begins stays where it landed', () => {
+  const { file, cleanup } = tempFile([userText('a'), bash('t1'), turnEnd, userText('b'), bash('t2')].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 2 })), ['b', 't2']);
+  } finally { cleanup(); }
+});
+
+test('a turn with no prompt begins after the one before it ended', () => {
+  const { file, cleanup } = tempFile([userText('a'), bash('t1'), turnEnd, assistantText('a task finished'), bash('t2'), bash('t3')].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 1 })), ['a task finished', 't2', 't3']);
+  } finally { cleanup(); }
+});
+
+test('a stopped turn ends there', () => {
+  const { file, cleanup } = tempFile([userText('a'), bash('t1'), userText('[Request interrupted by user]'), assistantText('next'), bash('t2')].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 1 })), ['next', 't2']);
+  } finally { cleanup(); }
+});
+
+test('a compaction in the middle of a turn doesn\'t begin one', () => {
+  const { file, cleanup } = tempFile([userText('a'), bash('t1'), compaction, bash('t2')].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 1 })), ['a', 't1', 'compact', 't2']);
+    assert.deepEqual(shown(readHistory(file, { limit: 2 })), ['a', 't1', 'compact', 't2']);
+  } finally { cleanup(); }
+});
+
+test('a compaction between turns stays with the turn after it', () => {
+  const { file, cleanup } = tempFile([userText('a'), turnEnd, compaction, userText('b'), bash('t1')].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 3 })), ['compact', 'b', 't1']);
   } finally { cleanup(); }
 });
 
@@ -195,7 +268,7 @@ test('history puts a subagent\'s calls under the call that started it', () => {
     assert.deepEqual(items.map(i => i.toolUseId ?? i.role), ['user', 'agent1', 'sub1', 'other']);
     const sub = items[2];
     assert.deepEqual([sub.parentToolUseId, sub.result], ['agent1', 'out']);
-    assert.equal(readHistory(file, { limit: 2 }).items.length, 3, 'subagent calls come with their parent, outside the limit');
+    assert.equal(readHistory(file, { limit: 3 }).items.length, 4, 'subagent calls come with their parent, outside the limit');
   } finally { cleanup(); }
 });
 
@@ -340,6 +413,14 @@ test('a turn with no prompt begins at its first event', () => {
   const { file, cleanup } = tempFile([said(T, 'old'), replied(T + 10, 'reply'), replied(T + 950, 'from a task')].join(''));
   try {
     assert.deepEqual(texts(readHistory(file, { turn: { at: T + 900 } })), ['old', 'reply']);
+  } finally { cleanup(); }
+});
+
+test('a page cut off by a turn still opens where a turn does', () => {
+  const call = (at, id) => stamped(at, { type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: {} }] } });
+  const { file, cleanup } = tempFile([said(T, 'old'), call(T + 1, 't1'), call(T + 2, 't2'), said(T + 100, 'now')].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 1, turn: { at: T + 100, prompt: 'now' } })), ['old', 't1', 't2']);
   } finally { cleanup(); }
 });
 

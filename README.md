@@ -115,7 +115,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
-| `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
+| `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
 | `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |

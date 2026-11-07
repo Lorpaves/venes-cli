@@ -10,6 +10,8 @@ const HIDDEN_USER_TEXT = /^<(task-notification|command-|local-command|system-rem
 const REFUSAL = /^model_refusal_(no_)?fallback$/;
 const BACKGROUND_OUTPUT = /Output is being written to: (\S+\.output)/;
 const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr)>([\s\S]*?)<\/local-command-\1>/;
+// What ends a turn among a transcript's items, whether it finished or was stopped.
+const TURN_ENDS = new Set(['turn_end', 'system']);
 const DEFAULT_HISTORY_LIMIT = 200;
 // A prompt's record is stamped a little before its hook reaches the helper.
 const PROMPT_LEAD_MS = 5000;
@@ -265,15 +267,21 @@ function turnStartIn(items, { at, prompt }) {
   return first < 0 ? items.length : first;
 }
 
+// Whether a turn begins at `index`: at a prompt, or for one that has none, after the last one ended.
+const opensTurn = (items, index) => items[index]?.role === 'user' || TURN_ENDS.has(items[index - 1].role);
+
 // `before` counts items from the start of the transcript, which only ever grows, so a
 // cursor stays valid while the session runs. Subagent calls follow the call that started
-// them and don't count towards `limit`. `turn` stops the page where that turn begins. `model`
-// is the last one to have replied.
+// them and don't count towards `limit`. `turn` stops the page where that turn begins. A page
+// reaches back past `limit` to where a turn begins, because the part of a turn looks like a
+// whole one to a client, which would show it as a reply of its own. `model` is the last one to
+// have replied.
 export function readHistory(file, { limit, before, turn } = {}) {
   const { items, model } = conversationItems(file);
   const edge = turn ? turnStartIn(items, turn) : items.length;
   const end = Math.min(before ?? edge, edge);
-  const start = Math.max(0, end - (limit ?? DEFAULT_HISTORY_LIMIT));
+  let start = Math.max(0, end - (limit ?? DEFAULT_HISTORY_LIMIT));
+  while (start > 0 && !opensTurn(items, start)) start -= 1;
   const subagents = subagentTranscripts(file);
   const withCalls = item => (subagents.has(item.toolUseId)
     ? [item, ...subagentCalls(subagents.get(item.toolUseId), item.toolUseId).flatMap(withCalls)]

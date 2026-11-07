@@ -461,9 +461,24 @@ async function sendsAPictureAndAFile(r) {
   const sent = items.findLast(item => item.role === 'user');
   assert.deepEqual([sent.text, sent.attachments, sent.images.length], [text, echo.attachments, 1]);
   await assert.rejects(r.client.request('send', { sessionId: id, text: 'x', attachments: ['f'.repeat(32)] }), { code: 'bad_attachment' });
+  const file = await r.client.request('file', { sessionId: id, uploadId: notes.uploadId });
+  assert.deepEqual([file.name, file.mediaType, Buffer.from(file.data, 'base64').toString()], ['my notes.txt', 'text/plain', 'The marker word is PLUM.\n']);
+  await assert.rejects(r.client.request('file', { sessionId: id, uploadId: 'f'.repeat(32) }), { code: 'unknown_file' });
 }
 
 T('an_attached_picture_and_file_reach_claude', {}, sendsAPictureAndAFile);
+
+// Claude Code here has no status line of its own, so what's under its box is its line for the mode.
+async function readsTheStatusLine(r) {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  const { lines } = await r.client.request('statusLine', { sessionId: id });
+  assert.ok(lines.some(line => /mode on|shortcuts/.test(line)), JSON.stringify(lines));
+}
+
+T('the_status_line_under_the_box_can_be_read', {}, readsTheStatusLine);
+
 
 T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissions' }, async r => {
   await r.type(SLEEP(5, 'FIRST'));
@@ -1209,6 +1224,7 @@ if (hasRex) {
   });
 
   T('in_rex_an_attached_picture_and_file_reach_claude', { rex: true }, sendsAPictureAndAFile);
+  T('in_rex_the_status_line_under_the_box_can_be_read', { rex: true }, readsTheStatusLine);
 
   // Rex can have Claude Code name the session it's in after its task, and Claude Code resumed in
   // the helper's session does that too. The helper keeps it by id, and names it back.

@@ -18,7 +18,7 @@ import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
-import { resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom } from './terminal.mjs';
+import { readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, statusLines, terminalFrom } from './terminal.mjs';
 import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
 import { findClaudePanes } from './tmux.mjs';
@@ -248,6 +248,13 @@ function createClientServer(store, checkForUpdate, library, uploads) {
     },
     respond: msg => { store.respond(msg.requestId, msg); return {}; },
     upload: msg => saveUpload(uploads, msg),
+    statusLine: async ({ sessionId }) => ({ lines: statusLines(await readScreen(sessionWithPane(sessionId))) }),
+    // What a message had attached, for a client that didn't send it or no longer has it.
+    file: ({ sessionId, uploadId }) => {
+      const upload = findUpload(uploads, sessionId, uploadId);
+      if (!upload) throw new HelperError('unknown_file', 'This file is no longer on the Mac.');
+      return { name: upload.name, mediaType: upload.mediaType, data: fs.readFileSync(upload.path).toString('base64') };
+    },
     send: async msg => {
       const attachments = attachmentsOf(msg);
       const text = typeof msg.text === 'string' ? msg.text : '';

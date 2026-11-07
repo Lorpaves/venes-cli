@@ -230,3 +230,21 @@ test('a picture Claude Code doesn\'t take is left as its path, and the message s
   assert.ok(Date.now() - started >= 150);
   assert.deepEqual(typed(), ['/u/s/1/shot.png', ' ', 'look', 'enter']);
 });
+
+test('what Claude Code shows under its input box is read off the screen', async () => {
+  const { statusLines } = await import('../../src/terminal.mjs');
+  const screen = [
+    '⏺ Done.',
+    '',
+    '─────────────────────────────────────────── venes-app ─',
+    '❯ ',
+    '────────────────────────────────────────────────────────',
+    '  ◆ Opus 5.5 · max │ Venes │ ctx ━━━━ 90% │ cache 99%',
+    '  ⏵⏵ bypass permissions on · 1 shell',
+    '',
+    '',
+  ].join('\n');
+  assert.deepEqual(statusLines(screen), ['◆ Opus 5.5 · max │ Venes │ ctx ━━━━ 90% │ cache 99%', '⏵⏵ bypass permissions on · 1 shell']);
+  assert.deepEqual(statusLines(' Do you want to proceed?\n ❯ 1. Yes\n Esc to cancel\n'), []);
+  assert.deepEqual(statusLines('──────────\n❯ \n──────────\n'), []);
+});

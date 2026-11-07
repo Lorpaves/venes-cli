@@ -126,6 +126,8 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
 | `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
+| `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
+| `statusLine` | `sessionId` | `lines`: what Claude Code shows under its input box, read off the terminal. That's the status line set up in its settings, if any, and its line for the mode and what's running. Empty while something covers the box |
 | `send` | `sessionId`, `text`, `clientId`, `lane`, `attachments` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library) and [Attachments](#attachments). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
 | `interrupt` | `sessionId` | Presses Esc |
@@ -322,6 +324,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |
 | `bad_upload`, `too_large` | An upload had no type, nothing in it, or more than 30 MB |
 | `bad_attachment` | `send` named an upload that isn't there any more, or more than 20 |
+| `unknown_file` | `file` named an upload the Mac no longer keeps |
 | `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |

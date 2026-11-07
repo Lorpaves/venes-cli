@@ -31,6 +31,9 @@ const IMAGE_SETTLE_LIMIT_MS = 4000;
 const IMAGE_SETTLE_CHECK_MS = 100;
 const IMAGE_MARK = /\[Image #\d+\]/g;
 
+// The edge of Claude Code's input box, across the pane.
+const BOX_EDGE = /^\s*─{8,}/;
+
 export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
 const backendOf = session => (session.rexSession ? rex : tmux);
@@ -87,6 +90,14 @@ export async function sendMessage(session, { text = '', attachments = [] }, isBl
 }
 
 export const sendText = (session, text, isBlocked) => sendMessage(session, { text }, isBlocked);
+
+// What Claude Code shows under its input box: the status line a person set up, then its own line
+// for the mode and what's running. None when something covers the box.
+export function statusLines(screen) {
+  const lines = screen.replace(/\s+$/, '').split('\n');
+  const edge = lines.findLastIndex(line => BOX_EDGE.test(line));
+  return edge < 0 ? [] : lines.slice(edge + 1).map(line => line.trim()).filter(Boolean);
+}
 
 // Only while a footer says Esc will close something: with nothing open it'd interrupt the turn.
 export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {

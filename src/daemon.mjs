@@ -9,12 +9,13 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
+import { configureSession } from './configure.mjs';
 import { Library } from './library.mjs';
 import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
-import { findClaudePanes, hasOpenDialog, isSessionOpen, parseTmuxEnv, sendEscape, sendText, startSession } from './tmux.mjs';
+import { findClaudePanes, hasOpenDialog, isSessionOpen, parseTmuxEnv, sendEscape, sendText, settleCommand, startSession } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
 
@@ -93,8 +94,10 @@ function createClientServer(store, checkForUpdate, library) {
 
   const deliver = async (session, { clientId, text }) => {
     if (clientId) store.expectEcho(session, clientId, text);
+    const isBlocked = () => store.pendingFor(session)[0];
     try {
-      await sendText({ pane: session.pane, tmuxSocket: session.tmuxSocket }, text, () => store.pendingFor(session)[0]);
+      await sendText(session, text, isBlocked);
+      if (text.trimStart().startsWith('/')) await settleCommand(session, isBlocked);
     } catch (error) {
       if (clientId) store.forgetEcho(session, clientId);
       throw error;
@@ -129,22 +132,33 @@ function createClientServer(store, checkForUpdate, library) {
 
   // A message for a session that's resuming waits for it, and then goes the usual way.
   const resuming = new Map();
+  // What a reader chose for a session that isn't running, for when it next is.
+  const chosenForResume = new Map();
   const resume = msg => {
     const tmux = { hasOpenDialog, isSessionOpen, startSession };
-    const started = resumeSession({ store, library, tmux }, msg.sessionId, msg).finally(() => resuming.delete(msg.sessionId));
+    const started = resumeSession({ store, library, tmux }, msg.sessionId, msg, chosenForResume.get(msg.sessionId))
+      .then(reply => { chosenForResume.delete(msg.sessionId); return reply; })
+      .finally(() => resuming.delete(msg.sessionId));
     resuming.set(msg.sessionId, started);
     return started;
   };
 
+  // A change waits for a resume on its way, or it would find a session with no pane yet.
+  const configure = async msg => {
+    await resuming.get(msg.sessionId)?.catch(() => {});
+    const tell = (session, text) => deliver(session, { text });
+    return configureSession({ store, library, sessionWithPane, tell, chosenForResume }, msg);
+  };
+
   const joinStored = async ({ sessionId, limit }) => {
     const seq = store.seq;
-    const [page, info, running] = await Promise.all([
+    const [{ model, ...page }, info, running] = await Promise.all([
       library.history(sessionId, { limit }),
       library.info(sessionId).catch(() => undefined),
       library.running().catch(() => []),
     ]);
     const status = running.find(session => session.id === sessionId)?.status ?? 'ended';
-    return { ...page, turn: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, tasks: [], backgroundTasks: 0 }] };
+    return { ...page, turn: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, model, tasks: [], backgroundTasks: 0 }] };
   };
 
   const listSessions = async () => {
@@ -172,6 +186,11 @@ function createClientServer(store, checkForUpdate, library) {
       return { gap: gap || !sameBoot };
     },
     library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
+    capabilities: async msg => {
+      const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
+      return library.capabilities(cwd);
+    },
+    configure,
     history: msg => {
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);

@@ -20,6 +20,8 @@ const AGENTS_TIMEOUT_MS = 10_000;
 const READ_TIMEOUT_MS = 60_000;
 const READ_BUFFER_BYTES = 64 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 50;
+// Long enough to open many pages, and short enough that a new skill soon shows up.
+const CAPABILITIES_LIFETIME_MS = 5 * 60_000;
 const WORKER = fileURLToPath(new URL('library-worker.mjs', import.meta.url));
 
 const STATUS = { busy: 'running', waiting: 'waiting', idle: 'idle' };
@@ -45,9 +47,31 @@ export function libraryPage(stored, running, { limit, offset }) {
   return { items: [...unlisted, ...items], offset: offset + stored.length, hasMore: stored.length === limit };
 }
 
+// What a client needs of each. Names starting with two underscores are Claude Code's own plumbing.
+export function readCapabilities({ commands = [], models = [] }) {
+  return {
+    commands: commands.filter(command => !command.name.startsWith('__')).map(({ name, description, argumentHint }) => ({ name, description, argumentHint: argumentHint ?? '' })),
+    models: models.map(({ value, displayName, description, resolvedModel, supportedEffortLevels }) => ({
+      value, displayName, description, resolvedModel, effortLevels: supportedEffortLevels ?? [],
+    })),
+  };
+}
+
+function findOnPath(name) {
+  for (const dir of process.env.PATH.split(':')) {
+    const file = path.join(dir, name);
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      return file;
+    } catch { /* not in this one */ }
+  }
+  return undefined;
+}
+
 export class Library {
   #sdkDir;
   #installing;
+  #capabilities = new Map();
 
   constructor({ sdkDir }) { this.#sdkDir = sdkDir; }
 
@@ -108,5 +132,22 @@ export class Library {
 
   history(sessionId, { limit, before } = {}) {
     return this.#read({ op: 'history', sessionId, limit, before });
+  }
+
+  async #readCapabilities(cwd) {
+    const claude = findOnPath('claude');
+    if (!claude) throw new HelperError('no_claude', 'Claude Code is not on the PATH.');
+    return readCapabilities(await this.#read({ op: 'capabilities', sdk: await this.prepare(), cwd, claude }));
+  }
+
+  // The commands and models on offer in a folder. Pages opening together share one read.
+  capabilities(folder, now = Date.now()) {
+    const cwd = folder && fs.existsSync(folder) ? folder : os.homedir();
+    const known = this.#capabilities.get(cwd);
+    if (known && now - known.at < CAPABILITIES_LIFETIME_MS) return known.reply;
+    const reply = this.#readCapabilities(cwd);
+    this.#capabilities.set(cwd, { at: now, reply });
+    reply.catch(() => this.#capabilities.delete(cwd));
+    return reply;
   }
 }

@@ -13,8 +13,9 @@ function tempDir(t) {
 
 test('sessions come back as they were saved', t => {
   const file = tempDir(t);
-  writeRegistry(file, [{ id: 'a', cwd: '/w', pane: '%1', tmuxSocket: '/s', transcriptPath: '/t', model: 'm', startedAt: 1, lastEventAt: 2 }]);
-  assert.deepEqual(readRegistry(file), [{ id: 'a', cwd: '/w', pane: '%1', tmuxSocket: '/s', transcriptPath: '/t', model: 'm', startedAt: 1, lastEventAt: 2 }]);
+  const record = { id: 'a', cwd: '/w', pane: '%1', tmuxSocket: '/s', transcriptPath: '/t', model: 'm', effort: 'high', startedAt: 1, lastEventAt: 2 };
+  writeRegistry(file, [record]);
+  assert.deepEqual(readRegistry(file), [record]);
 });
 
 test('nothing said in a session reaches the disk', t => {

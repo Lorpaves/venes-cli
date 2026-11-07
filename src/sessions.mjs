@@ -24,6 +24,9 @@ const COMPACT_LIMIT_MS = 30 * 60_000;
 // Stop can fire before the turn's last words reach the transcript.
 const TRANSCRIPT_SETTLE_MS = 2000;
 const ENDS_TURN = new Set(['turn.end', 'turn.interrupted', 'turn.error', 'session.ended']);
+// Long enough for a command typed into a busy session to reach its hook.
+const MODEL_SWITCH_WINDOW_MS = 10_000;
+const ALLOW_MODEL_SWITCH = { hookSpecificOutput: { hookEventName: 'PreModelSwitch', permissionDecision: 'allow' } };
 
 export class HelperError extends Error {
   constructor(code, message, details) {
@@ -183,6 +186,11 @@ export class SessionStore extends EventEmitter {
     s.echoes = s.echoes.filter(echo => echo.clientId !== clientId);
   }
 
+  // The next switch is a reader's, who can't answer what the terminal would ask about it.
+  expectModelSwitch(s, now = Date.now()) {
+    s.modelSwitchDeadline = now + MODEL_SWITCH_WINDOW_MS;
+  }
+
   hold(s, message) { s.held.push(message); }
 
   // The message that can go out now, if any.
@@ -227,8 +235,17 @@ export class SessionStore extends EventEmitter {
     const agentId = ev.agent_id;
     switch (ev.hook_event_name) {
       case 'SessionStart':
-        s.model = ev.model ?? s.model;
+        // A resumed session can be on another model, and this doesn't always say which.
+        s.model = ev.model ?? (ev.source === 'resume' ? undefined : s.model);
         this.#emit(s, 'session.started', { source: ev.source, model: ev.model, cwd: s.cwd });
+        break;
+      case 'PreModelSwitch': {
+        const isExpected = Date.now() < s.modelSwitchDeadline;
+        s.modelSwitchDeadline = undefined;
+        return isExpected ? { decision: ALLOW_MODEL_SWITCH } : undefined;
+      }
+      case 'PostModelSwitch':
+        if (ev.to_model) this.#setModel(s, ev.to_model);
         break;
       case 'SessionEnd':
         this.#endSession(s, ev.reason);
@@ -316,6 +333,7 @@ export class SessionStore extends EventEmitter {
       else if (type === 'thinking') this.#emit(s, 'message.thinking', signal);
       else if (type === 'compacted') this.#onCompactStats(s, signal);
       else if (type === 'localOutput') this.#onLocalOutput(s, signal);
+      else if (type === 'model') this.#onModelReplied(s, signal);
       else if (type === 'refusal') this.#emit(s, 'model.refusal', { ...signal, prompt: s.lastPrompt });
     }
   }
@@ -344,6 +362,11 @@ export class SessionStore extends EventEmitter {
     if (ev.permission_mode && ev.permission_mode !== s.permissionMode) {
       s.permissionMode = ev.permission_mode;
       this.#emit(s, 'session.mode', { permissionMode: s.permissionMode });
+    }
+    // A subagent can run at a level of its own, which says nothing about the session.
+    if (ev.effort?.level && !ev.agent_id && ev.effort.level !== s.effort) {
+      s.effort = ev.effort.level;
+      this.#emit(s, 'session.effort', { effort: s.effort });
     }
     if (tmux.pane) this.#claimPane(s, tmux);
     return s;
@@ -455,6 +478,18 @@ export class SessionStore extends EventEmitter {
     this.#stopCompacting(s);
     if (s.compactWait) this.#finishCompact(s, stats);
     else s.compactStats = stats;
+  }
+
+  #setModel(s, model) {
+    if (model === s.model) return;
+    s.model = model;
+    this.#emit(s, 'session.model', { model });
+  }
+
+  // Only for a session that hasn't said. A reply can land after a switch and still be the old
+  // model's, and a turn run on a skill's model says nothing about the session's.
+  #onModelReplied(s, { model }) {
+    if (!s.model) this.#setModel(s, model);
   }
 
   // A /compact that fails fires no PostCompact and only says so in its output. One that
@@ -578,7 +613,7 @@ export class SessionStore extends EventEmitter {
   #sessionView(s) {
     return {
       id: s.id, status: s.status, cwd: s.cwd, pane: s.pane ?? null, tmuxSocket: s.tmuxSocket ?? null,
-      model: s.model, lastPrompt: s.lastPrompt, lastMessage: s.lastMessage,
+      model: s.model, effort: s.effort, lastPrompt: s.lastPrompt, lastMessage: s.lastMessage,
       permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
       startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id),

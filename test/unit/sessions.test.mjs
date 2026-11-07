@@ -872,3 +872,120 @@ test('only sessions a restart could not find again are remembered', () => {
   store.handleHook({ session_id: 'gone', hook_event_name: 'SessionEnd', reason: 'other' });
   assert.deepEqual(store.registry().map(s => s.id), ['tmux']);
 });
+
+test('a model switch reaches clients, and the session remembers it', () => {
+  const { store, hook, events } = setup();
+  hook('SessionStart', { source: 'startup', model: 'claude-haiku-5-5' });
+  hook('PostModelSwitch', { from_model: 'claude-haiku-5-5', to_model: 'claude-sonnet-5-5', source: 'command' });
+  assert.equal(events.find(e => e.kind === 'session.model').model, 'claude-sonnet-5-5');
+  assert.equal(store.sessions()[0].model, 'claude-sonnet-5-5');
+});
+
+test('a switch with no name leaves the model as it was', () => {
+  const { store, hook, kinds } = setup();
+  hook('SessionStart', { source: 'startup', model: 'claude-haiku-5-5' });
+  hook('PostModelSwitch', {});
+  assert.equal(store.get('a').model, 'claude-haiku-5-5');
+  assert.ok(!kinds().includes('session.model'));
+});
+
+test('a switch to the model it\'s already on tells nobody', () => {
+  const { hook, kinds } = setup();
+  hook('SessionStart', { source: 'startup', model: 'claude-haiku-5-5' });
+  hook('PostModelSwitch', { to_model: 'claude-haiku-5-5' });
+  assert.ok(!kinds().includes('session.model'));
+});
+
+const effortEvents = events => events.filter(e => e.kind === 'session.effort').map(e => e.effort);
+
+test('effort is reported when it changes, and only then', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', { effort: { level: 'high' } });
+  hook('PreToolUse', { ...bash, tool_use_id: 't', effort: { level: 'high' } });
+  hook('Stop', { effort: { level: 'low' } });
+  assert.deepEqual(effortEvents(events), ['high', 'low']);
+  assert.equal(store.sessions()[0].effort, 'low');
+});
+
+test('an event with no effort says nothing about it', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', { effort: { level: 'high' } });
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  assert.deepEqual(effortEvents(events), ['high']);
+  assert.equal(store.get('a').effort, 'high');
+});
+
+test('a subagent\'s effort is its own', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', { effort: { level: 'high' } });
+  hook('PreToolUse', { ...bash, tool_use_id: 't', agent_id: 'x', agent_type: 'Explore', effort: { level: 'low' } });
+  assert.deepEqual(effortEvents(events), ['high']);
+  assert.equal(store.get('a').effort, 'high');
+});
+
+const ALLOWED = { hookSpecificOutput: { hookEventName: 'PreModelSwitch', permissionDecision: 'allow' } };
+
+test('a switch someone makes at the terminal gets no answer, so it asks there as usual', () => {
+  const { hook } = setup();
+  hook('SessionStart', {});
+  assert.equal(hook('PreModelSwitch', { to_model: 'claude-sonnet-5-5' }), undefined);
+});
+
+test('a switch a reader asked for goes through, once', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', {});
+  store.expectModelSwitch(store.get('a'));
+  assert.deepEqual(hook('PreModelSwitch', { to_model: 'claude-sonnet-5-5' }).decision, ALLOWED);
+  assert.equal(hook('PreModelSwitch', { to_model: 'claude-opus-5-5' }), undefined);
+});
+
+test('a switch that never came doesn\'t leave the next one unasked for long', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', {});
+  store.expectModelSwitch(store.get('a'), Date.now() - 60_000);
+  assert.equal(hook('PreModelSwitch', { to_model: 'claude-sonnet-5-5' }), undefined);
+});
+
+test('one session\'s expected switch says nothing about another\'s', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', {});
+  store.expectModelSwitch(store.get('a'));
+  assert.equal(hook('PreModelSwitch', { session_id: 'b', to_model: 'claude-sonnet-5-5' }), undefined);
+});
+
+const replyFrom = model => ({ type: 'assistant', message: { model, content: [{ type: 'text', text: 'hi' }] } });
+
+test('a session that hasn\'t said which model it\'s on is known by its replies', () => {
+  const { store, hook, events } = setup();
+  hook('SessionStart', { source: 'resume' });
+  store.handleTranscriptRecord('a', replyFrom('claude-sonnet-5-5'));
+  store.handleTranscriptRecord('a', replyFrom('claude-sonnet-5-5'));
+  assert.deepEqual(events.filter(e => e.kind === 'session.model').map(e => e.model), ['claude-sonnet-5-5']);
+  assert.equal(store.get('a').model, 'claude-sonnet-5-5');
+});
+
+test('a reply that lands after a switch doesn\'t undo it', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', { source: 'startup', model: 'claude-haiku-5-5' });
+  hook('PostModelSwitch', { to_model: 'claude-sonnet-5-5' });
+  store.handleTranscriptRecord('a', replyFrom('claude-haiku-5-5'));
+  assert.equal(store.get('a').model, 'claude-sonnet-5-5');
+});
+
+test('a resume forgets the old model, which it may not be on any more', () => {
+  const { store, hook } = setup();
+  hook('SessionStart', { source: 'startup', model: 'claude-haiku-5-5' });
+  hook('SessionStart', { source: 'resume' });
+  assert.equal(store.get('a').model, undefined);
+  hook('SessionStart', { source: 'resume', model: 'claude-opus-5-5' });
+  assert.equal(store.get('a').model, 'claude-opus-5-5');
+});
+
+test('clearing or compacting leaves the model alone, when it says nothing about it', () => {
+  for (const source of ['clear', 'compact']) {
+    const { store, hook } = setup();
+    hook('SessionStart', { source: 'startup', model: 'claude-haiku-5-5' });
+    hook('SessionStart', { source });
+    assert.equal(store.get('a').model, 'claude-haiku-5-5', source);
+  }
+});

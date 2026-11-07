@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dropParentSession } from '../../src/daemon.mjs';
-import { libraryPage, readRunning } from '../../src/library.mjs';
+import { Library, libraryPage, readCapabilities, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -105,6 +105,120 @@ test('an id can\'t reach outside the projects folder', t => {
 test('a failure comes back as an error, not a crash', t => {
   const reply = read(configDir(t), { op: 'list', sdk: '/nowhere/sdk.mjs', limit: 1, offset: 0 });
   assert.ok(reply.error.message);
+});
+
+test('a client gets each command and model in the shape it reads', () => {
+  const reply = readCapabilities({
+    commands: [{ name: 'model', description: 'Switch', argumentHint: '<model>' }, { name: 'review', description: 'Look', builtin: true }],
+    models: [{ value: 'opus', displayName: 'Opus', description: 'Big', resolvedModel: 'claude-opus', supportedEffortLevels: ['low', 'high'], price: 1 }],
+  });
+  assert.deepEqual(reply, {
+    commands: [{ name: 'model', description: 'Switch', argumentHint: '<model>' }, { name: 'review', description: 'Look', argumentHint: '' }],
+    models: [{ value: 'opus', displayName: 'Opus', description: 'Big', resolvedModel: 'claude-opus', effortLevels: ['low', 'high'] }],
+  });
+});
+
+test('Claude Code\'s own plumbing stays out of the menu', () => {
+  const { commands } = readCapabilities({ commands: [{ name: '__remote-workflow' }, { name: 'compact' }] });
+  assert.deepEqual(commands.map(command => command.name), ['compact']);
+});
+
+test('a model with no effort setting has no levels', () => {
+  assert.deepEqual(readCapabilities({ models: [{ value: 'haiku' }] }).models[0].effortLevels, []);
+});
+
+test('an empty answer is an empty menu', () => {
+  assert.deepEqual(readCapabilities({}), { commands: [], models: [] });
+});
+
+// An SDK that writes down how it was called, and holds the event loop open as the real one can.
+const FAKE_SDK = `
+import fs from 'node:fs';
+export function query({ options }) {
+  fs.appendFileSync(process.env.FAKE_SDK_LOG, JSON.stringify(options) + '\\n');
+  setInterval(() => {}, 1000);
+  if (process.env.FAKE_SDK_FAILS) throw Object.assign(new Error('no'), { code: 'nope' });
+  return {
+    initializationResult: async () => ({ commands: [{ name: 'model' }], models: [{ value: 'opus', supportedEffortLevels: ['low'] }], account: {} }),
+    close() { fs.appendFileSync(process.env.FAKE_SDK_LOG, '"closed"\\n'); },
+  };
+}`;
+
+function fakeSdk(t, { hasClaude = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-sdk-'));
+  const entry = path.join(dir, 'sdk', '0.3.319', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, FAKE_SDK);
+  const log = path.join(dir, 'log');
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  if (hasClaude) fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n', { mode: 0o755 });
+  const { PATH } = process.env;
+  Object.assign(process.env, { PATH: bin, FAKE_SDK_LOG: log });
+  t.after(() => {
+    process.env.PATH = PATH;
+    delete process.env.FAKE_SDK_LOG;
+    delete process.env.FAKE_SDK_FAILS;
+    fs.rmSync(dir, { recursive: true });
+  });
+  const lines = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []);
+  return { library: new Library({ sdkDir: path.join(dir, 'sdk') }), dir, entry, bin, opened: () => lines().filter(line => line !== 'closed'), lines };
+}
+
+test('capabilities come from a session that runs no hooks and leaves nothing behind', async t => {
+  const { library, dir, bin, opened, lines } = fakeSdk(t);
+  const reply = await library.capabilities(dir);
+  assert.deepEqual(reply, { commands: [{ name: 'model', description: undefined, argumentHint: '' }], models: [{ value: 'opus', displayName: undefined, description: undefined, resolvedModel: undefined, effortLevels: ['low'] }] });
+  const [options] = opened();
+  assert.equal(options.cwd, dir);
+  assert.equal(options.pathToClaudeCodeExecutable, path.join(bin, 'claude'));
+  assert.equal(options.persistSession, false);
+  assert.equal(options.settings.disableAllHooks, true);
+  assert.equal(options.strictMcpConfig, true);
+  assert.deepEqual(options.settingSources, ['user', 'project', 'local']);
+  assert.equal(lines().at(-1), 'closed');
+});
+
+test('capabilities are read once for a while, then again', async t => {
+  const { library, dir, opened } = fakeSdk(t);
+  await library.capabilities(dir, 0);
+  await library.capabilities(dir, 299_999);
+  assert.equal(opened().length, 1);
+  await library.capabilities(dir, 300_000);
+  assert.equal(opened().length, 2);
+});
+
+test('pages opening together share one read', async t => {
+  const { library, dir, opened } = fakeSdk(t);
+  await Promise.all([library.capabilities(dir, 0), library.capabilities(dir, 1), library.capabilities(dir, 2)]);
+  assert.equal(opened().length, 1);
+});
+
+test('each folder has its own, since skills can be a project\'s', async t => {
+  const { library, dir, bin, opened } = fakeSdk(t);
+  await library.capabilities(dir, 0);
+  await library.capabilities(bin, 0);
+  assert.deepEqual(opened().map(options => options.cwd), [dir, bin]);
+});
+
+test('a folder that has gone falls back to home', async t => {
+  const { library, opened } = fakeSdk(t);
+  await library.capabilities('/no/such/folder');
+  assert.equal(opened()[0].cwd, os.homedir());
+});
+
+test('a failure isn\'t kept, so the next page tries again', async t => {
+  const { library, dir, opened } = fakeSdk(t);
+  process.env.FAKE_SDK_FAILS = '1';
+  await assert.rejects(library.capabilities(dir, 0), { code: 'nope' });
+  delete process.env.FAKE_SDK_FAILS;
+  assert.equal((await library.capabilities(dir, 1)).models.length, 1);
+  assert.equal(opened().length, 2);
+});
+
+test('with no Claude Code to ask, it says so', async t => {
+  const { library, dir } = fakeSdk(t, { hasClaude: false });
+  await assert.rejects(library.capabilities(dir), { code: 'no_claude' });
 });
 
 test('what the session that started the helper left behind goes, and the user\'s own settings stay', () => {

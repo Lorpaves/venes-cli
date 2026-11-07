@@ -30,15 +30,43 @@ function findTranscript(sessionId) {
 
 const sdkAt = entry => import(pathToFileURL(entry));
 
+async function* noMessages() {
+  await new Promise(() => {});
+}
+
+// What Claude Code offers in a folder, from a session that's never given anything to do. Hooks
+// are off for it, so that it doesn't look like a session to the helper, or to anything else, and
+// no MCP server gets started for the moment it lasts.
+async function capabilities({ sdk, cwd, claude }) {
+  const { query } = await sdkAt(sdk);
+  const session = query({
+    prompt: noMessages(),
+    options: {
+      cwd, pathToClaudeCodeExecutable: claude, persistSession: false, strictMcpConfig: true,
+      settingSources: ['user', 'project', 'local'], settings: { disableAllHooks: true },
+    },
+  });
+  try {
+    const { commands, models } = await session.initializationResult();
+    return { commands, models };
+  } finally {
+    session.close();
+  }
+}
+
 const operations = {
   list: async ({ sdk, limit, offset }) => ({ sessions: await (await sdkAt(sdk)).listSessions({ limit, offset }) }),
   info: async ({ sdk, sessionId }) => ({ session: await (await sdkAt(sdk)).getSessionInfo(sessionId) }),
   history: ({ sessionId, limit, before }) => readHistory(findTranscript(sessionId), { limit, before }),
+  capabilities,
 };
 
+let reply;
 try {
   const request = JSON.parse(process.argv[2]);
-  process.stdout.write(JSON.stringify(await operations[request.op](request)));
+  reply = await operations[request.op](request);
 } catch (error) {
-  process.stdout.write(JSON.stringify({ error: { code: error.code ?? 'internal', message: error.message } }));
+  reply = { error: { code: error.code ?? 'internal', message: error.message } };
 }
+// An exit of its own, because a session that has closed can still hold the event loop open.
+process.stdout.write(JSON.stringify(reply), () => process.exit(0));

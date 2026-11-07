@@ -22,9 +22,10 @@ function workingDirectory(cwd) {
   return cwd && fs.existsSync(cwd) ? cwd : os.homedir();
 }
 
-function resumeCommand(sessionId, text, env) {
+function resumeCommand(sessionId, text, env, { model, effort } = {}) {
+  const chosen = [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])];
   // `--` keeps a message that starts with "-" from being read as a flag.
-  return ['claude', ...JSON.parse(env.VENES_RESUME_ARGS ?? '[]'), '--resume', sessionId, '--', text];
+  return ['claude', ...JSON.parse(env.VENES_RESUME_ARGS ?? '[]'), ...chosen, '--resume', sessionId, '--', text];
 }
 
 function heardFrom(store, sessionId) {
@@ -52,7 +53,7 @@ async function waitForPrompt({ prompted, tmux, name, pane, tmuxSocket, limit, ch
 }
 
 // A session running anywhere else can't be resumed here: the two would write into one transcript.
-export async function resumeSession({ store, library, tmux, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS }, sessionId, { clientId, text }) {
+export async function resumeSession({ store, library, tmux, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS }, sessionId, { clientId, text }, chosen) {
   if (Buffer.byteLength(text) > FIRST_MESSAGE_LIMIT_BYTES) throw new HelperError('message_too_long', 'Send something shorter first, to start this session.');
   const running = await library.running();
   if (running.some(session => session.id === sessionId)) throw new HelperError('no_pane', 'This session is running outside tmux.');
@@ -65,7 +66,7 @@ export async function resumeSession({ store, library, tmux, env = process.env, l
   const { prompted, stopListening } = heardFrom(store, sessionId);
   try {
     const variables = Object.fromEntries(PASSED_ENV.filter(key => env[key]).map(key => [key, env[key]]));
-    const pane = await tmux.startSession({ name, cwd: workingDirectory(info.cwd), command: resumeCommand(sessionId, text, env), env: variables, tmuxSocket });
+    const pane = await tmux.startSession({ name, cwd: workingDirectory(info.cwd), command: resumeCommand(sessionId, text, env, chosen), env: variables, tmuxSocket });
     await waitForPrompt({ prompted, tmux, name, pane, tmuxSocket, limit, check });
     return { queued: false, resumed: true };
   } catch (error) {

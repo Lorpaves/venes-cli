@@ -353,5 +353,35 @@ test('older pages carry on from where a page cut off by a turn stopped', () => {
 });
 
 test('a session with no transcript yet has an empty history', () => {
-  assert.deepEqual(readHistory('/nonexistent/venes/t.jsonl'), { items: [], before: 0, hasMore: false });
+  assert.deepEqual(readHistory('/nonexistent/venes/t.jsonl'), { items: [], before: 0, hasMore: false, model: undefined });
+});
+
+test('a reply says which model wrote it', () => {
+  assert.deepEqual(
+    signalsFrom({ type: 'assistant', message: { model: 'claude-sonnet-5-5', content: [{ type: 'text', text: 'hi' }] } }),
+    [{ type: 'model', model: 'claude-sonnet-5-5' }],
+  );
+});
+
+test('a reply Claude Code wrote itself names no model, and neither does a subagent\'s', () => {
+  assert.deepEqual(signalsFrom({ type: 'assistant', message: { model: '<synthetic>', content: 'x' } }), []);
+  assert.deepEqual(signalsFrom({ type: 'assistant', message: { content: 'x' } }), []);
+  assert.deepEqual(signalsFrom({ type: 'assistant', isSidechain: true, message: { model: 'claude-haiku-5-5', content: 'x' } }), []);
+});
+
+test('history says which model last replied', () => {
+  const reply = (model, fields = {}) => line({ type: 'assistant', ...fields, message: { model, content: [{ type: 'text', text: 'x' }] } });
+  const { file, cleanup } = tempFile([
+    reply('claude-haiku-5-5'), reply('claude-sonnet-5-5'), reply('<synthetic>'), reply('claude-opus-5-5', { isSidechain: true }),
+  ].join(''));
+  try {
+    assert.equal(readHistory(file).model, 'claude-sonnet-5-5');
+  } finally { cleanup(); }
+});
+
+test('history with no replies has no model to name', () => {
+  const { file, cleanup } = tempFile(userText('hello'));
+  try {
+    assert.equal(readHistory(file).model, undefined);
+  } finally { cleanup(); }
 });

@@ -110,11 +110,13 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |
+| `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). |
+| `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
-| `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. A session that isn't running is resumed. See [The library](#the-library). |
+| `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
 | `interrupt` | `sessionId` | Presses Esc |
 | `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
@@ -148,6 +150,23 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 `join` and `history` work on any of these. For a session the helper doesn't know, `turn` is empty and the session's `status` is `ended` unless it's running somewhere.
 
 `send` to a session that isn't running runs `claude --resume` in a new tmux session named `venes-<id>`, in the session's folder, with the message as its first prompt. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside tmux is refused with `no_pane`, because resuming it would put two processes on one transcript.
+
+### Commands and models
+
+`capabilities` comes from the Agent SDK's `initializationResult()`, in a session that's never given anything to do. It's read once per folder and kept for five minutes, so a new skill can take that long to show up.
+
+| Field | Contents |
+|---|---|
+| `commands` | `name`, `description`, `argumentHint` |
+| `models` | `value`, `displayName`, `description`, `resolvedModel`, `effortLevels`. Pass `value` to `configure`. `resolvedModel` is the name a session reports. `effortLevels` is empty for a model with no effort setting. |
+
+`configure` types `/model` and `/effort` into a running session, which takes effect at once, even during a turn. Claude Code stops to ask before these give up a warm prompt cache, and the helper says yes for the reader: a `PreModelSwitch` hook for the model, and a key press for the effort level, which has no hook. A switch made at the terminal still asks there.
+
+A command that opens a page in the terminal, like `/config` or `/usage`, can't be used from a client. The helper closes the page again, because the next message would otherwise act on it, and `send` fails with `terminal_only`. To see whether one does, the reply to any slash command comes about a second and a half later. A `/model` or `/effort` sent as a message gets its question answered too. What a local command prints isn't sent to clients.
+
+A session that isn't running keeps the choice for its next `send`, which passes it as `--model` and `--effort`. A session running outside tmux is refused with `no_pane`.
+
+A session reports its model and effort through `session.model`, `session.effort`, and `model` and `effort` in `sessions`. Effort is only known from the first hook that carries it, usually the end of the first turn. For a session that isn't running, `join` gives the model that last replied.
 
 ### Sending during a turn
 
@@ -200,6 +219,8 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.attached` | `pane` |
 | `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
 | `session.mode` | `permissionMode` |
+| `session.model` | `model` |
+| `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
 | `message.user` | `text`, `clientId` |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
@@ -233,13 +254,16 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 
 | `code` | Meaning |
 |---|---|
-| `request_pending`, `dialog_open` | `send` was refused because Enter would have answered an open prompt |
+| `request_pending`, `dialog_open` | `send` or `configure` was refused because Enter would have answered an open prompt |
 | `request_closed` | That request was already answered |
 | `no_pane` | The session isn't in tmux, so it can be watched and answered but not typed into |
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | tmux isn't installed, so a stored session can't be resumed |
+| `no_claude` | Claude Code isn't on the PATH, so `capabilities` has nothing to ask |
+| `bad_model`, `bad_effort` | `configure` was given something that isn't a model name or an effort level |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels through tmux. Later ones don't. |
+| `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
 | `nothing_to_remember` | `always` was sent for a request with no rule to save |
@@ -260,6 +284,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 - **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated. The SDK's `getSessionMessages()` doesn't have this problem, but it stops at the last compaction, which can be nearly all of a long session, so `history` reads the transcript.
 - **A session outside tmux can't be typed into.** It's listed, and if it started with the plugin it can be watched and answered. One started before the plugin was installed shows only what's in its transcript.
 - **A dialog can stop a resume.** If Claude Code asks something first, such as whether to continue a long conversation, `send` fails with `dialog_open`, and someone at the Mac has to answer it in the `venes-<id>` tmux session.
+- **`configure` also changes the defaults for new sessions.** `/model` and `/effort` save themselves, apart from `/effort max`, and Claude Code has no typed form that applies to one session. Only a resumed session's choice stays with that session.
+- **The cache question is read off the screen.** If Claude Code rewords it, `configure` won't see it, and it stays open in the terminal until someone answers. Model changes don't depend on this, unless the session started before this version was installed.
 - **A restart forgets most of a session's state.** Sessions in tmux stay listed, as idle until they're next heard from. The rest reappear on their next event. Events, held messages and open requests are lost.
 - **A release reaches everyone at once.** Pushing a new `version` to `main` installs it everywhere within about six hours. A push that doesn't change `version` reaches no one.
 - **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.
@@ -273,7 +299,7 @@ npm test                                     # unit tests, no Claude needed
 VENES_E2E_WS=/abs/workspace npm run e2e      # real Claude Code, in an isolated tmux
 ```
 
-The end-to-end suite loads this folder with `--plugin-dir`, so nothing gets installed, and it uses a small amount of model usage. Set `VENES_E2E_SSH=1` to add a case that goes through real SSH to this Mac, which needs key login to `localhost`.
+The end-to-end suite loads this folder with `--plugin-dir`, so nothing gets installed, and it uses a small amount of model usage. The cases that change a model write to `~/.claude/settings.json`, as `/model` does, and put it back afterwards. Set `VENES_E2E_SSH=1` to add a case that goes through real SSH to this Mac, which needs key login to `localhost`.
 
 ## License
 

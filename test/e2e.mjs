@@ -108,13 +108,13 @@ class Run {
   }
 }
 
-function launch({ mode = 'default', sources = 'project' } = {}) {
+function launch({ mode = 'default', sources = 'project', model = MODEL } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
-    '--model', MODEL, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
+    '--model', model, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
   tmux('new-session', '-d', '-s', 'run', '-x', '110', '-y', '42', '-c', WS, 'sh', '-c', cmd);
 }
 
@@ -705,6 +705,153 @@ T('a_stored_session_can_be_listed_read_and_continued', { mode: 'bypassPermission
   client.close();
 });
 
+// /model and /effort save themselves as the defaults for new sessions, in the real settings
+// of the Claude this suite borrows. Those three keys go back afterwards, and nothing else moves.
+const USER_SETTINGS = path.join(process.env.HOME, '.claude/settings.json');
+const SAVED_DEFAULTS = ['model', 'effortLevel', 'modelSettings'];
+const readSettings = () => JSON.parse(fs.readFileSync(USER_SETTINGS, 'utf8'));
+const readDefaults = () => Object.fromEntries(Object.entries(readSettings()).filter(([key]) => SAVED_DEFAULTS.includes(key)));
+function keepingDefaults(fn) {
+  return async r => {
+    const original = readSettings();
+    const before = readDefaults();
+    // Built on the original, so that the keys stay in the order they were.
+    const putBack = () => {
+      const now = readSettings();
+      const others = Object.keys({ ...original, ...now }).filter(key => !SAVED_DEFAULTS.includes(key));
+      const settings = { ...original };
+      for (const key of others) {
+        if (key in now) settings[key] = now[key];
+        else delete settings[key];
+      }
+      fs.writeFileSync(USER_SETTINGS, `${JSON.stringify(settings, null, 2)}\n`);
+    };
+    process.once('exit', putBack);
+    try {
+      await fn(r, before);
+    } finally {
+      process.off('exit', putBack);
+      putBack();
+    }
+  };
+}
+
+T('a_reader_can_change_the_model_and_effort', {}, keepingDefaults(async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id, model } = await r.session();
+
+  const { commands, models } = await r.client.request('capabilities', { sessionId: id });
+  assert.ok(commands.some(command => command.name === 'compact' && command.description), 'it lists commands');
+  assert.ok(!commands.some(command => command.name.startsWith('__')));
+  assert.ok(models.some(option => option.resolvedModel === model), 'what a session reports is a name clients can look up');
+  const sonnet = models.find(option => option.value === 'sonnet');
+  assert.ok(sonnet.displayName && sonnet.effortLevels.includes('low'));
+  assert.ok(!(await r.client.request('sessions')).sessions.some(session => session.id !== id && session.status !== 'ended'), 'asking leaves no session behind');
+
+  await assert.rejects(r.client.request('configure', { sessionId: id, model: 'two words' }), { code: 'bad_model' });
+  await assert.rejects(r.client.request('configure', { sessionId: id, effort: 'extreme' }), { code: 'bad_effort' });
+
+  r.mark();
+  await r.client.request('configure', { sessionId: id, model: 'sonnet' });
+  assert.equal((await r.kind('session.model', 5000)).model, sonnet.resolvedModel);
+  await r.waitForPane(/Set model to Sonnet/, 5000);
+
+  await r.client.request('configure', { sessionId: id, effort: 'low' });
+  await r.waitForPane(/Set effort level to low/, 5000);
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
+  await r.wait(e => e.kind === 'session.effort' && e.effort === 'low', 30000, 'session.effort low');
+  await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'turn.end AFTER');
+
+  const session = await r.session();
+  assert.deepEqual([session.model, session.effort], [sonnet.resolvedModel, 'low']);
+  assert.deepEqual(r.events.filter(e => e.kind === 'message.user').map(e => e.text), ['Reply with only the word AFTER.'], 'none of it shows as a message');
+  const { items } = await r.client.request('history', { sessionId: id, limit: 50 });
+  assert.ok(!items.some(item => /^\/(model|effort)/.test(item.text ?? '')), 'or in the history');
+}));
+
+T('a_change_during_a_turn_applies_at_once', { mode: 'bypassPermissions' }, keepingDefaults(async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  r.mark();
+  await r.type(SLEEP(8, 'SLEPT'));
+  await r.kind('tool.start', 20000);
+  await r.client.request('configure', { sessionId: id, model: 'sonnet' });
+  await r.kind('session.model', 5000);
+  assert.equal((await r.session()).status, 'running', 'without waiting for the turn to end');
+  await r.wait(e => e.kind === 'turn.end' && /SLEPT/.test(e.lastMessage), 45000, 'turn.end SLEPT');
+}));
+
+T('a_question_about_the_cache_is_answered_for_a_reader', { model: 'claude-sonnet-5' }, keepingDefaults(async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  await r.client.request('configure', { sessionId: id, effort: 'low' });
+  await r.waitForPane(/Set effort level to low/, 5000);
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
+  await r.wait(e => e.kind === 'session.effort' && e.effort === 'low', 30000, 'session.effort low');
+}));
+
+T('a_page_opened_from_here_is_closed_again', {}, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  const before = fs.readFileSync(USER_SETTINGS, 'utf8');
+  for (const text of ['/usage', '/config']) {
+    await assert.rejects(r.client.request('send', { sessionId: id, text }), { code: 'terminal_only' }, text);
+    assert.doesNotMatch(r.pane(), /Esc to (cancel|clear|close)/, text);
+  }
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
+  await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'turn.end AFTER');
+  assert.equal(fs.readFileSync(USER_SETTINGS, 'utf8'), before, 'what was typed next reached Claude, and no setting');
+});
+
+T('a_model_typed_as_a_message_goes_through_too', {}, keepingDefaults(async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  await r.client.request('send', { sessionId: id, text: '/model sonnet' });
+  await r.wait(e => e.kind === 'session.model', 5000, 'session.model');
+}));
+
+T('a_switch_made_at_the_terminal_still_asks_there', {}, keepingDefaults(async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  await r.type('/model sonnet');
+  await r.waitForPane(/Yes, switch to/, 5000);
+  await assert.rejects(r.client.request('send', { sessionId: id, text: 'stray message' }), { code: 'dialog_open' });
+  await assert.rejects(r.client.request('configure', { sessionId: id, effort: 'low' }), { code: 'dialog_open' });
+  r.key('Escape');
+  await r.waitForPane(/Kept model as/, 5000);
+  assert.ok(!r.events.some(e => e.kind === 'session.model'), 'and nothing changed');
+}));
+
+T('a_choice_for_a_stopped_session_waits_for_its_resume', { mode: 'bypassPermissions' }, keepingDefaults(async (r, before) => {
+  await r.type('Reply with only the word STORED.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  tmux('kill-session', '-t', 'run');
+  await delay(1500);
+  const { client, run } = await forgetSessions();
+
+  const { models } = await client.request('capabilities', { sessionId: id });
+  const named = value => models.find(option => option.value === value).resolvedModel;
+  const joined = await client.request('join', { sessionId: id, limit: 20 });
+  assert.equal(joined.sessions[0].model, named('haiku'), 'it can say what a stopped session last ran on');
+
+  await client.request('configure', { sessionId: id, model: 'sonnet' });
+  await client.request('configure', { sessionId: id, effort: 'low' });
+  await client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.' });
+  await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /AGAIN/.test(e.lastMessage), 30000, 'turn.end AGAIN');
+  await run.wait(e => e.kind === 'session.model' && e.sessionId === id && e.model === named('sonnet'), 5000, 'session.model');
+  assert.equal((await client.request('sessions')).sessions.find(s => s.id === id).effort, 'low');
+  assert.deepEqual(readDefaults(), before, 'a resume\'s choice lasts for that session alone');
+  tmux('kill-session', '-t', `venes-${id.slice(0, 8)}`);
+  client.close();
+}));
+
 T('a_session_running_elsewhere_is_listed_but_not_resumed', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word ELSEWHERE.');
   await r.turnEnd();
@@ -715,6 +862,7 @@ T('a_session_running_elsewhere_is_listed_but_not_resumed', { mode: 'bypassPermis
   const joined = await client.request('join', { sessionId: id, limit: 20 });
   assert.equal(joined.sessions[0].status, 'idle');
   await assert.rejects(client.request('send', { sessionId: id, text: 'hello' }), { code: 'no_pane' });
+  await assert.rejects(client.request('configure', { sessionId: id, model: 'sonnet' }), { code: 'no_pane' });
   client.close();
 });
 

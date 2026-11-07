@@ -120,6 +120,18 @@ test('test settings reach the command and the environment', async () => {
   assert.equal(started[0].tmuxSocket, '/s');
 });
 
+test('what the reader chose goes on the command line, ahead of the message', async () => {
+  const { deps, started } = setUp({ onStart: store => prompt(store, 'x') });
+  await resumeSession(deps, ID, { text: 'x' }, { model: 'sonnet', effort: 'low' });
+  assert.deepEqual(started[0].command, ['claude', '--model', 'sonnet', '--effort', 'low', '--resume', ID, '--', 'x']);
+});
+
+test('a choice of one leaves the other to the session', async () => {
+  const { deps, started } = setUp({ onStart: store => prompt(store, 'x') });
+  await resumeSession(deps, ID, { text: 'x' }, { effort: 'max' });
+  assert.deepEqual(started[0].command, ['claude', '--effort', 'max', '--resume', ID, '--', 'x']);
+});
+
 test('a resumed session that had ended comes back with no old pane', () => {
   const store = new SessionStore({ agentParent: () => undefined });
   store.handleHook({ hook_event_name: 'SessionStart', session_id: ID, source: 'startup', cwd: '/w' }, { pane: '%1' });

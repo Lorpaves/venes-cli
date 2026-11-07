@@ -65,6 +65,17 @@ function thinkingSignals(record) {
     .map(block => ({ type: 'thinking', text: block.thinking ?? '', durationMs: record.thinkingDurationMs }));
 }
 
+// Replies Claude Code writes itself, such as an API error, name a made-up model like <synthetic>.
+function modelOf(record) {
+  const model = record.type === 'assistant' ? record.message?.model : undefined;
+  return model && !model.startsWith('<') ? model : undefined;
+}
+
+function modelSignals(record) {
+  const model = modelOf(record);
+  return model ? [{ type: 'model', model }] : [];
+}
+
 function systemSignals(record) {
   if (record.subtype === 'compact_boundary') {
     const { preTokens, postTokens } = record.compactMetadata ?? {};
@@ -85,7 +96,7 @@ export function signalsFrom(record) {
   if (record?.isSidechain) return [];
   switch (record?.type) {
     case 'user': return userSignals(record);
-    case 'assistant': return thinkingSignals(record);
+    case 'assistant': return [...thinkingSignals(record), ...modelSignals(record)];
     case 'system': return systemSignals(record);
     default: return [];
   }
@@ -204,12 +215,14 @@ function subagentCalls(file, parentToolUseId) {
 function conversationItems(file) {
   const items = [];
   const tools = new Map();
+  let model;
   const addUserText = (text, at) => {
     if (INTERRUPTED.test(text)) items.push({ role: 'system', at, kind: 'interrupted' });
     else if (!HIDDEN_USER_TEXT.test(text)) items.push({ role: 'user', at, text: unwrapPasted(text) });
   };
   for (const record of readRecords(file)) {
     if (record.isSidechain || record.isMeta || record.isCompactSummary) continue;
+    model = modelOf(record) ?? model;
     const at = record.timestamp;
     if (record.type === 'system') {
       if (record.subtype === 'turn_duration') items.push({ role: 'turn_end', at, durationMs: record.durationMs });
@@ -237,7 +250,7 @@ function conversationItems(file) {
       }
     }
   }
-  return items;
+  return { items, model };
 }
 
 // Where a turn begins among `items`: at its prompt, or for a turn that has none, like a
@@ -254,9 +267,10 @@ function turnStartIn(items, { at, prompt }) {
 
 // `before` counts items from the start of the transcript, which only ever grows, so a
 // cursor stays valid while the session runs. Subagent calls follow the call that started
-// them and don't count towards `limit`. `turn` stops the page where that turn begins.
+// them and don't count towards `limit`. `turn` stops the page where that turn begins. `model`
+// is the last one to have replied.
 export function readHistory(file, { limit, before, turn } = {}) {
-  const items = conversationItems(file);
+  const { items, model } = conversationItems(file);
   const edge = turn ? turnStartIn(items, turn) : items.length;
   const end = Math.min(before ?? edge, edge);
   const start = Math.max(0, end - (limit ?? DEFAULT_HISTORY_LIMIT));
@@ -264,7 +278,7 @@ export function readHistory(file, { limit, before, turn } = {}) {
   const withCalls = item => (subagents.has(item.toolUseId)
     ? [item, ...subagentCalls(subagents.get(item.toolUseId), item.toolUseId).flatMap(withCalls)]
     : [item]);
-  return { items: items.slice(start, end).flatMap(withCalls), before: start, hasMore: start > 0 };
+  return { items: items.slice(start, end).flatMap(withCalls), before: start, hasMore: start > 0, model };
 }
 
 // The end of a task's output file, which can be long and may still be growing.

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readHistory } from './transcript.mjs';
+import { readHistory, readImage } from './transcript.mjs';
 
 const SESSION_ID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
@@ -58,6 +58,7 @@ const operations = {
   list: async ({ sdk, limit, offset }) => ({ sessions: await (await sdkAt(sdk)).listSessions({ limit, offset }) }),
   info: async ({ sdk, sessionId }) => ({ session: await (await sdkAt(sdk)).getSessionInfo(sessionId) }),
   history: ({ sessionId, limit, before }) => readHistory(findTranscript(sessionId), { limit, before }),
+  image: ({ sessionId, id }) => readImage(findTranscript(sessionId), id) ?? {},
   delete: async ({ sdk, sessionId }) => {
     findTranscript(sessionId);
     await (await sdkAt(sdk)).deleteSession(sessionId);

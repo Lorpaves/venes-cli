@@ -16,7 +16,7 @@ import { removeSession } from './remove.mjs';
 import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
-import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
+import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from './terminal.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
 import { findClaudePanes } from './tmux.mjs';
@@ -204,6 +204,13 @@ function createClientServer(store, checkForUpdate, library) {
     history: msg => {
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);
+    },
+    // `imageId`, because `id` is the request's own.
+    image: async msg => {
+      const file = store.find(msg.sessionId)?.transcriptPath;
+      const image = file ? readImage(file, msg.imageId) : await library.image(msg.sessionId, msg.imageId);
+      if (!image?.data) throw new HelperError('unknown_image', 'This image is no longer in the transcript.');
+      return image;
     },
     // Nothing here awaits for a session the helper knows, so every event is either in this
     // reply or follows it on the wire.

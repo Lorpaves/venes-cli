@@ -376,6 +376,50 @@ test('held for the end of the turn, a message stays until then', () => {
   assert.equal(store.nextHeld(session).text, 'more');
 });
 
+test('a tool\'s image stays out of its event, and the rest of its response doesn\'t', () => {
+  const { hook, events } = setup();
+  hook('PreToolUse', { tool_use_id: 't', tool_name: 'Read', tool_input: {} });
+  hook('PostToolUse', {
+    tool_use_id: 't', tool_name: 'Read', tool_input: {},
+    tool_response: { type: 'image', file: { base64: 'QUJD', type: 'image/png', dimensions: { originalWidth: 10 } } },
+  });
+  const { response } = events.find(e => e.kind === 'tool.end');
+  assert.equal(response.type, 'image');
+  assert.equal(response.file.base64, undefined);
+  assert.deepEqual(response.file.dimensions, { originalWidth: 10 });
+});
+
+test('so does one in the shape a server\'s tool uses', () => {
+  const { hook, events } = setup();
+  hook('PreToolUse', { tool_use_id: 't', tool_name: 'mcp', tool_input: {} });
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QUJD' } };
+  hook('PostToolUse', { tool_use_id: 't', tool_name: 'mcp', tool_input: {}, tool_response: [image, { type: 'text', text: 'words' }] });
+  const { response } = events.find(e => e.kind === 'tool.end');
+  assert.equal(response[0].source.data, undefined);
+  assert.equal(response[0].source.media_type, 'image/png');
+  assert.deepEqual(response[1], { type: 'text', text: 'words' });
+});
+
+test('any other response comes through as it was', () => {
+  const { hook, events } = setup();
+  hook('PreToolUse', { tool_use_id: 't', ...bash });
+  hook('PostToolUse', { tool_use_id: 't', ...bash, tool_response: { stdout: 'ok' } });
+  assert.deepEqual(events.find(e => e.kind === 'tool.end').response, { stdout: 'ok' });
+});
+
+test('images from the transcript go out as events', () => {
+  const { store, hook, events } = setup();
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  const image = { type: 'image', source: { media_type: 'image/png', data: 'QUJD' } };
+  store.handleTranscriptRecord('a', { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: [image] }] } });
+  store.handleTranscriptRecord('a', { type: 'user', message: { content: [{ type: 'text', text: 'look' }, image] } });
+  const tool = events.find(e => e.kind === 'tool.images');
+  assert.equal(tool.toolUseId, 't');
+  assert.equal(tool.images[0].mediaType, 'image/png');
+  assert.equal(events.find(e => e.kind === 'message.images').images[0].bytes, 3);
+  assert.ok(!JSON.stringify(events).includes('QUJD'));
+});
+
 test('a send that failed no longer claims a later message', () => {
   const { store, hook, events } = setup();
   hook('Stop', {});

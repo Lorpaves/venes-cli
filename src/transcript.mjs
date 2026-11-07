@@ -3,7 +3,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 
 const INTERRUPTED = /^\[Request interrupted by user/;
 const HIDDEN_USER_TEXT = /^<(task-notification|command-|local-command|system-reminder)/;
@@ -13,6 +12,10 @@ const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr)>([\s\S]*?)<\/local
 // What ends a turn among a transcript's items, whether it finished or was stopped.
 const TURN_ENDS = new Set(['turn_end', 'system']);
 const DEFAULT_HISTORY_LIMIT = 200;
+// Where a record's line starts in its file, which an image's id goes by.
+const OFFSET = Symbol('offset');
+const IMAGE_ID = /^(\d{1,15}):(\d{1,6})$/;
+const LINE_CHUNK_BYTES = 1024 * 1024;
 // A prompt's record is stamped a little before its hook reaches the helper.
 const PROMPT_LEAD_MS = 5000;
 
@@ -35,6 +38,37 @@ function resultText(block) {
   if (typeof block.content === 'string') return block.content;
   if (!Array.isArray(block.content)) return '';
   return block.content.map(part => part?.text ?? '').join('');
+}
+
+// A record's images, in the order an id counts them: what came with a message, and what a tool showed.
+function imagesIn(record) {
+  const isQueued = record.type === 'attachment' && record.attachment?.type === 'queued_command';
+  const blocks = isQueued ? blocksOf({ message: { content: record.attachment.prompt } }) : blocksOf(record);
+  return blocks.flatMap(block => {
+    if (block?.type === 'tool_result' && Array.isArray(block.content)) {
+      return block.content.filter(part => part?.type === 'image').map(part => ({ source: part.source, toolUseId: block.tool_use_id }));
+    }
+    return block?.type === 'image' ? [{ source: block.source }] : [];
+  }).filter(({ source }) => source?.data);
+}
+
+// Images are too big to send with a page, so a page says which there are and `readImage` fetches one.
+function imageRefs(record) {
+  return imagesIn(record).map(({ source, toolUseId }, index) => ({
+    toolUseId, id: `${record[OFFSET]}:${index}`, mediaType: source.media_type, bytes: Math.floor(source.data.length * 3 / 4),
+  }));
+}
+
+function imageSignals(record) {
+  if (record.isMeta) return [];
+  const byTool = new Map();
+  const own = [];
+  for (const { toolUseId, ...image } of imageRefs(record)) {
+    if (toolUseId) byTool.set(toolUseId, [...(byTool.get(toolUseId) ?? []), image]);
+    else own.push(image);
+  }
+  const signals = [...byTool].map(([toolUseId, images]) => ({ type: 'toolImages', toolUseId, images }));
+  return own.length ? [...signals, { type: 'userImages', images: own }] : signals;
 }
 
 function userSignals(record) {
@@ -104,7 +138,8 @@ function queueSignals({ operation, content }) {
 export function signalsFrom(record) {
   if (record?.isSidechain) return [];
   switch (record?.type) {
-    case 'user': return userSignals(record);
+    case 'user': return [...userSignals(record), ...imageSignals(record)];
+    case 'attachment': return imageSignals(record);
     case 'assistant': return [...thinkingSignals(record), ...modelSignals(record)];
     case 'system': return systemSignals(record);
     case 'queue-operation': return queueSignals(record);
@@ -132,11 +167,23 @@ export function parseTaskNotification(text) {
   };
 }
 
+// Each whole line of `bytes` as a record, and what's left after the last one. `start` is where
+// `bytes` starts in its file.
+function recordsIn(bytes, start = 0) {
+  const records = [];
+  let position = 0;
+  for (let end = bytes.indexOf(0x0a); end >= 0; end = bytes.indexOf(0x0a, position)) {
+    const record = parseLine(bytes.toString('utf8', position, end));
+    if (record) records.push(Object.assign(record, { [OFFSET]: start + position }));
+    position = end + 1;
+  }
+  return { records, rest: bytes.subarray(position) };
+}
+
 export class TranscriptTail {
   #file;
   #offset;
-  #partial = '';
-  #decoder = new StringDecoder('utf8');
+  #partial = Buffer.alloc(0);
 
   // Starts at the end of the file: history is served separately by readHistory.
   constructor(file) {
@@ -154,10 +201,10 @@ export class TranscriptTail {
     const buffer = Buffer.alloc(size - this.#offset);
     const fd = fs.openSync(this.#file, 'r');
     try { fs.readSync(fd, buffer, 0, buffer.length, this.#offset); } finally { fs.closeSync(fd); }
+    const { records, rest } = recordsIn(Buffer.concat([this.#partial, buffer]), this.#offset - this.#partial.length);
     this.#offset = size;
-    const lines = (this.#partial + this.#decoder.write(buffer)).split('\n');
-    this.#partial = lines.pop();
-    return lines.map(parseLine).filter(Boolean);
+    this.#partial = rest;
+    return records;
   }
 }
 
@@ -169,7 +216,10 @@ function parseLine(line) {
 // A session has no transcript until its first message.
 function readRecords(file) {
   try {
-    return fs.readFileSync(file, 'utf8').split('\n').map(parseLine).filter(Boolean);
+    const bytes = fs.readFileSync(file);
+    const { records, rest } = recordsIn(bytes);
+    const last = parseLine(rest.toString());
+    return last ? [...records, Object.assign(last, { [OFFSET]: bytes.length - rest.length })] : records;
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     throw error;
@@ -226,6 +276,13 @@ function conversationItems(file) {
   const items = [];
   const tools = new Map();
   let model;
+  // A tool's images go with its call, and the rest with what the record said, from `first` on.
+  const addImages = (record, first) => {
+    for (const { toolUseId, ...image } of imageRefs(record)) {
+      const owner = toolUseId ? tools.get(toolUseId) : items.slice(first).findLast(item => item.role === 'user');
+      if (owner) (owner.images ??= []).push(image);
+    }
+  };
   const addUserText = (text, at) => {
     if (INTERRUPTED.test(text)) items.push({ role: 'system', at, kind: 'interrupted' });
     else if (!HIDDEN_USER_TEXT.test(text)) items.push({ role: 'user', at, text: unwrapPasted(text) });
@@ -244,10 +301,13 @@ function conversationItems(file) {
       // A message sent during a turn is stored here, and has no user record of its own.
       const { type, commandMode, prompt, origin } = record.attachment ?? {};
       if (type !== 'queued_command' || commandMode !== 'prompt' || (origin && origin.kind !== 'human')) continue;
+      const first = items.length;
       for (const block of blocksOf({ message: { content: prompt } })) {
         if (block?.type === 'text') addUserText(block.text ?? '', at);
       }
+      addImages(record, first);
     } else if (record.type === 'user' || record.type === 'assistant') {
+      const first = items.length;
       for (const block of blocksOf(record)) {
         if (!block) continue;
         addToolBlock(block, at, items, tools);
@@ -258,6 +318,7 @@ function conversationItems(file) {
           else addUserText(block.text ?? '', at);
         }
       }
+      addImages(record, first);
     }
   }
   return { items, model };
@@ -295,6 +356,38 @@ export function readHistory(file, { limit, before, turn } = {}) {
     ? [item, ...subagentCalls(subagents.get(item.toolUseId), item.toolUseId).flatMap(withCalls)]
     : [item]);
   return { items: items.slice(start, end).flatMap(withCalls), before: start, hasMore: start > 0, model };
+}
+
+function lineAt(file, offset) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const chunk = Buffer.alloc(LINE_CHUNK_BYTES);
+    const pieces = [];
+    for (let position = offset; ;) {
+      const length = fs.readSync(fd, chunk, 0, chunk.length, position);
+      const end = chunk.subarray(0, length).indexOf(0x0a);
+      pieces.push(Buffer.from(chunk.subarray(0, end < 0 ? length : end)));
+      if (length === 0 || end >= 0) return Buffer.concat(pieces).toString();
+      position += length;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// An image by the id a page gave it. The id says where its record is, because a transcript can be
+// far too long to read for one image. `undefined` if it isn't there.
+export function readImage(file, id) {
+  const [, offset, index] = String(id).match(IMAGE_ID) ?? [];
+  if (offset === undefined) return undefined;
+  try {
+    const record = parseLine(lineAt(file, Number(offset)));
+    const source = record ? imagesIn(record)[Number(index)]?.source : undefined;
+    return source ? { mediaType: source.media_type, data: source.data } : undefined;
+  } catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  }
 }
 
 // The end of a task's output file, which can be long and may still be growing.

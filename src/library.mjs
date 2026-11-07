@@ -144,6 +144,10 @@ export class Library {
     return this.#read({ op: 'history', sessionId, limit, before });
   }
 
+  image(sessionId, id) {
+    return this.#read({ op: 'image', sessionId, id });
+  }
+
   // Its transcript and its subagents' are gone from this Mac after this.
   async delete(sessionId) {
     await this.#read({ op: 'delete', sdk: await this.prepare(), sessionId });

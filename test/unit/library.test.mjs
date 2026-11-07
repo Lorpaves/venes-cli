@@ -92,6 +92,16 @@ test('a page of a stored session stops where it was asked to', t => {
   assert.deepEqual([reply.before, reply.hasMore], [2, true]);
 });
 
+test('an image of a stored session comes from its transcript', t => {
+  const dir = configDir(t);
+  const file = path.join(dir, 'projects', '-Users-me-app', `${ID}.jsonl`);
+  const image = { type: 'image', source: { media_type: 'image/png', data: 'QUJD' } };
+  const before = fs.statSync(file).size + 1;
+  fs.appendFileSync(file, `\n${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'look' }, image] } })}`);
+  assert.deepEqual(read(dir, { op: 'image', sessionId: ID, id: `${before}:0` }), { mediaType: 'image/png', data: 'QUJD' });
+  assert.deepEqual(read(dir, { op: 'image', sessionId: ID, id: `${before}:1` }), {}, 'nothing there');
+});
+
 test('a session that isn\'t stored is reported as unknown', t => {
   const reply = read(configDir(t), { op: 'history', sessionId: '99999999-2222-4333-8444-555555555555' });
   assert.equal(reply.error.code, 'unknown_session');

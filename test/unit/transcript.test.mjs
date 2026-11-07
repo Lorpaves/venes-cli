@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { TranscriptTail, parseTaskNotification, readAgentParent, readHistory, readTail, signalsFrom, unwrapPasted } from '../../src/transcript.mjs';
+import { TranscriptTail, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, signalsFrom, unwrapPasted } from '../../src/transcript.mjs';
 
 const line = record => `${JSON.stringify(record)}\n`;
 
@@ -196,6 +196,137 @@ test('a compaction between turns stays with the turn after it', () => {
   try {
     assert.deepEqual(shown(readHistory(file, { limit: 3 })), ['compact', 'b', 't1']);
   } finally { cleanup(); }
+});
+
+const png = data => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data } });
+const shownByTool = (id, ...parts) => line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: parts }] } });
+const sentWith = (text, ...images) => line({ type: 'user', message: { content: [{ type: 'text', text }, ...images] } });
+
+test('a page lists a message\'s images, and readImage fetches each one', () => {
+  const { file, cleanup } = tempFile([userText('before'), sentWith('look at [Image #1]', png('QUJD'), png('REVG'))].join(''));
+  try {
+    const [, sent] = readHistory(file).items;
+    assert.equal(sent.text, 'look at [Image #1]');
+    assert.deepEqual(sent.images.map(({ mediaType, bytes }) => [mediaType, bytes]), [['image/png', 3], ['image/png', 3]]);
+    assert.deepEqual(sent.images.map(image => readImage(file, image.id).data), ['QUJD', 'REVG']);
+    assert.equal(readImage(file, sent.images[0].id).mediaType, 'image/png');
+  } finally { cleanup(); }
+});
+
+test('an image with nothing to show it under doesn\'t land on an earlier message', () => {
+  const { file, cleanup } = tempFile([userText('earlier'), sentWith('<system-reminder>not for reading</system-reminder>', png('QUJD'))].join(''));
+  try {
+    assert.equal(readHistory(file).items[0].images, undefined);
+  } finally { cleanup(); }
+});
+
+test('a page leaves the image itself out', () => {
+  const { file, cleanup } = tempFile(sentWith('look', png('QUJD')));
+  try {
+    assert.ok(!JSON.stringify(readHistory(file)).includes('QUJD'));
+  } finally { cleanup(); }
+});
+
+test('what a tool showed goes with its call, among the words it came with', () => {
+  const { file, cleanup } = tempFile([
+    userText('read them'), bash('t1'), bash('t2'),
+    shownByTool('t1', png('QUJD'), { type: 'text', text: 'one' }), shownByTool('t2', { type: 'text', text: 'none' }),
+  ].join(''));
+  try {
+    const [, first, second] = readHistory(file).items;
+    assert.equal(first.result, 'one');
+    assert.equal(readImage(file, first.images[0].id).data, 'QUJD');
+    assert.equal(second.images, undefined);
+  } finally { cleanup(); }
+});
+
+test('two tools in one record each keep their own images', () => {
+  const record = line({ type: 'user', message: { content: [
+    { type: 'tool_result', tool_use_id: 't1', content: [png('QUJD')] }, { type: 'tool_result', tool_use_id: 't2', content: [png('REVG')] },
+  ] } });
+  const { file, cleanup } = tempFile([bash('t1'), bash('t2'), record].join(''));
+  try {
+    const [first, second] = readHistory(file).items;
+    assert.deepEqual([first, second].map(item => readImage(file, item.images[0].id).data), ['QUJD', 'REVG']);
+  } finally { cleanup(); }
+});
+
+test('a message sent during a turn keeps its images', () => {
+  const queued = line({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: [{ type: 'text', text: 'and this' }, png('QUJD')] } });
+  const { file, cleanup } = tempFile([userText('first'), queued].join(''));
+  try {
+    const { images } = readHistory(file).items.at(-1);
+    assert.equal(readImage(file, images[0].id).data, 'QUJD');
+  } finally { cleanup(); }
+});
+
+test('an id stays good while the session writes more, and in a file with no last newline', () => {
+  const { file, cleanup } = tempFile(sentWith('look', png('QUJD')).trimEnd());
+  try {
+    const [{ id }] = readHistory(file).items[0].images;
+    fs.appendFileSync(file, `\n${sentWith('and more', png('REVG'))}`);
+    assert.equal(readImage(file, id).data, 'QUJD');
+  } finally { cleanup(); }
+});
+
+test('characters that take several bytes don\'t throw an id off', () => {
+  const { file, cleanup } = tempFile([userText('中文 🙂 中文'), sentWith('看这个', png('QUJD'))].join(''));
+  try {
+    assert.equal(readImage(file, readHistory(file).items[1].images[0].id).data, 'QUJD');
+  } finally { cleanup(); }
+});
+
+test('a line longer than one read still comes back whole', () => {
+  const data = 'QUJD'.repeat(700_000);
+  const { file, cleanup } = tempFile(sentWith('big', png(data)));
+  try {
+    assert.equal(readImage(file, readHistory(file).items[0].images[0].id).data, data);
+  } finally { cleanup(); }
+});
+
+test('an id that doesn\'t lead to an image finds nothing', () => {
+  const { file, cleanup } = tempFile(sentWith('look', png('QUJD')));
+  try {
+    for (const id of ['0:1', '5:0', '999999:0', 'nonsense', '', undefined, '0:0:0', '-1:0']) {
+      assert.equal(readImage(file, id), undefined, id);
+    }
+    assert.equal(readImage('/nonexistent/venes/t.jsonl', '0:0'), undefined);
+  } finally { cleanup(); }
+});
+
+test('subagent calls have no images, because their ids would point at another file', () => {
+  const { file, cleanup, write } = withSubagent(userText('go') + toolCall('agent1', 'Agent'));
+  write('a', 'agent1', [toolCall('sub1', 'Read').replace('"type":"assistant"', '"isSidechain":true,"type":"assistant"'), shownByTool('sub1', png('QUJD'))]);
+  try {
+    assert.equal(readHistory(file).items.find(item => item.toolUseId === 'sub1').images, undefined);
+  } finally { cleanup(); }
+});
+
+test('the tail says which images a record brought, with ids that work', () => {
+  const { file, cleanup } = tempFile(userText('old'));
+  try {
+    const tail = new TranscriptTail(file);
+    const record = shownByTool('t1', png('QUJD'), png('REVG'));
+    fs.appendFileSync(file, record.slice(0, 25));
+    assert.deepEqual(tail.poll(), [], 'half a line isn\'t a record yet');
+    fs.appendFileSync(file, `${record.slice(25)}${sentWith('中文', png('R0hJ'))}`);
+    const [tool, sent] = tail.poll().flatMap(signalsFrom).filter(signal => /Images$/.test(signal.type));
+    assert.equal(tool.type, 'toolImages');
+    assert.equal(tool.toolUseId, 't1');
+    assert.deepEqual(tool.images.map(image => readImage(file, image.id).data), ['QUJD', 'REVG']);
+    assert.equal(sent.type, 'userImages');
+    assert.equal(readImage(file, sent.images[0].id).data, 'R0hJ');
+  } finally { cleanup(); }
+});
+
+test('a queued message\'s images are signalled, and other attachments have none', () => {
+  const queued = { type: 'attachment', attachment: { type: 'queued_command', prompt: [png('QUJD')] } };
+  assert.equal(signalsFrom(queued)[0].type, 'userImages');
+  assert.deepEqual(signalsFrom({ type: 'attachment', attachment: { type: 'other', prompt: [png('QUJD')] } }), []);
+});
+
+test('what Claude Code adds by itself isn\'t a message with images', () => {
+  assert.deepEqual(signalsFrom({ type: 'user', isMeta: true, message: { content: [png('QUJD')] } }), []);
 });
 
 test('a cursor still points at the same place after the session writes more', () => {

@@ -73,6 +73,15 @@ const isAtWork = status => status === 'running' || status === 'waiting';
 // Late pieces of the turn before can sit between its end and these.
 const startsTurn = e => e.kind === 'message.user' || e.kind === 'task.notification' || (e.kind === 'session.status' && isAtWork(e.status));
 
+// A tool that shows Claude an image hands it over whole. It stays out of events, which go to everyone
+// and sit in the log, and a client fetches it from the transcript if someone looks.
+function withoutImageData(response) {
+  if (Array.isArray(response)) {
+    return response.map(part => (part?.type === 'image' && part.source?.data ? { ...part, source: { ...part.source, data: undefined } } : part));
+  }
+  return response?.type === 'image' && response.file?.base64 ? { ...response, file: { ...response.file, base64: undefined } } : response;
+}
+
 function blankSession(id) {
   return {
     id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0,
@@ -350,6 +359,8 @@ export class SessionStore extends EventEmitter {
       else if (type === 'localOutput') this.#onLocalOutput(s, signal);
       else if (type === 'model') this.#onModelReplied(s, signal);
       else if (type === 'refusal') this.#emit(s, 'model.refusal', { ...signal, prompt: s.lastPrompt });
+      else if (type === 'toolImages') this.#emit(s, 'tool.images', signal);
+      else if (type === 'userImages') this.#emit(s, 'message.images', signal);
       else if (type === 'queueRead') this.#onQueueRead(s, signal.text);
       else if (type === 'queueTakenBack') this.#dropQueued(s, { code: 'taken_back', message: 'Taken back in the terminal.' });
     }
@@ -606,7 +617,10 @@ export class SessionStore extends EventEmitter {
     const request = [...this.#requests.values()].find(r => r.toolUseId === toolUseId);
     if (request) this.#closeRequest(request, { decision: data.isError ? 'unknown' : 'allow', by: 'terminal' });
     this.#trackLaunch(s, toolUseId, tool, data.response);
-    this.#emit(s, 'tool.end', { toolUseId, name: tool.name, parentToolUseId: this.#parentOf(s, data.agentId), ...data });
+    const { response, ...rest } = data;
+    this.#emit(s, 'tool.end', {
+      toolUseId, name: tool.name, parentToolUseId: this.#parentOf(s, data.agentId), ...rest, ...(response !== undefined && { response: withoutImageData(response) }),
+    });
   }
 
   #onToolResult(s, signal) {

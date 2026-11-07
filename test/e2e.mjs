@@ -9,7 +9,9 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
@@ -367,6 +369,44 @@ T('history', {}, async r => {
   const { items } = await r.client.request('history', { sessionId: id });
   for (const role of ['assistant', 'tool', 'turn_end', 'user']) assert.ok(items.some(i => i.role === role), role);
   assert.equal(items.find(i => i.role === 'tool').name, 'Bash');
+});
+
+function solidPng(size) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(size * 3, 0x80)]);
+  const pixels = zlib.deflateSync(Buffer.concat(Array.from({ length: size }, () => row)));
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', pixels), chunk('IEND', Buffer.alloc(0))]);
+}
+
+T('an_image_claude_reads_can_be_fetched_and_stays_out_of_events', { mode: 'bypassPermissions' }, async r => {
+  const png = solidPng(64);
+  fs.writeFileSync(path.join(WS, 'e2e-solid.png'), png);
+  await r.type('Use the Read tool on the file e2e-solid.png in this folder, then reply with only the word SEEN.');
+  const shown = await r.kind('tool.images', 40000);
+  assert.equal(shown.images[0].mediaType, 'image/png');
+  const end = await r.kind('tool.end', 20000);
+  assert.equal(end.response.file.base64, undefined);
+  assert.equal(end.response.file.type, 'image/png', 'what describes it stays');
+  await r.turnEnd(40000);
+  const { id } = await r.session();
+  const image = await r.client.request('image', { sessionId: id, imageId: shown.images[0].id });
+  assert.equal(image.mediaType, 'image/png');
+  assert.ok(Buffer.from(image.data, 'base64').equals(png), 'the bytes it read');
+  await delay(1000);
+  const { items } = await r.client.request('history', { sessionId: id });
+  assert.deepEqual(items.find(item => item.role === 'tool').images.map(ref => ref.id), [shown.images[0].id], 'a page has the same id');
+  await assert.rejects(r.client.request('image', { sessionId: id, imageId: '0:99' }), { code: 'unknown_image' });
 });
 
 T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissions' }, async r => {
@@ -1308,7 +1348,24 @@ async function runCase(name) {
   }
 }
 
+// Every case starts a real Claude Code session, which Claude Code keeps with everyone else's, so
+// the reader's list would fill up with them. What a run adds goes when it's done.
+const CLAUDE_HOME = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+const sessionFolder = () => path.join(CLAUDE_HOME, 'projects', fs.realpathSync(WS).replace(/[^a-zA-Z0-9]/g, '-'));
+const storedSessions = () => {
+  try { return fs.readdirSync(sessionFolder()).filter(name => name.endsWith('.jsonl')); } catch { return []; }
+};
+function forgetSessionsSince(before) {
+  for (const name of storedSessions().filter(stored => !before.includes(stored))) {
+    const id = name.slice(0, -'.jsonl'.length);
+    fs.rmSync(path.join(sessionFolder(), name), { force: true });
+    fs.rmSync(path.join(sessionFolder(), id), { recursive: true, force: true });
+    fs.rmSync(path.join(CLAUDE_HOME, 'file-history', id), { recursive: true, force: true });
+  }
+}
+
 fs.mkdirSync(WS, { recursive: true });
+const sessionsBefore = storedSessions();
 fs.rmSync(HOME, { recursive: true, force: true });
 fs.rmSync(path.join(WS, '.claude'), { recursive: true, force: true });
 try { tmux('kill-server'); } catch { /* not running */ }
@@ -1322,5 +1379,6 @@ let failed = 0;
 for (const name of names) if (!(await runCase(name))) failed++;
 try { tmux('kill-server'); } catch { /* already gone */ }
 fs.rmSync(HOME, { recursive: true, force: true });
+forgetSessionsSince(sessionsBefore);
 console.log(failed ? `${failed} FAILED` : 'all passed');
 process.exit(failed ? 1 : 0);

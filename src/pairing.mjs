@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { HelperError } from './errors.mjs';
 
 const PAIRING_COMMENT = 'venes-pairing';
 const PHONE_COMMENT = 'venes-phone';
@@ -75,6 +76,13 @@ export function removePairingKey(file, nonce) {
 export function enrollPhone(file, nonce, phoneKey) {
   if (!PHONE_KEY.test(phoneKey)) throw new Error('That is not an Ed25519 public key.');
   if (!removePairingKey(file, nonce)) throw new Error('This pairing has already been used.');
+  allowPhone(file, phoneKey);
+}
+
+// Lets a phone log in with its own key, once. One that paired through Rex asks for this itself, to
+// send files over SSH: whoever reaches the helper can do as much already.
+export function allowPhone(file, phoneKey) {
+  if (typeof phoneKey !== 'string' || !PHONE_KEY.test(phoneKey)) throw new HelperError('bad_key', 'That is not an Ed25519 public key.');
   const lines = readLines(file);
   if (!lines.some(line => line.startsWith(`${phoneKey} `) || line === phoneKey)) {
     writeLines(file, [...lines, `${phoneKey} ${PHONE_COMMENT}`]);

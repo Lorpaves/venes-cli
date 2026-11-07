@@ -65,7 +65,8 @@ Over SSH, the code holds this Mac's name, address and host key, and a one-time k
 - **It downloads one thing.** The first time it starts, it runs `npm install` for Anthropic's [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), into `~/.venes/sdk`, to list your stored sessions. It leaves out the SDK's Claude Code binary, runs no install scripts, and needs no account: the SDK only reads files on this Mac here. Without it, the app still shows what's running.
 - **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk. So that a restart doesn't lose track of them, it keeps a list of open sessions in `~/.venes/sessions.json`: their ids, folders and tmux panes, with no conversation text.
 - **It can act for you.** Anyone who can log in to your Mac as you, or get into your Rex, can approve tools, type into sessions and resume stored sessions through it. Use an SSH key, and consider turning password login off.
-- **It keeps what you attach.** A picture or file sent with a message from the app is saved in `~/.venes/uploads`, where Claude can read it. A session's go when it's deleted, and the rest after 30 days.
+- **It keeps what you attach.** A picture, video or file sent with a message from the app is saved in your Downloads folder, where Claude can read it and you can find it. They stay there when you delete the session. What the helper knows of them is in `~/.venes/uploads`, until the session is deleted, or for 30 days.
+- **It can let your phone in over SSH.** The app asks to, to send files over SSH, and the helper adds the phone's own public key to `~/.ssh/authorized_keys`, as pairing over SSH does. That only works while Remote Login is on.
 - **It never touches your Claude credentials.**
 
 If the helper isn't running, the hooks do nothing and Claude Code behaves as usual.
@@ -127,6 +128,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
 | `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
 | `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
+| `ssh` | `publicKey` | Lets the client's key in over SSH, for files: `user`, `port`, `hostKey`, `hosts`. See [Over SSH](#over-ssh) |
 | `statusLine` | `sessionId` | `lines`: what Claude Code shows under its input box, read off the terminal. That's the status line set up in its settings, if any, and its line for the mode and what's running. Empty while something covers the box |
 | `send` | `sessionId`, `text`, `clientId`, `lane`, `attachments` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library) and [Attachments](#attachments). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
@@ -223,16 +225,25 @@ During a turn, `tool.images` and `message.images` say the same. They come from t
 
 ### Attachments
 
-A message can come with pictures and files: `upload` each one, then `send` their `uploadId`s as `attachments`, in the order they should go. `text` can then be empty. An upload is kept for its session, so `send` has to name the same `sessionId`.
+A message can come with pictures, videos and files: `upload` each one, then `send` their `uploadId`s as `attachments`, in the order they should go. `text` can then be empty. An upload is kept for its session, so `send` has to name the same `sessionId`.
+
+Uploads go in the Mac's Downloads folder, as anything else it's sent does, numbered the way Finder numbers a copy when the name is taken. They stay there when their session is deleted: what the helper forgets is which session they were for, then and after 30 days. A Mac that won't let the helper write in Downloads gets them in `~/.venes/uploads` instead.
 
 | `kind` | When | How it reaches Claude |
 |---|---|---|
 | `image` | `mediaType` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` | Its path is pasted on its own, and Claude Code turns it into an image, as it does one dragged into the terminal. |
+| `video` | `mediaType` starts with `video/` | Its path, as it is. Claude can't watch a video, but it can work with one by its path, with a tool, which asks for permission. |
 | `file` | Anything else, HEIC included, which Claude can't look at, so convert it first | An `@"path"` reference, which puts its contents in the message. Claude may still read a PDF again with a tool, which asks for permission, because uploads aren't in the session's folder. |
 
-Both go ahead of the text, and the text in `message.user` and in `history` items leaves out what was typed for them: Claude Code's `[Image #n]` marks and the references, at the start of a message only. Pictures then show as `images`, like any other. Files are listed as `attachments`, each `{uploadId, name, mediaType, size}`. A picture Claude Code didn't take stays as its path, and is listed as a file.
+They all go ahead of the text, and the text in `message.user` and in `history` items leaves out what was typed for them: Claude Code's `[Image #n]` marks, the references and the paths, at the start of a message only. Pictures then show as `images`, like any other. Files and videos are listed as `attachments`, each `{uploadId, name, mediaType, size}`. A picture Claude Code didn't take stays as its path, and is listed as a file.
 
-A name loses anything that can't be part of a path, a picture's loses its spaces, and a picture's ends in its type's extension. An upload can be up to 30 MB, and a message can have up to 20. A session that isn't running gets its first message's attachments as references on the command line, pictures too.
+A name loses anything that can't be part of a path, a picture's and a video's lose their spaces, and they end in their type's extension. An upload can be up to 30 MB, and a message can have up to 20. A session that isn't running gets its first message's attachments as references on the command line, pictures too.
+
+#### Over SSH
+
+A file doesn't have to travel in the lines of the connection: base64 makes it a third bigger, and Rex takes a message of at most 1 MB. A client that can log in over SSH runs `~/.venes/venes receive` there instead, and writes a line of JSON with `sessionId`, `name`, `mediaType` and `size`, then exactly `size` bytes. It prints one line, the same `result` `upload` replies with, or one with `ok: false` and an `error`, and exits. The file then goes in a message by its `uploadId`, as any other.
+
+A client that came through Rex gets in with `ssh`, which takes its `publicKey`, an Ed25519 key as `authorized_keys` has them, and lets it in, as pairing over SSH does. Whoever reaches the helper can do as much already. It replies with the `user`, the `port`, the `hostKey` fingerprint, and the `hosts` to try in order: this Mac's own address on its tailnet while its Tailscale is on, then its name on the local network. Rex's built-in Tailscale is no use here, since only Rex answers on that node. `hosts` is empty while Remote Login is off. Over SSH, macOS lets a program in Downloads only with *Allow full disk access for remote users* on, in Remote Login's settings, so `receive` hands the file to the helper, which goes by the terminal's access.
 
 ### History
 
@@ -324,7 +335,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |
 | `bad_upload`, `too_large` | An upload had no type, nothing in it, or more than 30 MB |
 | `bad_attachment` | `send` named an upload that isn't there any more, or more than 20 |
-| `unknown_file` | `file` named an upload the Mac no longer keeps |
+| `unknown_file` | `file` named an upload the Mac no longer keeps, or that someone moved |
+| `bad_key` | `ssh` was given something that isn't an Ed25519 public key |
 | `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |

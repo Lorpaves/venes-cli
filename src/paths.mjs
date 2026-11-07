@@ -11,8 +11,10 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     logFile: path.join(home, 'helper.log'),
     noAutoUpdate: path.join(home, 'no-auto-update'),
     sessionsFile: path.join(home, 'sessions.json'),
-    // What clients attach to messages, by session and then by upload.
+    // What's known of the files clients attach to messages, by session and then by upload.
     uploads: path.join(home, 'uploads'),
+    // Where those files go, so that they're as easy to find as anything else this Mac was sent.
+    downloads: process.env.VENES_DOWNLOADS || path.join(os.homedir(), 'Downloads'),
     // The Rex session the helper starts sessions in, by id, since its label can change.
     rexSession: path.join(home, 'rex-session'),
     sdkDir: process.env.VENES_SDK_DIR || path.join(home, 'sdk'),

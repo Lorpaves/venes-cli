@@ -21,6 +21,7 @@ import { avatarSource } from './avatar.mjs';
 import { readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, statusLines, terminalFrom } from './terminal.mjs';
 import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
+import { sshAccess } from './ssh.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
@@ -90,7 +91,7 @@ function createHookServer(store) {
   });
 }
 
-function createClientServer(store, checkForUpdate, library, uploads) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads }) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -247,7 +248,9 @@ function createClientServer(store, checkForUpdate, library, uploads) {
       };
     },
     respond: msg => { store.respond(msg.requestId, msg); return {}; },
-    upload: msg => saveUpload(uploads, msg),
+    upload: msg => saveUpload(uploads, msg, downloads),
+    // For a phone to send files over SSH, which takes its key.
+    ssh: ({ publicKey }) => sshAccess(publicKey),
     statusLine: async ({ sessionId }) => ({ lines: statusLines(await readScreen(sessionWithPane(sessionId))) }),
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {
@@ -388,7 +391,7 @@ export async function startDaemon(paths) {
   library.prepare().catch(error => console.error(`library: ${error.message}`));
   // Old uploads go now, and not while the helper runs, when a message might be on its way with one.
   pruneUploads(paths.uploads);
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths.uploads);
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths);
   const stopPolling = startTranscriptPolling(store);
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);

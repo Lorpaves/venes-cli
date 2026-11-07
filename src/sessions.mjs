@@ -107,7 +107,7 @@ export class SessionStore extends EventEmitter {
   // `splitAttachments` reads what's kept of the files a message names, which is I/O, so it's passed in.
   constructor({
     agentParent = () => undefined, compactWaitMs = COMPACT_STATS_WAIT_MS, compactLimitMs = COMPACT_LIMIT_MS,
-    splitAttachments: split = text => splitAttachments(text, uploadsRoot()),
+    splitAttachments: split = (text, sessionId) => splitAttachments(text, { root: uploadsRoot(), sessionId }),
   } = {}) {
     super();
     this.#agentParent = agentParent;
@@ -441,7 +441,7 @@ export class SessionStore extends EventEmitter {
   // What Venes typed ahead of the text for attachments isn't part of it: pictures come as images, and
   // files as `attachments`.
   #onUserMessage(s, typed) {
-    const { text, files } = this.#splitAttachments(typed);
+    const { text, files } = this.#splitAttachments(typed, s.id);
     s.lastPrompt = text;
     this.#emit(s, 'message.user', { text, clientId: this.#takeEcho(s, text), ...(files.length ? { attachments: files } : {}) });
   }
@@ -464,7 +464,7 @@ export class SessionStore extends EventEmitter {
 
   #dropQueued(s, error) {
     for (const typed of s.queued.splice(0)) {
-      const clientId = this.#takeEcho(s, this.#splitAttachments(typed).text);
+      const clientId = this.#takeEcho(s, this.#splitAttachments(typed, s.id).text);
       if (clientId) this.failSend(s, { clientId }, error);
     }
   }

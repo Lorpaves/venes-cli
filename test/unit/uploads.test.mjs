@@ -7,17 +7,24 @@ import { SessionStore } from '../../src/sessions.mjs';
 import { sendMessage } from '../../src/terminal.mjs';
 import { readHistory } from '../../src/transcript.mjs';
 import {
-  MAX_UPLOAD_BYTES, findUpload, pruneUploads, removeUploads, safeName, saveUpload, splitAttachments,
+  MAX_UPLOAD_BYTES, findUpload, pruneUploads, referenceTo, removeUploads, safeName, saveUpload, splitAttachments,
 } from '../../src/uploads.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
 const base64 = text => Buffer.from(text).toString('base64');
+
+// Nothing here may reach the real Downloads, even by default.
+const SAFE_DOWNLOADS = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-downloads-'));
+process.env.VENES_DOWNLOADS = SAFE_DOWNLOADS;
+process.on('exit', () => fs.rmSync(SAFE_DOWNLOADS, { recursive: true, force: true }));
 
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-uploads-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }
+
+const tempFolders = t => ({ root: tempRoot(t), downloads: tempRoot(t) });
 
 test('a name is one path part, keeps its spaces for a file, and loses them for a picture', () => {
   assert.equal(safeName('report final.pdf', 'application/pdf'), 'report final.pdf');
@@ -43,49 +50,78 @@ test('a long name is cut, keeping its extension', () => {
   assert.equal(safeName(`a.${'b'.repeat(200)}`, 'text/plain').length, 120);
 });
 
-test('an upload is kept with what it is, and found again by its id', t => {
-  const root = tempRoot(t);
-  const picture = saveUpload(root, { sessionId: SESSION_ID, name: 'shot.png', mediaType: 'IMAGE/PNG', data: base64('png bytes') });
+test('an upload goes in Downloads, and is found again by its id', t => {
+  const { root, downloads } = tempFolders(t);
+  const picture = saveUpload(root, { sessionId: SESSION_ID, name: 'shot.png', mediaType: 'IMAGE/PNG', data: base64('png bytes') }, downloads);
   assert.equal(picture.kind, 'image');
   assert.equal(picture.mediaType, 'image/png');
   assert.equal(picture.size, 9);
   assert.match(picture.uploadId, /^[0-9a-f]{32}$/);
-  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'notes.txt', mediaType: 'text/plain', data: base64('hello') });
+  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'notes.txt', mediaType: 'text/plain', data: base64('hello') }, downloads);
   assert.equal(file.kind, 'file');
+  const found = findUpload(root, SESSION_ID, file.uploadId);
+  assert.equal(found.path, path.join(downloads, 'notes.txt'));
+  assert.equal(fs.readFileSync(found.path, 'utf8'), 'hello');
+  assert.deepEqual({ ...found, path: undefined }, { ...file, path: undefined });
+  assert.deepEqual(fs.readdirSync(path.join(root, SESSION_ID, file.uploadId)), ['upload.json'], 'only what is known of it is kept apart');
+});
+
+test('a name Downloads has already gets a number, the way Finder numbers a copy', t => {
+  const { root, downloads } = tempFolders(t);
+  fs.writeFileSync(path.join(downloads, 'notes.txt'), 'mine');
+  fs.writeFileSync(path.join(downloads, 'shot.png'), 'mine');
+  const save = (name, mediaType) => {
+    const { uploadId } = saveUpload(root, { sessionId: SESSION_ID, name, mediaType, data: base64('x') }, downloads);
+    return findUpload(root, SESSION_ID, uploadId).path;
+  };
+  assert.equal(save('notes.txt', 'text/plain'), path.join(downloads, 'notes 2.txt'));
+  assert.equal(save('notes.txt', 'text/plain'), path.join(downloads, 'notes 3.txt'));
+  assert.equal(save('shot.png', 'image/png'), path.join(downloads, 'shot-2.png'), 'a picture\'s still has no spaces');
+  assert.equal(save('Makefile', 'text/plain'), path.join(downloads, 'Makefile'));
+  assert.equal(save('Makefile', 'text/plain'), path.join(downloads, 'Makefile 2'));
+  assert.equal(fs.readFileSync(path.join(downloads, 'notes.txt'), 'utf8'), 'mine', 'nothing of the person\'s is written over');
+  assert.equal(fs.readFileSync(path.join(downloads, 'shot.png'), 'utf8'), 'mine');
+});
+
+test('where this Mac won\'t let the helper write in Downloads, a file is kept out of the way instead', t => {
+  const { root, downloads } = tempFolders(t);
+  fs.chmodSync(downloads, 0o500);
+  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'notes.txt', mediaType: 'text/plain', data: base64('hello') }, downloads);
+  fs.chmodSync(downloads, 0o700);
   const found = findUpload(root, SESSION_ID, file.uploadId);
   assert.equal(found.path, path.join(root, SESSION_ID, file.uploadId, 'notes.txt'));
   assert.equal(fs.readFileSync(found.path, 'utf8'), 'hello');
-  assert.deepEqual({ ...found, path: undefined }, { ...file, path: undefined });
 });
 
 test('an upload that isn\'t there is undefined, and a session id has to look like one', t => {
-  const root = tempRoot(t);
+  const { root, downloads } = tempFolders(t);
   assert.equal(findUpload(root, SESSION_ID, 'f'.repeat(32)), undefined);
   assert.equal(findUpload(root, SESSION_ID, '../../etc'), undefined);
   assert.throws(() => findUpload(root, '../x', 'f'.repeat(32)), { code: 'unknown_session' });
-  assert.throws(() => saveUpload(root, { sessionId: 'a/b', name: 'x', mediaType: 'text/plain', data: base64('x') }), { code: 'unknown_session' });
-  const { uploadId } = saveUpload(root, { sessionId: SESSION_ID, name: 'x.txt', mediaType: 'text/plain', data: base64('x') });
-  fs.rmSync(path.join(root, SESSION_ID, uploadId, 'x.txt'));
-  assert.equal(findUpload(root, SESSION_ID, uploadId), undefined);
+  assert.throws(() => saveUpload(root, { sessionId: 'a/b', name: 'x', mediaType: 'text/plain', data: base64('x') }, downloads), { code: 'unknown_session' });
+  const { uploadId } = saveUpload(root, { sessionId: SESSION_ID, name: 'x.txt', mediaType: 'text/plain', data: base64('x') }, downloads);
+  fs.renameSync(path.join(downloads, 'x.txt'), path.join(downloads, 'moved.txt'));
+  assert.equal(findUpload(root, SESSION_ID, uploadId), undefined, 'one the person moved is gone');
 });
 
 test('an upload needs a type and something in it, and has a size limit', t => {
-  const root = tempRoot(t);
-  const save = fields => () => saveUpload(root, { sessionId: SESSION_ID, name: 'x', mediaType: 'text/plain', data: base64('x'), ...fields });
+  const { root, downloads } = tempFolders(t);
+  const save = fields => () => saveUpload(root, { sessionId: SESSION_ID, name: 'x', mediaType: 'text/plain', data: base64('x'), ...fields }, downloads);
   assert.throws(save({ mediaType: undefined }), { code: 'bad_upload' });
   assert.throws(save({ mediaType: 'not a type' }), { code: 'bad_upload' });
   assert.throws(save({ data: '' }), { code: 'bad_upload' });
   assert.throws(save({ data: '====' }), { code: 'bad_upload' });
   assert.throws(save({ data: 'A'.repeat(Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 + 8) }), { code: 'too_large' });
   assert.equal(fs.existsSync(path.join(root, SESSION_ID)), false);
+  assert.deepEqual(fs.readdirSync(downloads), []);
 });
 
-test('a session\'s uploads go with it, and old ones go when the helper starts', t => {
-  const root = tempRoot(t);
-  const old = saveUpload(root, { sessionId: SESSION_ID, name: 'old.txt', mediaType: 'text/plain', data: base64('o') });
-  const recent = saveUpload(root, { sessionId: SESSION_ID, name: 'new.txt', mediaType: 'text/plain', data: base64('n') });
+test('what\'s known of a session\'s uploads goes with it, and old ones go when the helper starts, but not their files', t => {
+  const { root, downloads } = tempFolders(t);
+  const old = saveUpload(root, { sessionId: SESSION_ID, name: 'old.txt', mediaType: 'text/plain', data: base64('o') }, downloads);
+  const recent = saveUpload(root, { sessionId: SESSION_ID, name: 'new.txt', mediaType: 'text/plain', data: base64('n') }, downloads);
   const other = 'aaaaaaaa-2222-4333-8444-555555555555';
-  saveUpload(root, { sessionId: other, name: 'gone.txt', mediaType: 'text/plain', data: base64('g') });
+  saveUpload(root, { sessionId: other, name: 'gone.txt', mediaType: 'text/plain', data: base64('g') }, downloads);
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   const age = (sessionId, uploadId, days) => fs.utimesSync(path.join(root, sessionId, uploadId), (now - days * day) / 1000, (now - days * day) / 1000);
@@ -98,40 +134,55 @@ test('a session\'s uploads go with it, and old ones go when the helper starts', 
   assert.equal(fs.existsSync(path.join(root, other)), false);
   removeUploads(root, SESSION_ID);
   assert.equal(fs.existsSync(path.join(root, SESSION_ID)), false);
+  assert.deepEqual(fs.readdirSync(downloads).sort(), ['gone.txt', 'new.txt', 'old.txt'], 'Downloads is the person\'s');
   pruneUploads(path.join(root, 'nothing here'));
 });
 
 test('what Venes typed ahead of a message comes off its text, and its files are listed', t => {
-  const root = tempRoot(t);
-  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'report final.pdf', mediaType: 'application/pdf', data: base64('%PDF') });
-  const where = path.join(root, SESSION_ID, file.uploadId, 'report final.pdf');
+  const { root, downloads } = tempFolders(t);
+  const split = text => splitAttachments(text, { root, sessionId: SESSION_ID });
+  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'report final.pdf', mediaType: 'application/pdf', data: base64('%PDF') }, downloads);
+  const where = path.join(downloads, 'report final.pdf');
   const described = { uploadId: file.uploadId, name: 'report final.pdf', mediaType: 'application/pdf', size: 4 };
-  assert.deepEqual(splitAttachments(`[Image #1] [Image #2] @"${where}" sum it up`, root), { text: 'sum it up', files: [described] });
-  assert.deepEqual(splitAttachments(`[Image #3]  @"${where}"  `, root), { text: '', files: [described] });
-  const picture = saveUpload(root, { sessionId: SESSION_ID, name: 'p.png', mediaType: 'image/png', data: base64('p') });
-  const left = path.join(root, SESSION_ID, picture.uploadId, 'p.png');
-  assert.deepEqual(splitAttachments(`${left} what is it`, root).files.map(({ name }) => name), ['p.png']);
-  assert.deepEqual(splitAttachments(`@${left} what is it`, root).text, 'what is it');
+  assert.deepEqual(split(`[Image #1] [Image #2] @"${where}" sum it up`), { text: 'sum it up', files: [described] });
+  assert.deepEqual(split(`[Image #3]  @"${where}"  `), { text: '', files: [described] });
+  const picture = saveUpload(root, { sessionId: SESSION_ID, name: 'p.png', mediaType: 'image/png', data: base64('p') }, downloads);
+  const left = findUpload(root, SESSION_ID, picture.uploadId).path;
+  assert.deepEqual(split(`${left} what is it`).files.map(({ name }) => name), ['p.png']);
+  assert.deepEqual(split(`@${left} what is it`).text, 'what is it');
+  // One from before Downloads, kept with what's known of it.
+  const before = 'b'.repeat(32);
+  fs.mkdirSync(path.join(root, SESSION_ID, before));
+  fs.writeFileSync(path.join(root, SESSION_ID, before, 'upload.json'), JSON.stringify({ name: 'a.txt', mediaType: 'text/plain', size: 1, kind: 'file' }));
+  fs.writeFileSync(path.join(root, SESSION_ID, before, 'a.txt'), 'a');
+  assert.deepEqual(split(`@"${path.join(root, SESSION_ID, before, 'a.txt')}" and`),
+    { text: 'and', files: [{ uploadId: before, name: 'a.txt', mediaType: 'text/plain', size: 1 }] });
+  assert.equal(findUpload(root, SESSION_ID, before).path, path.join(root, SESSION_ID, before, 'a.txt'));
 });
 
 test('only the start is Venes\'s: the rest, and references to other files, are what someone wrote', t => {
-  const root = tempRoot(t);
-  const same = text => assert.deepEqual(splitAttachments(text, root), { text, files: [] });
+  const { root, downloads } = tempFolders(t);
+  const same = text => assert.deepEqual(splitAttachments(text, { root, sessionId: SESSION_ID }), { text, files: [] });
   same('compare [Image #1] with this');
   same('@"/etc/hosts" what is this');
   same('@src/app.js explain');
   same('/compact');
   same('  indented on purpose');
   same(`@"${path.join(root, SESSION_ID, 'not-an-upload', 'x.txt')}" hi`);
+  fs.writeFileSync(path.join(downloads, 'mine.txt'), 'mine');
+  same(`@"${path.join(downloads, 'mine.txt')}" hi`);
+  const elsewhere = saveUpload(root, { sessionId: 'aaaaaaaa-2222-4333-8444-555555555555', name: 'n.txt', mediaType: 'text/plain', data: base64('n') }, downloads);
+  same(`@"${findUpload(root, 'aaaaaaaa-2222-4333-8444-555555555555', elsewhere.uploadId).path}" another session's`);
+  assert.deepEqual(splitAttachments(`@"${path.join(downloads, 'mine.txt')}" hi`, { root }), { text: `@"${path.join(downloads, 'mine.txt')}" hi`, files: [] });
 });
 
 test('a message sent with attachments is matched to its send, and says what files it had', t => {
-  const root = tempRoot(t);
-  const store = new SessionStore({ splitAttachments: text => splitAttachments(text, root) });
+  const { root, downloads } = tempFolders(t);
+  const store = new SessionStore({ splitAttachments: (text, sessionId) => splitAttachments(text, { root, sessionId }) });
   const events = [];
   store.on('event', event => events.push(event));
-  const file = saveUpload(root, { sessionId: 'a', name: 'notes.txt', mediaType: 'text/plain', data: base64('hi') });
-  const where = path.join(root, 'a', file.uploadId, 'notes.txt');
+  const file = saveUpload(root, { sessionId: 'a', name: 'notes.txt', mediaType: 'text/plain', data: base64('hi') }, downloads);
+  const where = path.join(downloads, 'notes.txt');
   store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'SessionStart' });
   store.expectEcho(store.get('a'), 'c1', 'read these');
   store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'UserPromptSubmit', prompt: `[Image #1] @"${where}" read these` });
@@ -151,14 +202,15 @@ test('a message with no attachments says nothing about them', () => {
 });
 
 test('history shows a message without what Venes typed for it, with its files and pictures', t => {
-  const home = tempRoot(t);
+  const { root: home, downloads } = tempFolders(t);
   const { VENES_HOME } = process.env;
   process.env.VENES_HOME = home;
   t.after(() => { if (VENES_HOME === undefined) delete process.env.VENES_HOME; else process.env.VENES_HOME = VENES_HOME; });
   const root = path.join(home, 'uploads');
-  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'notes.txt', mediaType: 'text/plain', data: base64('hi') });
-  const where = path.join(root, SESSION_ID, file.uploadId, 'notes.txt');
-  const transcript = path.join(home, 't.jsonl');
+  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'notes.txt', mediaType: 'text/plain', data: base64('hi') }, downloads);
+  const where = path.join(downloads, 'notes.txt');
+  // A transcript is named for its session, which is whose uploads it can name.
+  const transcript = path.join(home, `${SESSION_ID}.jsonl`);
   const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QUJD' } };
   fs.writeFileSync(transcript, `${JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: `[Image #1] @"${where}" look` }, image] } })}\n`);
   const [item] = readHistory(transcript).items;
@@ -247,4 +299,27 @@ test('what Claude Code shows under its input box is read off the screen', async 
   assert.deepEqual(statusLines(screen), ['◆ Opus 5.5 · max │ Venes │ ctx ━━━━ 90% │ cache 99%', '⏵⏵ bypass permissions on · 1 shell']);
   assert.deepEqual(statusLines(' Do you want to proceed?\n ❯ 1. Yes\n Esc to cancel\n'), []);
   assert.deepEqual(statusLines('──────────\n❯ \n──────────\n'), []);
+});
+
+test('a video keeps no spaces and has its extension, since its path goes in as it is', t => {
+  assert.equal(safeName('screen recording.MOV', 'video/quicktime'), 'screen-recording.MOV');
+  assert.equal(safeName('clip', 'video/mp4'), 'clip.mp4');
+  assert.equal(safeName('', 'video/quicktime'), 'video.mov');
+  assert.equal(safeName('a b.webm', 'video/webm'), 'a-b.webm');
+  const { root, downloads } = tempFolders(t);
+  const video = saveUpload(root, { sessionId: SESSION_ID, name: 'screen recording.mov', mediaType: 'video/quicktime', data: base64('moov') }, downloads);
+  assert.equal(video.kind, 'video');
+  const found = findUpload(root, SESSION_ID, video.uploadId);
+  assert.equal(referenceTo(found), found.path, 'no @, since Claude Code has nothing to put in for a video');
+  assert.equal(referenceTo({ kind: 'file', path: '/u/x.txt' }), '@"/u/x.txt"');
+  assert.equal(found.path, path.join(downloads, 'screen-recording.mov'));
+  assert.deepEqual(splitAttachments(`${found.path} what happens here`, { root, sessionId: SESSION_ID }),
+    { text: 'what happens here', files: [{ uploadId: video.uploadId, name: 'screen-recording.mov', mediaType: 'video/quicktime', size: 4 }] });
+});
+
+test('a video is typed as its path, between the other attachments and the text', async t => {
+  const typed = fakeRex(t);
+  const video = { kind: 'video', path: '/u/s/3/clip.mov' };
+  await sendMessage(SESSION, { text: 'look', attachments: [video, notes] }, () => undefined, { imageLimit: 2000, imageCheck: 5 });
+  assert.deepEqual(typed(), ['/u/s/3/clip.mov ', '@"/u/s/2/my notes.txt" ', 'look', 'enter']);
 });

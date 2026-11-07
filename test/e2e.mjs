@@ -19,6 +19,8 @@ import { HelperClient } from '../src/client.mjs';
 import { RexControl, openPipe } from './rex-client.mjs';
 import { findClaudePanes } from '../src/tmux.mjs';
 import { VERSION } from '../src/version.mjs';
+import { findUpload } from '../src/uploads.mjs';
+import { makeOneTimeKey } from '../src/pairing.mjs';
 
 const WS = process.env.VENES_E2E_WS;
 if (!WS || !path.isAbsolute(WS)) throw new Error('VENES_E2E_WS must be an absolute path');
@@ -30,6 +32,9 @@ const SOCK = 'venes-e2e';
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(PLUGIN, 'cli/venes.mjs');
 const paths = helperPaths(HOME);
+// Where uploads go, and the keys a phone is let in with: this run's own, never this Mac's.
+const DOWNLOADS = `${HOME}-downloads`;
+const AUTHORIZED_KEYS = `${HOME}-authorized_keys`;
 // Kept between runs, so that a run doesn't download the SDK for each case.
 const SDK_DIR = process.env.VENES_E2E_SDK || `${HOME}-sdk`;
 const RESUME_ARGS = ['--model', MODEL, '--permission-mode', 'default', '--setting-sources', 'project', '--plugin-dir', PLUGIN];
@@ -69,6 +74,7 @@ function startHelper(cli = CLI) {
   // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
   const env = {
     ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR, VENES_TERMINAL: inRex ? 'rex' : 'tmux',
+    VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS,
     VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
     ...(inRex && { REX_SERVER }),
   };
@@ -145,6 +151,7 @@ class Run {
 function launch({ mode = 'default', sources = 'project', model = MODEL } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
+    `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`,
     'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
@@ -155,6 +162,7 @@ function launch({ mode = 'default', sources = 'project', model = MODEL } = {}) {
 function launchInRex({ mode = 'default', sources = 'project', model = MODEL } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
+    `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`,
     'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
@@ -444,6 +452,9 @@ async function sendsAPictureAndAFile(r) {
   assert.deepEqual([picture.kind, picture.name], ['image', 'red-square.png']);
   const notes = await r.client.request('upload', { sessionId: id, name: 'my notes.txt', mediaType: 'text/plain', data: base64('The marker word is PLUM.\n') });
   assert.deepEqual([notes.kind, notes.name, notes.size], ['file', 'my notes.txt', 25]);
+  // In Downloads, numbered as Finder would if an earlier case left one of the same name.
+  const saved = findUpload(paths.uploads, id, notes.uploadId).path;
+  assert.equal(path.dirname(saved), DOWNLOADS, 'it went in Downloads');
   const text = 'What colour is the picture, and what is the marker word in the file? Reply with only those two words.';
   await r.client.request('send', { sessionId: id, text, clientId: 'c2', attachments: [picture.uploadId, notes.uploadId] });
   const echo = await r.kind('message.user', 20000);
@@ -455,7 +466,7 @@ async function sendsAPictureAndAFile(r) {
   assert.match(end.lastMessage, /red/i);
   assert.match(end.lastMessage, /PLUM/i);
   assert.ok(!r.events.some(e => e.kind === 'request.opened'), 'no permission was asked for');
-  assert.deepEqual(fileAttachmentsIn(id), ['my notes.txt'], 'Claude Code took the file in itself');
+  assert.deepEqual(fileAttachmentsIn(id), [path.basename(saved)], 'Claude Code took the file in itself');
   await delay(1000);
   const { items } = await r.client.request('history', { sessionId: id });
   const sent = items.findLast(item => item.role === 'user');
@@ -467,6 +478,71 @@ async function sendsAPictureAndAFile(r) {
 }
 
 T('an_attached_picture_and_file_reach_claude', {}, sendsAPictureAndAFile);
+
+// What the phone runs over SSH to send a file, with this run's helper in place of ~/.venes/venes.
+function receive(fields, bytes) {
+  const env = {
+    ...process.env, VENES_HOME: HOME, VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR,
+  };
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, 'receive'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
+    let printed = '';
+    child.stdout.on('data', chunk => { printed += chunk; });
+    child.on('error', reject);
+    child.on('close', code => {
+      try { resolve({ code, reply: JSON.parse(printed) }); } catch { reject(new Error(`receive printed ${JSON.stringify(printed)}`)); }
+    });
+    child.stdin.on('error', () => {}); // it may stop reading once it has turned a file away
+    child.stdin.end(Buffer.concat([Buffer.from(`${JSON.stringify({ size: bytes.length, ...fields })}\n`), bytes]));
+  });
+}
+
+// Claude can't watch a video, so it gets the path, which a tool can open. It comes as the phone
+// sends files over SSH: through `receive`, into Downloads.
+T('a_video_comes_through_receive_and_goes_in_by_its_path', {}, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  r.mark();
+  const { code, reply: video } = await receive({ sessionId: id, name: 'screen recording.mov', mediaType: 'video/quicktime' }, Buffer.from('not really a movie'));
+  assert.equal(code, 0);
+  assert.deepEqual([video.ok, video.kind, video.name, video.size], [true, 'video', 'screen-recording.mov', 18]);
+  const where = findUpload(paths.uploads, id, video.uploadId).path;
+  assert.equal(path.dirname(where), DOWNLOADS);
+  assert.equal(fs.readFileSync(where, 'utf8'), 'not really a movie');
+  const text = 'Reply with only the word GOT.';
+  await r.client.request('send', { sessionId: id, text, clientId: 'v1', attachments: [video.uploadId] });
+  const echo = await r.kind('message.user', 20000);
+  assert.deepEqual([echo.clientId, echo.text, echo.attachments.map(file => [file.name, file.mediaType])], ['v1', text, [['screen-recording.mov', 'video/quicktime']]]);
+  await r.turnEnd(60000);
+  const said = fs.readFileSync(transcriptOf(id), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+    .filter(record => record.type === 'user' && !record.isMeta).map(record => JSON.stringify(record.message.content)).join(' ');
+  assert.ok(said.includes(where), 'its path is in what Claude read');
+  assert.ok(!said.includes(`@\\"${where}`), 'and not as a reference');
+  const { items } = await r.client.request('history', { sessionId: id });
+  assert.deepEqual(items.findLast(item => item.role === 'user').attachments?.map(file => file.uploadId), [video.uploadId]);
+  const big = await receive({ sessionId: id, name: 'big.mov', mediaType: 'video/quicktime', size: 31 * 1024 * 1024 }, Buffer.alloc(0));
+  assert.deepEqual([big.code, big.reply.ok, big.reply.error?.code], [1, false, 'too_large']);
+});
+
+// A phone that paired through Rex lets its own key in, to send files over SSH. Here that key goes in
+// this run's authorized_keys, never this Mac's.
+T('a_phone_lets_its_key_in_for_ssh', {}, async r => {
+  const { publicKey } = makeOneTimeKey();
+  const real = path.join(os.homedir(), '.ssh', 'authorized_keys');
+  try {
+    const access = await r.client.request('ssh', { publicKey });
+    assert.deepEqual([access.user, access.port, Array.isArray(access.hosts)], [os.userInfo().username, 22, true]);
+    assert.ok(fs.readFileSync(AUTHORIZED_KEYS, 'utf8').includes(`${publicKey} venes-phone`));
+    await assert.rejects(r.client.request('ssh', { publicKey: 'ssh-rsa AAAA' }), { code: 'bad_key' });
+  } finally {
+    // Never left in this Mac's own, should something have put it there.
+    if (fs.existsSync(real) && fs.readFileSync(real, 'utf8').includes(publicKey)) {
+      fs.writeFileSync(real, fs.readFileSync(real, 'utf8').split('\n').filter(line => !line.includes(publicKey)).join('\n'));
+      assert.fail('the key reached this Mac\'s own authorized_keys');
+    }
+  }
+});
 
 // Claude Code here has no status line of its own, so what's under its box is its line for the mode.
 async function readsTheStatusLine(r) {
@@ -1138,7 +1214,7 @@ const awaitLine = (pipe, test, ms = 5000) => new Promise((resolve, reject) => {
 });
 // What the app runs, with this test's helper in place of ~/.venes/venes.
 const pipeCommand = () => [
-  '/bin/bash', '-c', `read -t 60 _ && env VENES_HOME='${HOME}' DISABLE_UPDATES=1 VENES_SDK_DIR='${SDK_DIR}' '${process.execPath}' '${CLI}' attach --pipe`,
+  '/bin/bash', '-c', `read -t 60 _ && env VENES_HOME='${HOME}' VENES_DOWNLOADS='${DOWNLOADS}' VENES_AUTHORIZED_KEYS='${AUTHORIZED_KEYS}' DISABLE_UPDATES=1 VENES_SDK_DIR='${SDK_DIR}' '${process.execPath}' '${CLI}' attach --pipe`,
 ];
 
 if (hasRex) {
@@ -1490,6 +1566,7 @@ function forgetSessionsSince(before) {
 fs.mkdirSync(WS, { recursive: true });
 const sessionsBefore = storedSessions();
 fs.rmSync(HOME, { recursive: true, force: true });
+for (const own of [DOWNLOADS, AUTHORIZED_KEYS]) fs.rmSync(own, { recursive: true, force: true });
 fs.rmSync(path.join(WS, '.claude'), { recursive: true, force: true });
 try { tmux('kill-server'); } catch { /* not running */ }
 tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'keep', 'sleep', '86400');
@@ -1502,6 +1579,7 @@ let failed = 0;
 for (const name of names) if (!(await runCase(name))) failed++;
 try { tmux('kill-server'); } catch { /* already gone */ }
 fs.rmSync(HOME, { recursive: true, force: true });
+for (const own of [DOWNLOADS, AUTHORIZED_KEYS]) fs.rmSync(own, { recursive: true, force: true });
 forgetSessionsSince(sessionsBefore);
 console.log(failed ? `${failed} FAILED` : 'all passed');
 process.exit(failed ? 1 : 0);

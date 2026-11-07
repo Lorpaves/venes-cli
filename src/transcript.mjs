@@ -274,6 +274,8 @@ function subagentCalls(file, parentToolUseId) {
 }
 
 function conversationItems(file) {
+  // A transcript is named for its session.
+  const sessionId = path.basename(file, '.jsonl');
   const items = [];
   const tools = new Map();
   let model;
@@ -288,7 +290,7 @@ function conversationItems(file) {
   const addUserText = (typed, at) => {
     if (INTERRUPTED.test(typed)) items.push({ role: 'system', at, kind: 'interrupted' });
     else if (!HIDDEN_USER_TEXT.test(typed)) {
-      const { text, files } = splitAttachments(unwrapPasted(typed));
+      const { text, files } = splitAttachments(unwrapPasted(typed), { sessionId });
       items.push({ role: 'user', at, text, ...(files.length ? { attachments: files } : {}) });
     }
   };

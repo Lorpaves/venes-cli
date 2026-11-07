@@ -13,6 +13,7 @@ import {
   pairingLink, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink,
 } from '../src/pairing.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAddress } from '../src/rex.mjs';
+import { readUpload } from '../src/ssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
@@ -48,6 +49,7 @@ Control
 
 App transport
   attach [--pipe]               Bridge stdin/stdout to the helper (used over SSH, or Rex with --pipe)
+  receive                       Take a file for a message, over SSH: a line of JSON about it, then its bytes
 `;
 
 const paths = helperPaths();
@@ -223,6 +225,19 @@ const commands = {
   output: ([sessionId, taskId]) => withClient(async client => {
     console.log((await client.request('taskOutput', { sessionId, taskId })).output ?? '');
   }),
+  // Replies as the helper would to `upload`, on one line.
+  async receive() {
+    let reply;
+    try {
+      const { sessionId, name, mediaType, bytes } = await readUpload(process.stdin);
+      await withClient(async client => {
+        reply = await client.request('upload', { sessionId, name, mediaType, data: bytes.toString('base64') });
+      });
+    } catch (error) {
+      reply = { type: 'result', ok: false, error: { code: error.code ?? 'internal', message: error.message } };
+    }
+    process.stdout.write(`${JSON.stringify(reply)}\n`, () => process.exit(reply.ok ? 0 : 1));
+  },
   async attach([mode]) {
     await ensureRunning();
     if (mode === '--pipe') openPipe(process.stdin);

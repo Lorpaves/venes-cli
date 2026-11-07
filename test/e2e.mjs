@@ -371,7 +371,7 @@ T('history', {}, async r => {
   assert.equal(items.find(i => i.role === 'tool').name, 'Bash');
 });
 
-function solidPng(size) {
+function solidPng(size, rgb = [0x80, 0x80, 0x80]) {
   const chunk = (type, data) => {
     const body = Buffer.concat([Buffer.from(type), data]);
     const length = Buffer.alloc(4);
@@ -384,7 +384,7 @@ function solidPng(size) {
   header.writeUInt32BE(size, 0);
   header.writeUInt32BE(size, 4);
   header.set([8, 2, 0, 0, 0], 8);
-  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(size * 3, 0x80)]);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.concat(Array.from({ length: size }, () => Buffer.from(rgb)))]);
   const pixels = zlib.deflateSync(Buffer.concat(Array.from({ length: size }, () => row)));
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', pixels), chunk('IEND', Buffer.alloc(0))]);
 }
@@ -426,6 +426,44 @@ T('an_image_claude_reads_can_be_fetched_and_stays_out_of_events', { mode: 'bypas
   assert.deepEqual(items.find(item => item.role === 'tool').images.map(ref => ref.id), [shown.images[0].id], 'a page has the same id');
   await assert.rejects(r.client.request('image', { sessionId: id, imageId: '0:99' }), { code: 'unknown_image' });
 });
+
+const base64 = text => Buffer.from(text).toString('base64');
+// The file a session's transcript is in, which says how Claude Code took what it was given.
+const transcriptOf = id => path.join(sessionFolder(), `${id}.jsonl`);
+const fileAttachmentsIn = id => fs.readFileSync(transcriptOf(id), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+  .filter(record => record.type === 'attachment' && record.attachment?.type === 'file').map(record => path.basename(record.attachment.filename));
+
+// A picture is pasted as its path, which Claude Code turns into an image, and a file is an @
+// reference, which puts its contents in the message: neither needs a tool, or a permission.
+async function sendsAPictureAndAFile(r) {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  r.mark();
+  const picture = await r.client.request('upload', { sessionId: id, name: 'red square.png', mediaType: 'image/png', data: solidPng(64, [230, 20, 20]).toString('base64') });
+  assert.deepEqual([picture.kind, picture.name], ['image', 'red-square.png']);
+  const notes = await r.client.request('upload', { sessionId: id, name: 'my notes.txt', mediaType: 'text/plain', data: base64('The marker word is PLUM.\n') });
+  assert.deepEqual([notes.kind, notes.name, notes.size], ['file', 'my notes.txt', 25]);
+  const text = 'What colour is the picture, and what is the marker word in the file? Reply with only those two words.';
+  await r.client.request('send', { sessionId: id, text, clientId: 'c2', attachments: [picture.uploadId, notes.uploadId] });
+  const echo = await r.kind('message.user', 20000);
+  assert.equal(echo.clientId, 'c2');
+  assert.equal(echo.text, text, 'what was typed for the attachments is not part of the text');
+  assert.deepEqual(echo.attachments, [{ uploadId: notes.uploadId, name: 'my notes.txt', mediaType: 'text/plain', size: 25 }]);
+  assert.equal((await r.kind('message.images', 20000)).images.length, 1, 'the picture is an image');
+  const end = await r.turnEnd(60000);
+  assert.match(end.lastMessage, /red/i);
+  assert.match(end.lastMessage, /PLUM/i);
+  assert.ok(!r.events.some(e => e.kind === 'request.opened'), 'no permission was asked for');
+  assert.deepEqual(fileAttachmentsIn(id), ['my notes.txt'], 'Claude Code took the file in itself');
+  await delay(1000);
+  const { items } = await r.client.request('history', { sessionId: id });
+  const sent = items.findLast(item => item.role === 'user');
+  assert.deepEqual([sent.text, sent.attachments, sent.images.length], [text, echo.attachments, 1]);
+  await assert.rejects(r.client.request('send', { sessionId: id, text: 'x', attachments: ['f'.repeat(32)] }), { code: 'bad_attachment' });
+}
+
+T('an_attached_picture_and_file_reach_claude', {}, sendsAPictureAndAFile);
 
 T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissions' }, async r => {
   await r.type(SLEEP(5, 'FIRST'));
@@ -1042,6 +1080,27 @@ T('a_choice_for_a_stopped_session_waits_for_its_resume', { mode: 'bypassPermissi
   client.close();
 }));
 
+// The first message's attachments are on the command line Claude Code is resumed with, as references.
+T('a_stopped_session_resumes_with_its_attachments', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word STORED.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  tmux('kill-session', '-t', 'run');
+  await delay(1500);
+  const { client, run } = await forgetSessions();
+  const notes = await client.request('upload', { sessionId: id, name: 'notes.txt', mediaType: 'text/plain', data: base64('The marker word is FIG.\n') });
+  const text = 'What is the marker word in the file? Reply with only that word.';
+  const reply = await client.request('send', { sessionId: id, text, clientId: 'r1', attachments: [notes.uploadId] });
+  assert.equal(reply.resumed, true);
+  const echo = await run.wait(e => e.kind === 'message.user' && e.sessionId === id, 30000, 'message.user');
+  assert.deepEqual([echo.clientId, echo.text, echo.attachments.map(file => file.name)], ['r1', text, ['notes.txt']]);
+  await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /FIG/.test(e.lastMessage), 40000, 'turn.end FIG');
+  console.log(`    (a reference on the command line ${fileAttachmentsIn(id).includes('notes.txt') ? 'is' : 'is not'} taken in by Claude Code)`);
+  await client.request('delete', { sessionId: id });
+  assert.equal(fs.existsSync(path.join(paths.uploads, id)), false, 'a session\'s uploads go with it');
+  client.close();
+});
+
 T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, async r => {
   await r.type('Use the Bash tool with run_in_background set to true to run exactly this command: sleep 45 -- then reply with only the word STARTED.');
   await r.wait(e => e.kind === 'turn.end' && /STARTED/.test(e.lastMessage), 30000, 'turn.end STARTED');
@@ -1148,6 +1207,8 @@ if (hasRex) {
     await r.client.request('interrupt', { sessionId: id });
     await r.kind('turn.interrupted', 15000);
   });
+
+  T('in_rex_an_attached_picture_and_file_reach_claude', { rex: true }, sendsAPictureAndAFile);
 
   T('in_rex_a_prompt_on_the_screen_holds_a_message', { rex: true }, async r => {
     await r.type(TOUCH('rex'));

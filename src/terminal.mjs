@@ -4,6 +4,7 @@
 import * as rex from './rex.mjs';
 import { HelperError } from './sessions.mjs';
 import * as tmux from './tmux.mjs';
+import { referenceTo } from './uploads.mjs';
 
 const PASTE_SETTLE_MS = 150;
 
@@ -24,6 +25,11 @@ const REQUEST_SETTLE_MS = 250;
 // /config takes two: one for its filter, and one for itself.
 const PAGE_CLOSE_PRESSES = 3;
 const PAGE_CLOSE_SETTLE_MS = 300;
+// Claude Code reads a pasted picture before its mark shows, and text pasted sooner could land ahead
+// of it. A picture it doesn't take stays as its path, which Claude can still read.
+const IMAGE_SETTLE_LIMIT_MS = 4000;
+const IMAGE_SETTLE_CHECK_MS = 100;
+const IMAGE_MARK = /\[Image #\d+\]/g;
 
 export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
@@ -51,15 +57,36 @@ export async function refuseIfBlocked(session, isBlocked) {
   if (await hasOpenDialog(session)) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
 }
 
-// isBlocked is checked again just before Enter, because a request can open while
-// the text is on its way and Enter would then answer it.
-export async function sendText(session, text, isBlocked) {
+const marksIn = screen => bottomOf(screen).match(IMAGE_MARK)?.length ?? 0;
+
+async function pasteImage(session, file, { limit, check }) {
+  const before = marksIn(await readScreen(session));
+  await backendOf(session).paste(session, file);
+  for (const deadline = Date.now() + limit; Date.now() < deadline; await pause(check)) {
+    if (marksIn(await readScreen(session)) > before) break;
+  }
+  await backendOf(session).paste(session, ' ');
+}
+
+// Attachments in their order, then the text. A picture is pasted by itself, so Claude Code turns its
+// path into an image as it does one dragged into the terminal, and a file is a reference. isBlocked
+// is checked again just before Enter, because a request can open while the message is on its way
+// and Enter would then answer it.
+export async function sendMessage(session, { text = '', attachments = [] }, isBlocked, {
+  imageLimit = IMAGE_SETTLE_LIMIT_MS, imageCheck = IMAGE_SETTLE_CHECK_MS,
+} = {}) {
   await refuseIfBlocked(session, isBlocked);
-  await backendOf(session).paste(session, text);
+  for (const upload of attachments) {
+    if (upload.kind === 'image') await pasteImage(session, upload.path, { limit: imageLimit, check: imageCheck });
+    else await backendOf(session).paste(session, `${referenceTo(upload)} `);
+  }
+  if (text) await backendOf(session).paste(session, text);
   await pause(PASTE_SETTLE_MS);
   await refuseIfBlocked(session, isBlocked);
   await pressKey(session, 'Enter');
 }
+
+export const sendText = (session, text, isBlocked) => sendMessage(session, { text }, isBlocked);
 
 // Only while a footer says Esc will close something: with nothing open it'd interrupt the turn.
 export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {

@@ -65,6 +65,7 @@ Over SSH, the code holds this Mac's name, address and host key, and a one-time k
 - **It downloads one thing.** The first time it starts, it runs `npm install` for Anthropic's [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), into `~/.venes/sdk`, to list your stored sessions. It leaves out the SDK's Claude Code binary, runs no install scripts, and needs no account: the SDK only reads files on this Mac here. Without it, the app still shows what's running.
 - **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk. So that a restart doesn't lose track of them, it keeps a list of open sessions in `~/.venes/sessions.json`: their ids, folders and tmux panes, with no conversation text.
 - **It can act for you.** Anyone who can log in to your Mac as you, or get into your Rex, can approve tools, type into sessions and resume stored sessions through it. Use an SSH key, and consider turning password login off.
+- **It keeps what you attach.** A picture or file sent with a message from the app is saved in `~/.venes/uploads`, where Claude can read it. A session's go when it's deleted, and the rest after 30 days.
 - **It never touches your Claude credentials.**
 
 If the helper isn't running, the hooks do nothing and Claude Code behaves as usual.
@@ -124,7 +125,8 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
 | `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
-| `send` | `sessionId`, `text`, `clientId`, `lane` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library). |
+| `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
+| `send` | `sessionId`, `text`, `clientId`, `lane`, `attachments` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library) and [Attachments](#attachments). |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
 | `interrupt` | `sessionId` | Presses Esc |
 | `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
@@ -217,6 +219,19 @@ Images stay out of pages and events, because a page can have dozens of them. `hi
 
 During a turn, `tool.images` and `message.images` say the same. They come from the transcript, so they can arrive after what they belong to. `tool.end.response` doesn't carry the image itself: its base64 is left out, and the rest stays.
 
+### Attachments
+
+A message can come with pictures and files: `upload` each one, then `send` their `uploadId`s as `attachments`, in the order they should go. `text` can then be empty. An upload is kept for its session, so `send` has to name the same `sessionId`.
+
+| `kind` | When | How it reaches Claude |
+|---|---|---|
+| `image` | `mediaType` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` | Its path is pasted on its own, and Claude Code turns it into an image, as it does one dragged into the terminal. |
+| `file` | Anything else, HEIC included, which Claude can't look at, so convert it first | An `@"path"` reference, which puts its contents in the message. Claude may still read a PDF again with a tool, which asks for permission, because uploads aren't in the session's folder. |
+
+Both go ahead of the text, and the text in `message.user` and in `history` items leaves out what was typed for them: Claude Code's `[Image #n]` marks and the references, at the start of a message only. Pictures then show as `images`, like any other. Files are listed as `attachments`, each `{uploadId, name, mediaType, size}`. A picture Claude Code didn't take stays as its path, and is listed as a file.
+
+A name loses anything that can't be part of a path, a picture's loses its spaces, and a picture's ends in its type's extension. An upload can be up to 30 MB, and a message can have up to 20. A session that isn't running gets its first message's attachments as references on the command line, pictures too.
+
 ### History
 
 Pass `before` from one reply to get the page before it. It counts items from the start of the transcript, so it stays valid while the session runs. Calls made by a subagent follow the call that started it, carry `parentToolUseId`, and don't count towards `limit`.
@@ -259,7 +274,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
 | `session.deleted` | |
-| `message.user` | `text`, `clientId` |
+| `message.user` | `text`, `clientId`, `attachments` (only when it has files) |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
@@ -305,6 +320,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |
+| `bad_upload`, `too_large` | An upload had no type, nothing in it, or more than 30 MB |
+| `bad_attachment` | `send` named an upload that isn't there any more, or more than 20 |
 | `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |

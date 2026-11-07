@@ -18,7 +18,8 @@ import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
-import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from './terminal.mjs';
+import { resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom } from './terminal.mjs';
+import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
@@ -89,7 +90,7 @@ function createHookServer(store) {
   });
 }
 
-function createClientServer(store, checkForUpdate, library) {
+function createClientServer(store, checkForUpdate, library, uploads) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -99,12 +100,12 @@ function createClientServer(store, checkForUpdate, library) {
   const typing = oneAtATime();
   const avatar = avatarSource();
 
-  const deliver = (session, { clientId, text }) => typing(session.id, async () => {
+  const deliver = (session, { clientId, text, attachments = [] }) => typing(session.id, async () => {
     if (clientId) store.expectEcho(session, clientId, text);
     const isBlocked = () => store.pendingFor(session)[0];
     try {
-      await sendText(session, text, isBlocked);
-      if (text.trimStart().startsWith('/')) await settleCommand(session, isBlocked);
+      await sendMessage(session, { text, attachments }, isBlocked);
+      if (!attachments.length && text.trimStart().startsWith('/')) await settleCommand(session, isBlocked);
     } catch (error) {
       if (clientId) store.forgetEcho(session, clientId);
       throw error;
@@ -135,6 +136,19 @@ function createClientServer(store, checkForUpdate, library) {
     if (!session.pane) throw notTypable();
     if (session.status === 'ended') throw new HelperError('session_ended', 'This session has ended.');
     return session;
+  };
+
+  // The uploads a message names, in its order. Every one has to be there.
+  const attachmentsOf = ({ sessionId, attachments }) => {
+    if (attachments === undefined) return [];
+    if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS) {
+      throw new HelperError('bad_attachment', `A message can have up to ${MAX_ATTACHMENTS} attachments.`);
+    }
+    return attachments.map(uploadId => {
+      const upload = findUpload(uploads, sessionId, uploadId);
+      if (!upload) throw new HelperError('bad_attachment', 'An attachment is gone. Attach it again.');
+      return upload;
+    });
   };
 
   // A message for a session that's resuming waits for it, and then goes the usual way.
@@ -201,6 +215,7 @@ function createClientServer(store, checkForUpdate, library) {
       await resuming.get(sessionId)?.catch(() => {});
       await typing(sessionId, () => removeSession({ store, library }, sessionId));
       chosenForResume.delete(sessionId);
+      removeUploads(uploads, sessionId);
       return {};
     },
     history: msg => {
@@ -232,19 +247,22 @@ function createClientServer(store, checkForUpdate, library) {
       };
     },
     respond: msg => { store.respond(msg.requestId, msg); return {}; },
+    upload: msg => saveUpload(uploads, msg),
     send: async msg => {
-      if (typeof msg.text !== 'string' || !msg.text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
+      const attachments = attachmentsOf(msg);
+      const text = typeof msg.text === 'string' ? msg.text : '';
+      if (!text.trim() && !attachments.length) throw new HelperError('bad_text', 'Nothing to send.');
       if (msg.lane !== undefined && msg.lane !== 'next' && msg.lane !== 'later') throw new HelperError('bad_lane', `Unknown lane: ${msg.lane}`);
-      const change = readSwitch(msg.text);
+      const change = attachments.length ? undefined : readSwitch(text);
       if (change) {
         await configure({ sessionId: msg.sessionId, ...change });
         return { queued: false };
       }
       await resuming.get(msg.sessionId)?.catch(() => {});
       const known = store.find(msg.sessionId);
-      if (!known || known.status === 'ended') return resume(msg);
+      if (!known || known.status === 'ended') return resume({ ...msg, text, attachments });
       const session = sessionWithPane(msg.sessionId);
-      const message = { clientId: msg.clientId, text: msg.text, lane: msg.lane ?? 'next' };
+      const message = { clientId: msg.clientId, text, lane: msg.lane ?? 'next', attachments };
       if (store.mustHold(session, msg.lane)) {
         store.hold(session, message);
         return { queued: true };
@@ -361,7 +379,9 @@ export async function startDaemon(paths) {
   fs.mkdirSync(paths.sdkDir, { recursive: true, mode: 0o700 });
   // Ready before the first time it's asked for. If this fails, the next request tries again.
   library.prepare().catch(error => console.error(`library: ${error.message}`));
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library);
+  // Old uploads go now, and not while the helper runs, when a message might be on its way with one.
+  pruneUploads(paths.uploads);
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths.uploads);
   const stopPolling = startTranscriptPolling(store);
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);

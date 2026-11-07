@@ -6,6 +6,10 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { normalized, parseTaskNotification, signalsFrom, unwrapPasted } from './transcript.mjs';
+import { HelperError } from './errors.mjs';
+import { splitAttachments, uploadsRoot } from './uploads.mjs';
+
+export { HelperError };
 
 const EVENT_LOG_SIZE = 5000;
 const REQUEST_KIND = { AskUserQuestion: 'question', ExitPlanMode: 'plan' };
@@ -25,13 +29,6 @@ const COMPACT_LIMIT_MS = 30 * 60_000;
 const TRANSCRIPT_SETTLE_MS = 2000;
 const ENDS_TURN = new Set(['turn.end', 'turn.interrupted', 'turn.error', 'session.ended']);
 
-export class HelperError extends Error {
-  constructor(code, message, details) {
-    super(message);
-    this.code = code;
-    this.details = details;
-  }
-}
 
 // Only Rex and tmux can be typed into, and a session started before the plugin was installed sends
 // no hooks to say where it is, so a restart is the way out of both.
@@ -104,11 +101,17 @@ export class SessionStore extends EventEmitter {
   #agentParent;
   #compactWaitMs;
   #compactLimitMs;
+  #splitAttachments;
 
   // agentParent reads which tool call started a subagent, which needs the file system.
-  constructor({ agentParent = () => undefined, compactWaitMs = COMPACT_STATS_WAIT_MS, compactLimitMs = COMPACT_LIMIT_MS } = {}) {
+  // `splitAttachments` reads what's kept of the files a message names, which is I/O, so it's passed in.
+  constructor({
+    agentParent = () => undefined, compactWaitMs = COMPACT_STATS_WAIT_MS, compactLimitMs = COMPACT_LIMIT_MS,
+    splitAttachments: split = text => splitAttachments(text, uploadsRoot()),
+  } = {}) {
     super();
     this.#agentParent = agentParent;
+    this.#splitAttachments = split;
     this.#compactWaitMs = compactWaitMs;
     this.#compactLimitMs = compactLimitMs;
   }
@@ -435,9 +438,12 @@ export class SessionStore extends EventEmitter {
     return position < 0 ? undefined : s.echoes.splice(position, 1)[0].clientId;
   }
 
-  #onUserMessage(s, text) {
+  // What Venes typed ahead of the text for attachments isn't part of it: pictures come as images, and
+  // files as `attachments`.
+  #onUserMessage(s, typed) {
+    const { text, files } = this.#splitAttachments(typed);
     s.lastPrompt = text;
-    this.#emit(s, 'message.user', { text, clientId: this.#takeEcho(s, text) });
+    this.#emit(s, 'message.user', { text, clientId: this.#takeEcho(s, text), ...(files.length ? { attachments: files } : {}) });
   }
 
   // Claude has a queued message, which `text` may not name. It joins the conversation here, where
@@ -457,8 +463,8 @@ export class SessionStore extends EventEmitter {
   }
 
   #dropQueued(s, error) {
-    for (const text of s.queued.splice(0)) {
-      const clientId = this.#takeEcho(s, text);
+    for (const typed of s.queued.splice(0)) {
+      const clientId = this.#takeEcho(s, this.#splitAttachments(typed).text);
       if (clientId) this.failSend(s, { clientId }, error);
     }
   }

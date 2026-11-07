@@ -3,6 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { splitAttachments } from './uploads.mjs';
 
 const INTERRUPTED = /^\[Request interrupted by user/;
 const HIDDEN_USER_TEXT = /^<(task-notification|command-|local-command|system-reminder)/;
@@ -283,9 +284,13 @@ function conversationItems(file) {
       if (owner) (owner.images ??= []).push(image);
     }
   };
-  const addUserText = (text, at) => {
-    if (INTERRUPTED.test(text)) items.push({ role: 'system', at, kind: 'interrupted' });
-    else if (!HIDDEN_USER_TEXT.test(text)) items.push({ role: 'user', at, text: unwrapPasted(text) });
+  // What Venes typed ahead of a message for its attachments isn't part of its text.
+  const addUserText = (typed, at) => {
+    if (INTERRUPTED.test(typed)) items.push({ role: 'system', at, kind: 'interrupted' });
+    else if (!HIDDEN_USER_TEXT.test(typed)) {
+      const { text, files } = splitAttachments(unwrapPasted(typed));
+      items.push({ role: 'user', at, text, ...(files.length ? { attachments: files } : {}) });
+    }
   };
   for (const record of readRecords(file)) {
     if (record.isSidechain || record.isMeta || record.isCompactSummary) continue;

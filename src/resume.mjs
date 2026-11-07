@@ -5,6 +5,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import { HelperError, notTypable } from './sessions.mjs';
+import { referenceTo } from './uploads.mjs';
 
 const START_LIMIT_MS = 20_000;
 const CHECK_MS = 500;
@@ -53,8 +54,10 @@ async function waitForPrompt({ prompted, terminal, name, target, limit, check })
 }
 
 // A session running anywhere else can't be resumed here: the two would write into one transcript.
-export async function resumeSession({ store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS }, sessionId, { clientId, text }, chosen) {
-  if (Buffer.byteLength(text) > FIRST_MESSAGE_LIMIT_BYTES) throw new HelperError('message_too_long', 'Send something shorter first, to start this session.');
+// The first message's attachments can't be pasted, so each is a reference, pictures too.
+export async function resumeSession({ store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS }, sessionId, { clientId, text, attachments = [] }, chosen) {
+  const prompt = [...attachments.map(referenceTo), text].filter(Boolean).join(' ');
+  if (Buffer.byteLength(prompt) > FIRST_MESSAGE_LIMIT_BYTES) throw new HelperError('message_too_long', 'Send something shorter first, to start this session.');
   const running = await library.running();
   if (running.some(session => session.id === sessionId)) throw notTypable();
   const info = await library.info(sessionId);
@@ -65,7 +68,7 @@ export async function resumeSession({ store, library, terminal, env = process.en
   const { prompted, stopListening } = heardFrom(store, sessionId);
   try {
     const variables = Object.fromEntries(PASSED_ENV.filter(key => env[key]).map(key => [key, env[key]]));
-    const target = await terminal.startSession({ name, cwd: workingDirectory(info.cwd), command: resumeCommand(sessionId, text, env, chosen), env: variables });
+    const target = await terminal.startSession({ name, cwd: workingDirectory(info.cwd), command: resumeCommand(sessionId, prompt, env, chosen), env: variables });
     await waitForPrompt({ prompted, terminal, name, target, limit, check });
     return { queued: false, resumed: true };
   } catch (error) {

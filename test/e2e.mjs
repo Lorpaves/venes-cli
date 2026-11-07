@@ -14,6 +14,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { HelperClient } from '../src/client.mjs';
+import { RexControl, openPipe } from './rex-client.mjs';
 import { findClaudePanes } from '../src/tmux.mjs';
 import { VERSION } from '../src/version.mjs';
 
@@ -54,7 +55,9 @@ let rexServerProcess;
 async function startRexServer() {
   if (rexServerProcess) return;
   fs.rmSync(REX_SOCKET, { force: true });
-  rexServerProcess = spawn('rex', ['server', 'run', '--listen', REX_SERVER, '--state-dir', `${HOME}-rex`, '--restore=false'], { env: rexEnv, stdio: 'ignore' });
+  rexServerProcess = spawn('rex', [
+    'server', 'run', '--listen', REX_SERVER, '--extra-listen', 'http://127.0.0.1:18744', '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
+  ], { env: rexEnv, stdio: 'ignore' });
   for (let i = 0; i < 100 && !fs.existsSync(REX_SOCKET); i++) await delay(50);
   await delay(200);
 }
@@ -952,7 +955,83 @@ T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, a
   client.close();
 });
 
+// A plain address here, since a tailnet is only another way of reaching the same listener.
+const REX_URL = 'ws://127.0.0.1:18744';
+const awaitLine = (pipe, test, ms = 5000) => new Promise((resolve, reject) => {
+  const found = pipe.stream.lines.find(test);
+  if (found) { resolve(found); return; }
+  const timer = setTimeout(() => reject(new Error(`no such line; saw ${pipe.stream.lines.length}`)), ms);
+  pipe.stream.onLine = line => { if (test(line)) { clearTimeout(timer); resolve(line); } };
+});
+// What the app runs, with this test's helper in place of ~/.venes/venes.
+const pipeCommand = () => [
+  '/bin/bash', '-c', `read -t 60 _ && env VENES_HOME='${HOME}' DISABLE_UPDATES=1 VENES_SDK_DIR='${SDK_DIR}' '${process.execPath}' '${CLI}' attach --pipe`,
+];
+
 if (hasRex) {
+  T('over_rex_a_client_reaches_the_helper_with_no_ssh', { rex: true, mode: 'bypassPermissions' }, async r => {
+    await r.type('Reply with only the word READY.');
+    await r.turnEnd();
+    const { id } = await r.session();
+    const pipe = await openPipe(REX_URL, 'Venes', pipeCommand());
+    const hello = JSON.parse(await awaitLine(pipe, line => line.includes('"hello"')));
+    assert.equal(hello.version, VERSION);
+
+    await pipe.write(`${JSON.stringify({ id: 1, cmd: 'subscribe' })}\n`);
+    const snapshot = JSON.parse(await awaitLine(pipe, line => line.includes('"snapshot"')));
+    assert.ok(snapshot.sessions.some(session => session.id === id));
+
+    const long = 'x'.repeat(200_000);
+    await pipe.write(`${JSON.stringify({ id: 2, cmd: 'send', sessionId: '00000000-0000-4000-8000-000000000000', text: long })}\n`);
+    const reply = JSON.parse(await awaitLine(pipe, line => line.includes('"id":2')));
+    assert.equal(reply.error.code, 'message_too_long', 'a long line arrives whole');
+
+    await pipe.write(`${JSON.stringify({ id: 3, cmd: 'send', sessionId: id, text: 'Reply with only the word PIPED.' })}\n`);
+    await r.wait(e => e.kind === 'turn.end' && /PIPED/.test(e.lastMessage), 30000, 'turn.end PIPED');
+    await awaitLine(pipe, line => line.includes('"turn.end"') && line.includes('PIPED'));
+
+    const page = JSON.parse(await (async () => {
+      await pipe.write(`${JSON.stringify({ id: 4, cmd: 'history', sessionId: id, limit: 50 })}\n`);
+      return awaitLine(pipe, line => line.includes('"id":4'));
+    })());
+    assert.ok(page.items.some(item => /PIPED/.test(item.text ?? '')), 'everything comes through, whatever its size');
+
+    const { blocks } = await pipe.control.request('session.list_blocks', { session_id: pipe.sessionId });
+    assert.equal(blocks.find(block => block.block_id === pipe.blockId).placement, 'detached', 'no window shows it');
+    await pipe.close();
+  });
+
+  T('over_rex_a_client_that_vanishes_leaves_no_terminal_behind', { rex: true, mode: 'bypassPermissions' }, async () => {
+    const pipe = await openPipe(REX_URL, 'Venes', pipeCommand());
+    await awaitLine(pipe, line => line.includes('"hello"'));
+    const watcher = await RexControl.connect(REX_URL);
+    await watcher.request('session.attach', { session_id: pipe.sessionId });
+    const blocks = async () => (await watcher.request('session.list_blocks', { session_id: pipe.sessionId })).blocks ?? [];
+    assert.ok((await blocks()).some(block => block.block_id === pipe.blockId));
+    pipe.vanish();
+    const deadline = Date.now() + 75_000;
+    while ((await blocks()).some(block => block.block_id === pipe.blockId)) {
+      assert.ok(Date.now() < deadline, 'the terminal stayed');
+      await delay(1000);
+    }
+    watcher.close();
+  });
+
+  T('over_rex_a_terminal_nobody_came_for_ends_by_itself', { rex: true, mode: 'bypassPermissions' }, async () => {
+    const control = await RexControl.connect(REX_URL);
+    const { sessions } = await control.request('session.list');
+    const session = sessions.find(entry => entry.label === 'Venes') ?? await control.request('session.create', { label: 'Venes' });
+    await control.request('session.attach', { session_id: session.session_id });
+    const { block_id: blockId } = await control.request('session.new_block', {
+      session_id: session.session_id, flavor: 'com.superlogical.terminal.shell', label: 'venes-attach',
+      options: { shell: 'none', login: false, command: ['/bin/bash', '-c', 'read -t 2 _ && sleep 300'] },
+    });
+    await delay(4000);
+    const { blocks } = await control.request('session.list_blocks', { session_id: session.session_id });
+    assert.ok(!blocks?.some(block => block.block_id === blockId), 'it stayed');
+    control.close();
+  });
+
   T('in_rex_a_session_can_be_typed_into_and_stopped_with_no_tmux', { rex: true, mode: 'bypassPermissions' }, async r => {
     await r.type('Reply with only the word READY.');
     await r.turnEnd();

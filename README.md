@@ -43,23 +43,28 @@ Run `~/.venes/venes` for every command. Session ids accept a unique prefix. The 
 
 ## Pairing the app
 
-Turn on Remote Login in System Settings > General > Sharing, then run this and scan the code in the app:
+Run this and scan the code in the app:
 
 ```sh
 ~/.venes/venes pair
 ```
 
-The code holds this Mac's name, address and host key, and a one-time key. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password.
+The phone reaches this Mac in one of two ways, and `pair` picks for you:
 
-To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
+- **Through Rex,** if Tailscale is on in [Rex](https://www.superlogical.com/rex). The phone needs the Tailscale app, signed in with the account Rex uses. Nothing else is needed, not even Remote Login.
+- **Over SSH** otherwise. Turn on Remote Login first, in System Settings > General > Sharing. `pair --ssh` picks this even with Rex.
+
+Through Rex, the code holds this Mac's name and its address on your tailnet, and no credential: Rex asks Tailscale who's calling and lets in only the account that signed in. To stop a phone reaching this Mac, sign it out of that account or turn Tailscale off in Rex.
+
+Over SSH, the code holds this Mac's name, address and host key, and a one-time key. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password. To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
 
 ## What it does on your machine
 
-- **It stays local.** Your sessions never leave this Mac except over SSH to your own devices. The plugin opens no TCP ports, and events go over two Unix sockets in `~/.venes`, a `0700` directory.
+- **It stays local.** Your sessions never leave this Mac except over SSH or Rex to your own devices. The plugin opens no TCP ports, and events go over two Unix sockets in `~/.venes`, a `0700` directory.
 - **It checks for updates.** `claude plugin` fetches this repository, and new versions install by themselves. See [Updates](#updates).
 - **It downloads one thing.** The first time it starts, it runs `npm install` for Anthropic's [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), into `~/.venes/sdk`, to list your stored sessions. It leaves out the SDK's Claude Code binary, runs no install scripts, and needs no account: the SDK only reads files on this Mac here. Without it, the app still shows what's running.
 - **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk. So that a restart doesn't lose track of them, it keeps a list of open sessions in `~/.venes/sessions.json`: their ids, folders and tmux panes, with no conversation text.
-- **It can act for you.** Anyone who can log in to your Mac as you can approve tools, type into sessions and resume stored sessions through it. Use an SSH key, and consider turning password login off.
+- **It can act for you.** Anyone who can log in to your Mac as you, or get into your Rex, can approve tools, type into sessions and resume stored sessions through it. Use an SSH key, and consider turning password login off.
 - **It never touches your Claude credentials.**
 
 If the helper isn't running, the hooks do nothing and Claude Code behaves as usual.
@@ -93,14 +98,14 @@ rm -rf ~/.venes
 
 ```
 Claude Code ──hook──▶ hook.sock ┐
-                                ├─ helper ─▶ client.sock ◀─ ~/.venes/venes attach ◀─ SSH ◀─ app
+                                ├─ helper ─▶ client.sock ◀─ ~/.venes/venes attach ◀─ SSH or Rex ◀─ app
 transcript ───── polled ────────┘     │
                                       └─ Rex or tmux ─▶ sends text and keys to the terminal
 ```
 
 ## Protocol
 
-A client runs `~/.venes/venes attach` over SSH and speaks newline-delimited JSON on stdin and stdout. SSH handles authentication. The launcher uses absolute paths because a command run over SSH gets a minimal PATH without node or tmux, and the plugin refreshes it at each session start because the plugin's path changes with every version. The helper starts on demand and outlives the connection.
+A client runs `~/.venes/venes attach` over SSH, or [through Rex](#connecting-through-rex), and speaks newline-delimited JSON on stdin and stdout. SSH handles authentication. The launcher uses absolute paths because a command run over SSH gets a minimal PATH without node or tmux, and the plugin refreshes it at each session start because the plugin's path changes with every version. The helper starts on demand and outlives the connection.
 
 The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok":true,…}` reply. On failure, `ok` is false and `error` holds `{code, message, details}`. Replies can arrive out of order, so match them by `id`.
 
@@ -171,9 +176,19 @@ A session reports its model and effort through `session.model`, `session.effort`
 
 ### Rex
 
-A session running in Rex needs no tmux. Its hooks carry `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, and `pane` in `sessions` is then a block id, which is all a client has to know: everything above works the same. The helper uses the `rex` command, and finds it in Rex's install folder when it was started over SSH. It reaches the Mac's own Rex server. Phones still connect over SSH, so nothing here needs Rex's network access turned on.
+A session running in Rex needs no tmux. Its hooks carry `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, and `pane` in `sessions` is then a block id, which is all a client has to know: everything above works the same. The helper uses the `rex` command, and finds it in Rex's install folder when it was started over SSH. It reaches the Mac's own Rex server, so none of this needs Rex's network access turned on.
 
 A session started before this version was installed has none of those variables, so it can't be typed into until it's restarted.
+
+### Connecting through Rex
+
+A client on the same tailnet can reach the helper with no SSH. It runs `attach --pipe` in a terminal of Rex's that no window shows, and uses that terminal's input and output as the pipe. `GET /llms.txt` on a Rex server documents the calls:
+
+1. Open `/api/control`, and find or create the session labelled `Venes`, the one the helper starts sessions in. `session.attach` to it.
+2. `session.new_block` with `{"shell":"none","login":false,"command":["/bin/bash","-c","read -t 60 _ && ~/.venes/venes attach --pipe"]}`. The `read` holds the helper back until the client is watching, because Rex closes a terminal the moment its program exits, and a client needs to see why it did. It also ends a terminal nobody came for. `login` has to be off, because `login` hides the status a program exits with.
+3. `data.connect`, and open `/api/data`. Skip what comes before the first `resize`, which is a picture of the screen.
+4. Write a newline with `com.superlogical.terminal.write`, and the helper starts. After that, what goes in with `terminal.write` is its stdin, and what comes out is its stdout, with each line ending in `\r\n` and Rex's own messages to skip. A `child_exited` of 127 means there's no helper.
+5. `block.close` when you're done. A client that goes without it leaves `attach --pipe` to exit by itself after a minute of silence, so `ping` more often than that.
 
 ### Deleting a session
 

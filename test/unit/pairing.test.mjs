@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  addPairingKey, enrollPhone, hasPairingKey, hostKeyFingerprint, makeNonce, makeOneTimeKey, pairingLine, pairingLink, removePairingKey, renderQR,
+  addPairingKey, enrollPhone, hasPairingKey, hostKeyFingerprint, makeNonce, makeOneTimeKey, pairingLine, pairingLink, removePairingKey, renderQR, rexPairingLink,
 } from '../../src/pairing.mjs';
 
 function tempKeys(t, content) {
@@ -27,13 +27,14 @@ const CLI = fileURLToPath(new URL('../../cli/venes.mjs', import.meta.url));
 const MINE = 'ssh-ed25519 AAAA mine\n';
 
 // `pair` as a person runs it, against a pretend sshd and a throwaway home.
-async function startPair(t, file, hostKey) {
+async function startPair(t, file, hostKey, { args = ['--ssh'], path: searchPath = process.env.PATH } = {}) {
   const sshd = net.createServer().listen(0, '127.0.0.1');
   await once(sshd, 'listening');
   t.after(() => sshd.close());
-  const pair = spawn(process.execPath, [CLI, 'pair'], {
+  const pair = spawn(process.execPath, [CLI, 'pair', ...args], {
     env: {
       ...process.env,
+      PATH: searchPath,
       VENES_HOME: path.join(path.dirname(file), 'home'),
       VENES_AUTHORIZED_KEYS: file,
       VENES_HOST_KEY: hostKey,
@@ -45,15 +46,26 @@ async function startPair(t, file, hostKey) {
   return pair;
 }
 
-function codeShown(pair) {
+function codeShown(pair, ending = 'It works once') {
   return new Promise(resolve => {
     let text = '';
     pair.stdout.on('data', chunk => {
       text += chunk;
-      if (text.includes('It works once')) resolve();
+      if (text.includes(ending)) resolve(text);
     });
   });
 }
+
+// A `rex` that answers `server tailscale pair` with `output`, or fails if there's none.
+function fakeRex(t, output) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-rex-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+  const answer = output ? `echo '${output}'` : 'exit 1';
+  fs.writeFileSync(path.join(dir, 'rex'), `#!/bin/sh\ncase "$*" in *"server tailscale pair --json"*) ${answer} ;; *) exit 1 ;; esac\n`, { mode: 0o755 });
+  return `${dir}:${process.env.PATH}`;
+}
+
+const linkIn = text => new URL(text.match(/venes:\/\/pair\S+/)[0]);
 
 test('a one-time key is a real Ed25519 key that ssh-keygen accepts', t => {
   const file = tempKeys(t, '');
@@ -131,6 +143,14 @@ test('nonces are safe to put in a command line and differ', () => {
   assert.notEqual(nonce, makeNonce());
 });
 
+test('a link for Rex says only where to call, and which Mac it is if that\'s known', () => {
+  const url = new URL(rexPairingLink({ address: 'https://mac.tail.ts.net', hostKey: 'SHA256:abc+/', name: 'My Mac' }));
+  assert.equal(url.protocol, 'venes:');
+  assert.equal(url.host, 'pair');
+  assert.deepEqual(Object.fromEntries(url.searchParams), { r: 'https://mac.tail.ts.net', n: 'My Mac', f: 'SHA256:abc+/' });
+  assert.equal(new URL(rexPairingLink({ address: 'https://a', name: 'b' })).searchParams.has('f'), false);
+});
+
 test('the link carries what the phone needs', () => {
   const url = new URL(pairingLink({ host: 'mac.local', user: 'me', hostKey: 'SHA256:abc+/', seed: Buffer.alloc(32, 1), name: 'My Mac' }));
   assert.equal(url.protocol, 'venes:');
@@ -167,4 +187,37 @@ test('a pairing that cannot start leaves no key behind', async t => {
   const [code] = await once(pair, 'exit');
   assert.equal(code, 1);
   assert.equal(fs.readFileSync(file, 'utf8'), MINE);
+});
+
+test('with Tailscale on in Rex, the code is for Rex and nothing goes in authorized_keys', async t => {
+  const file = tempKeys(t, MINE);
+  fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
+  const pair = await startPair(t, file, `${file}.host`, { args: [], path: fakeRex(t, '{"url":"https://mac.tail.ts.net"}') });
+  const url = linkIn(await codeShown(pair, 'Tailscale'));
+  assert.equal(url.searchParams.get('r'), 'https://mac.tail.ts.net');
+  assert.match(url.searchParams.get('f'), /^SHA256:/, 'so a Mac the phone knows from SSH stays one Mac');
+  assert.equal(url.searchParams.has('k'), false);
+  const [code] = await once(pair, 'exit');
+  assert.equal(code, 0);
+  assert.equal(fs.readFileSync(file, 'utf8'), MINE);
+});
+
+test('a Mac that has never had Remote Login on can still pair through Rex', async t => {
+  const file = tempKeys(t, MINE);
+  const pair = await startPair(t, file, `${file}.missing`, { args: [], path: fakeRex(t, '{"url":"https://mac.tail.ts.net"}') });
+  assert.equal(linkIn(await codeShown(pair, 'Tailscale')).searchParams.has('f'), false);
+});
+
+test('with Tailscale off in Rex, the code is for SSH', async t => {
+  const file = tempKeys(t, MINE);
+  fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
+  const pair = await startPair(t, file, `${file}.host`, { args: [], path: fakeRex(t) });
+  assert.equal(linkIn(await codeShown(pair)).searchParams.get('u'), os.userInfo().username);
+});
+
+test('--ssh keeps to SSH even with Tailscale on in Rex', async t => {
+  const file = tempKeys(t, MINE);
+  fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
+  const pair = await startPair(t, file, `${file}.host`, { path: fakeRex(t, '{"url":"https://mac.tail.ts.net"}') });
+  assert.equal(linkIn(await codeShown(pair)).searchParams.has('r'), false);
 });

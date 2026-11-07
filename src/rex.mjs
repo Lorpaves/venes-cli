@@ -57,6 +57,15 @@ export async function paste(session, text) {
   await rex(session, ['--autostart=false', 'api', 'call', 'block.event', '-'], JSON.stringify(event));
 }
 
+// Where a phone can reach this server, if Tailscale is on in it.
+export async function tailnetAddress() {
+  try {
+    return JSON.parse(await rex({}, ['--autostart=false', 'server', 'tailscale', 'pair', '--json'])).url;
+  } catch {
+    return undefined;
+  }
+}
+
 async function ownSession() {
   const { sessions } = JSON.parse(await rex({}, ['session', 'ls', '--json']));
   const known = sessions.find(session => session.label === SESSION_LABEL);

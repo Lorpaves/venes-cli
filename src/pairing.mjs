@@ -103,8 +103,30 @@ export function localHostName() {
   }
 }
 
+// What the phone calls this Mac.
+export function macName() {
+  return localHostName().replace(/\.local$/, '').replace(/-/g, ' ');
+}
+
+// A Mac that has never had Remote Login on has no host key.
+export function knownHostKey() {
+  try {
+    return readHostKeyFingerprint();
+  } catch {
+    return undefined;
+  }
+}
+
 export function pairingLink({ host, port = 22, user, hostKey, seed, name }) {
   const query = new URLSearchParams({ h: host, p: String(port), u: user, f: hostKey, k: seed.toString('base64url'), n: name });
+  return `venes://pair?${query}`;
+}
+
+// The host key isn't checked on this route. It's there so that a Mac the phone knows from SSH stays
+// one Mac.
+export function rexPairingLink({ address, hostKey, name }) {
+  const query = new URLSearchParams({ r: address, n: name });
+  if (hostKey) query.set('f', hostKey);
   return `venes://pair?${query}`;
 }
 

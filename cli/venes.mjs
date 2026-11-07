@@ -9,9 +9,10 @@ import { writeLauncher } from '../src/setup.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
-  addPairingKey, authorizedKeysFile, enrollPhone, hasPairingKey, isPortOpen, localHostName, makeNonce, makeOneTimeKey, pairingLink,
-  qrModules, readHostKeyFingerprint, removePairingKey, renderQR,
+  addPairingKey, authorizedKeysFile, enrollPhone, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName, makeNonce, makeOneTimeKey,
+  pairingLink, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink,
 } from '../src/pairing.mjs';
+import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAddress } from '../src/rex.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
@@ -19,6 +20,8 @@ const START_TIMEOUT_MS = 4000;
 const STOP_TIMEOUT_MS = 3000;
 const PAIRING_LIMIT_MS = 5 * 60_000;
 const PAIRING_CHECK_MS = 300;
+// Well past the client's keep-alive, which is every 15 seconds.
+const PIPE_IDLE_MS = 60_000;
 const USAGE = `venes <command>
 
 Helper
@@ -28,7 +31,7 @@ Helper
   version                       Print this version and the running helper's
   update                        Check for a new version now
   auto-update [on|off]          Show or change automatic updates
-  pair                          Show a QR code that pairs the Venes app
+  pair [--ssh]                  Show a QR code that pairs the Venes app, through Rex if it's on a tailnet
 
 Control
   sessions                      List sessions
@@ -44,7 +47,7 @@ Control
   output SESSION TASK           Print a background task's output
 
 App transport
-  attach                        Bridge stdin/stdout to the helper (used over SSH)
+  attach [--pipe]               Bridge stdin/stdout to the helper (used over SSH, or Rex with --pipe)
 `;
 
 const paths = helperPaths();
@@ -147,19 +150,25 @@ const commands = {
     }
     console.log(autoUpdateEnabled(paths) ? 'on' : 'off');
   },
-  async pair() {
+  async pair([route]) {
+    writeLauncher(paths);
+    process.env.PATH = `${process.env.PATH}:${REX_FOLDER}`;
+    const address = route === '--ssh' ? undefined : await tailnetAddress();
+    if (address) {
+      showRexCode(address);
+      return;
+    }
     const port = Number(process.env.VENES_SSH_PORT || 22);
     if (!(await isPortOpen(port))) {
-      throw new Error('Turn on Remote Login first, in System Settings > General > Sharing.');
+      const other = isRexInstalled() ? ' Or turn on Tailscale in Rex.' : '';
+      throw new Error(`Turn on Remote Login first, in System Settings > General > Sharing.${other}`);
     }
-    writeLauncher(paths);
     const file = authorizedKeysFile();
     const nonce = makeNonce();
     const { seed, publicKey } = makeOneTimeKey();
     // All of this can fail, so it comes before anything is added to authorized_keys.
-    const name = localHostName().replace(/\.local$/, '').replace(/-/g, ' ');
     const link = pairingLink({
-      host: localHostName(), port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name,
+      host: localHostName(), port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
     });
     const code = renderQR(qrModules(link));
     // An override has to reach the command too, since sshd runs it with a clean environment.
@@ -214,8 +223,9 @@ const commands = {
   output: ([sessionId, taskId]) => withClient(async client => {
     console.log((await client.request('taskOutput', { sessionId, taskId })).output ?? '');
   }),
-  async attach() {
+  async attach([mode]) {
     await ensureRunning();
+    if (mode === '--pipe') openPipe(process.stdin);
     const socket = net.connect(paths.clientSocket);
     process.stdin.pipe(socket);
     socket.pipe(process.stdout);
@@ -223,6 +233,26 @@ const commands = {
     process.stdin.on('end', () => socket.end());
   },
 };
+
+// A client that comes through Rex has a terminal for a pipe, which has to leave long lines alone.
+// And a terminal ends when someone closes it, which a client that has gone can't do.
+function openPipe(input) {
+  input.setRawMode(true);
+  let idle;
+  const stay = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => process.exit(0), PIPE_IDLE_MS);
+  };
+  stay();
+  input.on('data', stay);
+}
+
+// Nothing to hand over: Rex asks Tailscale who's calling, so the code is only where to call.
+function showRexCode(address) {
+  const link = rexPairingLink({ address, hostKey: knownHostKey(), name: macName() });
+  const code = renderQR(qrModules(link));
+  console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nThe phone needs Tailscale, signed in as you are in Rex.\n`);
+}
 
 const [name, ...args] = process.argv.slice(2);
 if (!commands[name]) {

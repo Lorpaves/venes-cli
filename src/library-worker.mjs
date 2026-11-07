@@ -58,6 +58,11 @@ const operations = {
   list: async ({ sdk, limit, offset }) => ({ sessions: await (await sdkAt(sdk)).listSessions({ limit, offset }) }),
   info: async ({ sdk, sessionId }) => ({ session: await (await sdkAt(sdk)).getSessionInfo(sessionId) }),
   history: ({ sessionId, limit, before }) => readHistory(findTranscript(sessionId), { limit, before }),
+  delete: async ({ sdk, sessionId }) => {
+    findTranscript(sessionId);
+    await (await sdkAt(sdk)).deleteSession(sessionId);
+    return {};
+  },
   capabilities,
 };
 

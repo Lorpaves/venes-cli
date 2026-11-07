@@ -965,3 +965,41 @@ test('clearing or compacting leaves the model alone, when it says nothing about 
     assert.equal(store.get('a').model, 'claude-haiku-5-5', source);
   }
 });
+
+test('a session that\'s deleted goes, and every client hears', () => {
+  const { store, hook, events } = setup();
+  hook('SessionStart', {});
+  hook('SessionEnd', { reason: 'other' });
+  store.forget('a');
+  assert.equal(store.find('a'), undefined);
+  assert.deepEqual(store.sessions(), []);
+  assert.equal(events.at(-1).kind, 'session.deleted');
+  assert.equal(events.at(-1).sessionId, 'a');
+});
+
+test('a session the helper never heard from can be deleted too', () => {
+  const { store, events } = setup();
+  store.forget('stored');
+  assert.deepEqual(events.map(e => [e.kind, e.sessionId]), [['session.deleted', 'stored']]);
+});
+
+test('a live session is ended on its way out, with its requests answered', async () => {
+  const { store, hook, kinds } = setup();
+  hook('UserPromptSubmit', { prompt: 'hi' });
+  const held = hook('PermissionRequest', { ...bash });
+  store.forget('a');
+  assert.deepEqual(kinds().slice(-3), ['session.status', 'session.ended', 'session.deleted']);
+  await held.decision;
+  assert.deepEqual(store.requests(), []);
+});
+
+test('the last hooks of a deleted session don\'t bring it back', () => {
+  const { store, hook, kinds } = setup();
+  hook('SessionStart', {});
+  store.forget('a');
+  const before = kinds().length;
+  hook('SessionEnd', { reason: 'other' });
+  hook('Stop', {});
+  assert.equal(store.find('a'), undefined);
+  assert.equal(kinds().length, before);
+});

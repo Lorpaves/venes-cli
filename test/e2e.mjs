@@ -911,6 +911,42 @@ T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, a
   client.close();
 });
 
+T('a_stopped_session_can_be_deleted_for_good', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word STORED.');
+  await r.turnEnd();
+  const { id, transcriptPath } = await r.session();
+  assert.ok(fs.existsSync(transcriptPath));
+  tmux('kill-session', '-t', 'run');
+  await delay(1500);
+  const { client, run } = await forgetSessions();
+
+  await client.request('delete', { sessionId: id });
+  assert.equal((await run.kind('session.deleted', 2000)).sessionId, id);
+  assert.ok(!fs.existsSync(transcriptPath), 'its transcript has gone from this Mac');
+  const { items } = await client.request('library', { limit: 50 });
+  assert.ok(!items.some(item => item.id === id), 'and Claude Code no longer lists it');
+  await assert.rejects(client.request('join', { sessionId: id, limit: 20 }), { code: 'unknown_session' });
+  await assert.rejects(client.request('delete', { sessionId: id }), { code: 'unknown_session' });
+  await assert.rejects(client.request('send', { sessionId: id, text: 'hello' }), { code: 'unknown_session' });
+  client.close();
+});
+
+T('a_running_session_ends_before_it_is_deleted', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  r.mark();
+  await r.type(SLEEP(20, 'SLEPT'));
+  await r.kind('tool.start', 20000);
+  const { id, transcriptPath } = await r.session();
+
+  await r.client.request('delete', { sessionId: id });
+  await r.kind('session.deleted', 2000);
+  await delay(1500);
+  assert.ok(!fs.existsSync(transcriptPath), 'and nothing wrote it back');
+  const { sessions } = await r.client.request('sessions');
+  assert.ok(!sessions.some(session => session.id === id), 'nor did its last hooks bring it back');
+});
+
 T('a_session_running_elsewhere_is_listed_but_not_resumed', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word ELSEWHERE.');
   await r.turnEnd();

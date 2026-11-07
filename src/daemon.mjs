@@ -12,6 +12,7 @@ import readline from 'node:readline';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
+import { removeSession } from './remove.mjs';
 import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
@@ -194,6 +195,12 @@ function createClientServer(store, checkForUpdate, library) {
       return library.capabilities(cwd);
     },
     configure,
+    delete: async ({ sessionId }) => {
+      await resuming.get(sessionId)?.catch(() => {});
+      await typing(sessionId, () => removeSession({ store, library }, sessionId));
+      chosenForResume.delete(sessionId);
+      return {};
+    },
     history: msg => {
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);

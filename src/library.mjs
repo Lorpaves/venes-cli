@@ -30,7 +30,7 @@ const BACKGROUND_STATE = { working: 'running', blocked: 'waiting' };
 
 export function readRunning(stdout) {
   return JSON.parse(stdout).filter(entry => entry.sessionId).map(entry => ({
-    id: entry.sessionId, title: entry.name, cwd: entry.cwd, startedAt: entry.startedAt,
+    id: entry.sessionId, title: entry.name, cwd: entry.cwd, startedAt: entry.startedAt, pid: entry.pid, kind: entry.kind,
     status: STATUS[entry.status] ?? BACKGROUND_STATE[entry.state] ?? 'idle',
   }));
 }
@@ -142,6 +142,11 @@ export class Library {
 
   history(sessionId, { limit, before } = {}) {
     return this.#read({ op: 'history', sessionId, limit, before });
+  }
+
+  // Its transcript and its subagents' are gone from this Mac after this.
+  async delete(sessionId) {
+    await this.#read({ op: 'delete', sdk: await this.prepare(), sessionId });
   }
 
   async #readCapabilities(cwd) {

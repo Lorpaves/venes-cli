@@ -112,6 +112,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |
 | `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). |
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
+| `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript |
@@ -168,6 +169,12 @@ A session that isn't running keeps the choice for its next `send`, which passes 
 
 A session reports its model and effort through `session.model`, `session.effort`, and `model` and `effort` in `sessions`. Effort is only known from the first hook that carries it, usually the end of the first turn. For a session that isn't running, `join` gives the model that last replied.
 
+### Deleting a session
+
+`delete` removes a session's transcript and its subagents' through the Agent SDK's `deleteSession()`, so it's gone from `claude --resume` too. It can't be undone. A session that's running, in tmux or not, gets SIGTERM first and has to be gone from `claude agents` within five seconds, or `delete` fails with `session_running` and nothing is deleted. Its pane goes back to its shell, and a `venes-<id>` tmux session closes. Every client hears `session.deleted`.
+
+Files the session changed stay as they are, and so does anything else Claude Code keeps under the session's id, such as file history.
+
 ### Sending during a turn
 
 `lane` says when a message sent during a turn should be read:
@@ -222,6 +229,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.model` | `model` |
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
+| `session.deleted` | |
 | `message.user` | `text`, `clientId` |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
 | `message.thinking` | `text`, `durationMs` |
@@ -261,6 +269,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | tmux isn't installed, so a stored session can't be resumed |
 | `no_claude` | Claude Code isn't on the PATH, so `capabilities` has nothing to ask |
+| `session_running` | The session wouldn't stop, so `delete` left it alone |
+| `background_session` | `delete` doesn't handle background sessions. Use `claude rm`, which has its own rules about their worktrees. |
 | `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels through tmux. Later ones don't. |

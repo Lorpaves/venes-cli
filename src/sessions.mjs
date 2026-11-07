@@ -83,6 +83,7 @@ function taskView({ result, outputFile, ...task }) {
 export class SessionStore extends EventEmitter {
   #sessions = new Map();
   #requests = new Map();
+  #deleted = new Set();
   #log = [];
   #seq = 0;
   #agentParent;
@@ -163,6 +164,16 @@ export class SessionStore extends EventEmitter {
   // Resuming it didn't work out.
   abandon(s) { this.#endSession(s, 'resume_failed'); }
 
+  // A session deleted from this Mac. Its last hooks can still be on their way, and mustn't bring
+  // it back, so it stays known as deleted.
+  forget(id) {
+    const s = this.#sessions.get(id);
+    if (s && s.status !== 'ended') this.#endSession(s, 'deleted');
+    this.#sessions.delete(id);
+    this.#deleted.add(id);
+    this.#emit({ id }, 'session.deleted', {});
+  }
+
   pendingFor(session) {
     return [...this.#requests.values()].filter(r => r.sessionId === session.id);
   }
@@ -222,7 +233,7 @@ export class SessionStore extends EventEmitter {
 
   // Returns undefined, or { request, decision } when the hook must wait for an answer.
   handleHook(ev, tmux = {}) {
-    if (!ev.session_id) return undefined;
+    if (!ev.session_id || this.#deleted.has(ev.session_id)) return undefined;
     const s = this.#touch(ev, tmux);
     const agentId = ev.agent_id;
     switch (ev.hook_event_name) {

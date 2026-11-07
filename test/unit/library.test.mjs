@@ -20,9 +20,9 @@ test('what claude agents prints becomes sessions with the helper\'s statuses', (
     { sessionId: 'c', cwd: '/c', startedAt: 3, status: 'idle' },
   ]);
   assert.deepEqual(readRunning(output), [
-    { id: 'a', title: 'one', cwd: '/a', startedAt: 1, status: 'running' },
-    { id: 'b', title: 'two', cwd: '/b', startedAt: 2, status: 'waiting' },
-    { id: 'c', title: undefined, cwd: '/c', startedAt: 3, status: 'idle' },
+    { id: 'a', title: 'one', cwd: '/a', startedAt: 1, pid: 9, kind: 'interactive', status: 'running' },
+    { id: 'b', title: 'two', cwd: '/b', startedAt: 2, pid: undefined, kind: undefined, status: 'waiting' },
+    { id: 'c', title: undefined, cwd: '/c', startedAt: 3, pid: undefined, kind: undefined, status: 'idle' },
   ]);
 });
 
@@ -100,6 +100,29 @@ test('an id can\'t reach outside the projects folder', t => {
   for (const sessionId of ['../../secret', '../secret', '/etc/passwd', `${ID}/../${ID}`]) {
     assert.equal(read(dir, { op: 'history', sessionId }).error.code, 'unknown_session', sessionId);
   }
+});
+
+test('deleting a session that isn\'t stored says so, without touching the SDK', t => {
+  const reply = read(configDir(t), { op: 'delete', sdk: '/nowhere/sdk.mjs', sessionId: '99999999-2222-4333-8444-555555555555' });
+  assert.equal(reply.error.code, 'unknown_session');
+});
+
+test('an id can\'t delete anything outside the projects folder', t => {
+  const dir = configDir(t);
+  fs.writeFileSync(path.join(dir, 'secret.jsonl'), '{}');
+  for (const sessionId of ['../../secret', '../secret', '/etc/passwd', `${ID}/../${ID}`, '*', '']) {
+    assert.equal(read(dir, { op: 'delete', sdk: '/nowhere/sdk.mjs', sessionId }).error.code, 'unknown_session', sessionId);
+  }
+  assert.ok(fs.existsSync(path.join(dir, 'secret.jsonl')));
+});
+
+test('a stored session is deleted through the SDK', t => {
+  const dir = configDir(t);
+  const sdk = path.join(dir, 'sdk.mjs');
+  fs.writeFileSync(sdk, `import fs from 'node:fs';
+export async function deleteSession(id) { fs.writeFileSync(process.env.CLAUDE_CONFIG_DIR + '/deleted', id); }`);
+  assert.deepEqual(read(dir, { op: 'delete', sdk, sessionId: ID }), {});
+  assert.equal(fs.readFileSync(path.join(dir, 'deleted'), 'utf8'), ID);
 });
 
 test('a failure comes back as an error, not a crash', t => {

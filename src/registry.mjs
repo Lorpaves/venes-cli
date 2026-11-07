@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 
-const FIELDS = ['id', 'cwd', 'pane', 'tmuxSocket', 'transcriptPath', 'permissionMode', 'model', 'effort', 'startedAt', 'lastEventAt'];
+const FIELDS = ['id', 'cwd', 'pane', 'tmuxSocket', 'rexSession', 'rexServer', 'transcriptPath', 'permissionMode', 'model', 'effort', 'startedAt', 'lastEventAt'];
 
 export function readRegistry(file) {
   try {

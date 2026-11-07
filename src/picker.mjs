@@ -4,7 +4,7 @@
 // checked on the screen before the next, and anything unexpected closes it with nothing changed.
 
 import { HelperError } from './sessions.mjs';
-import { bottomOf, closePage, pause, pressKey, readScreen, refuseIfBlocked, refuseIfRequested, settleCommand } from './tmux.mjs';
+import { bottomOf, closePage, pause, pressKey, readScreen, refuseIfBlocked, refuseIfRequested, settleCommand } from './terminal.mjs';
 
 // Option+P, which unlike typing /model leaves anything in the prompt alone.
 const OPEN_KEY = 'M-p';

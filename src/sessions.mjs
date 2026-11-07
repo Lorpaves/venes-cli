@@ -157,6 +157,8 @@ export class SessionStore extends EventEmitter {
     }
     s.pane = undefined;
     s.tmuxSocket = undefined;
+    s.rexSession = undefined;
+    s.rexServer = undefined;
     s.lastEventAt = Date.now();
     return s;
   }
@@ -371,10 +373,12 @@ export class SessionStore extends EventEmitter {
   }
 
   // /clear and /resume start a new session id in the same pane, which retires the old one.
-  #claimPane(s, { pane, socket }) {
+  #claimPane(s, { pane, socket, rexSession, rexServer }) {
     if (s.pane === pane && s.tmuxSocket === socket) return;
     s.pane = pane;
     s.tmuxSocket = socket;
+    s.rexSession = rexSession;
+    s.rexServer = rexServer;
     for (const other of this.#sessions.values()) {
       if (other !== s && other.pane === pane && other.tmuxSocket === socket && other.status !== 'ended') {
         this.#endSession(other, 'replaced');

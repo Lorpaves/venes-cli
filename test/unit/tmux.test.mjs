@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hasTmux, startPane } from '../pane.mjs';
-import { closePage, hasOpenDialog, settleCommand, showsDialog } from '../../src/tmux.mjs';
+import { closePage, hasOpenDialog, settleCommand, showsDialog } from '../../src/terminal.mjs';
 
 const FAST = { limit: 400, check: 10, requestSettle: 20, pageSettle: 60 };
 const screen = (...lines) => [...lines, '────', '❯ ', '────', '  ⏸ manual mode on · ? for shortcuts', '', ''].join('\n');

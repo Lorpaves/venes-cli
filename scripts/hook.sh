@@ -26,5 +26,6 @@ esac
 /usr/bin/curl -s --fail --max-time "$limit" --unix-socket "$home/hook.sock" \
   -H 'Content-Type: application/json' \
   -H "X-Venes-Pane: ${TMUX_PANE:-}" -H "X-Venes-Tmux: ${TMUX:-}" \
+  -H "X-Venes-Rex-Block: ${REX_BLOCK:-}" -H "X-Venes-Rex-Session: ${REX_SESSION:-}" -H "X-Venes-Rex-Server: ${REX_SERVER:-}" \
   --data-binary @- http://venes/hook 2>/dev/null
 exit 0

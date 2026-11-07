@@ -17,7 +17,9 @@ import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readTail } from './transcript.mjs';
-import { findClaudePanes, hasOpenDialog, isSessionOpen, parseTmuxEnv, sendEscape, sendText, settleCommand, startSession } from './tmux.mjs';
+import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from './terminal.mjs';
+import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
+import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
 
@@ -35,9 +37,9 @@ const HELD_CHECK_MS = 300;
 const REGISTRY_SAVE_MS = 2000;
 // Enough of the end of a transcript to find what was last said.
 const LAST_WORDS_ITEMS = 40;
-// Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux and
-// the native installer's claude.
-const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin'), path.dirname(process.execPath)];
+// Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux, Rex's
+// command and the native installer's claude.
+const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin'), path.dirname(process.execPath), REX_FOLDER];
 
 function listen(server, socketPath) {
   return new Promise((resolve, reject) => {
@@ -74,9 +76,8 @@ function createHookServer(store) {
       res.end();
       return;
     }
-    const tmux = { pane: req.headers['x-venes-pane'] || undefined, socket: parseTmuxEnv(req.headers['x-venes-tmux']) };
     try {
-      const held = store.handleHook(event, tmux);
+      const held = store.handleHook(event, terminalFrom(req.headers));
       const output = held ? await held.decision : undefined;
       res.end(output ? JSON.stringify(output) : '');
     } catch (error) {
@@ -129,7 +130,7 @@ function createClientServer(store, checkForUpdate, library) {
 
   const sessionWithPane = sessionId => {
     const session = store.get(sessionId);
-    if (!session.pane) throw new HelperError('no_pane', 'This session is not running in tmux.');
+    if (!session.pane) throw new HelperError('no_pane', 'This session is not running in tmux or Rex.');
     if (session.status === 'ended') throw new HelperError('session_ended', 'This session has ended.');
     return session;
   };
@@ -139,8 +140,7 @@ function createClientServer(store, checkForUpdate, library) {
   // What a reader chose for a session that isn't running, for when it next is.
   const chosenForResume = new Map();
   const resume = msg => {
-    const tmux = { hasOpenDialog, isSessionOpen, startSession };
-    const started = resumeSession({ store, library, tmux }, msg.sessionId, msg, chosenForResume.get(msg.sessionId))
+    const started = resumeSession({ store, library, terminal: resumeTerminal() }, msg.sessionId, msg, chosenForResume.get(msg.sessionId))
       .then(reply => { chosenForResume.delete(msg.sessionId); return reply; })
       .finally(() => resuming.delete(msg.sessionId));
     resuming.set(msg.sessionId, started);
@@ -251,7 +251,7 @@ function createClientServer(store, checkForUpdate, library) {
     interrupt: async msg => {
       const session = sessionWithPane(msg.sessionId);
       if (session.status !== 'running' && session.status !== 'waiting') throw new HelperError('not_running', 'Nothing to interrupt.');
-      await sendEscape({ pane: session.pane, tmuxSocket: session.tmuxSocket });
+      await sendEscape(session);
       return {};
     },
   };
@@ -311,8 +311,9 @@ async function restoreSessions(store, paths) {
   const records = readRegistry(paths.sessionsFile);
   const panes = await findClaudePanes(new Set(records.map(record => record.tmuxSocket ?? undefined)));
   const running = new Set(panes.map(pane => `${pane.tmuxSocket}|${pane.pane}`));
-  const alive = records.filter(record => running.has(`${record.tmuxSocket ?? null}|${record.pane}`));
-  store.restore(alive.map(record => ({ ...record, ...lastWords(record.transcriptPath) })));
+  const isAlive = record => (record.rexSession ? rexRunsClaude(record) : running.has(`${record.tmuxSocket ?? null}|${record.pane}`));
+  const alive = await Promise.all(records.map(isAlive));
+  store.restore(records.filter((_, index) => alive[index]).map(record => ({ ...record, ...lastWords(record.transcriptPath) })));
 }
 
 function startRegistrySaving(store, paths) {

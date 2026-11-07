@@ -40,11 +40,32 @@ const ASK = 'Use the AskUserQuestion tool to ask me one question, "Which color?"
 const PLAN = n => `Make a one-step plan to create the file e2e-${n}.txt using touch, then call ExitPlanMode. Do not ask questions.`;
 const SLEEP = (s, word) => `Use the Bash tool in the foreground to run exactly this command: python3 -c 'import time; time.sleep(${s})' -- then reply with only the word ${word}.`;
 
+// A Rex server of this run's own, so that nothing shows up in the one on this Mac.
+const REX_SOCKET = `${HOME}-rex.sock`;
+const REX_SERVER = `unix://${REX_SOCKET}`;
+const barerEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(CLAUDE|REX_)/.test(key)));
+const rexEnv = { ...barerEnv, REX_SERVER };
+const hasRex = (() => { try { execFileSync('sh', ['-c', 'command -v rex'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+const rex = (...a) => execFileSync('rex', a, { encoding: 'utf8', env: rexEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+const REX_KEYS = { Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right' };
+// The session a case is running in Rex, if it is.
+let inRex;
+let rexServerProcess;
+async function startRexServer() {
+  if (rexServerProcess) return;
+  fs.rmSync(REX_SOCKET, { force: true });
+  rexServerProcess = spawn('rex', ['server', 'run', '--listen', REX_SERVER, '--state-dir', `${HOME}-rex`, '--restore=false'], { env: rexEnv, stdio: 'ignore' });
+  for (let i = 0; i < 100 && !fs.existsSync(REX_SOCKET); i++) await delay(50);
+  await delay(200);
+}
+process.on('exit', () => rexServerProcess?.kill());
+
 function startHelper(cli = CLI) {
   // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
   const env = {
-    ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR,
+    ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR, VENES_TERMINAL: inRex ? 'rex' : 'tmux',
     VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
+    ...(inRex && { REX_SERVER }),
   };
   spawn(process.execPath, [cli, 'daemon'], { env, stdio: 'ignore', detached: true }).unref();
 }
@@ -75,9 +96,17 @@ class Run {
     this.client = client;
     client.on('message', m => { if (m.type === 'event') this.events.push(m.event); });
   }
-  pane() { return tmux('capture-pane', '-p', '-t', 'run'); }
-  key(...k) { tmux('send-keys', '-t', 'run', ...k); }
-  async type(text) { tmux('send-keys', '-t', 'run', '-l', text); await delay(500); this.key('Enter'); }
+  pane() { return inRex ? rex('capture', '-s', inRex.session, '-b', inRex.block, '--trim') : tmux('capture-pane', '-p', '-t', 'run'); }
+  key(...k) {
+    if (inRex) rex('send-key', '-s', inRex.session, '-b', inRex.block, ...k.map(key => REX_KEYS[key] ?? key));
+    else tmux('send-keys', '-t', 'run', ...k);
+  }
+  async type(text) {
+    if (inRex) rex('send', '-s', inRex.session, '-b', inRex.block, text);
+    else tmux('send-keys', '-t', 'run', '-l', text);
+    await delay(500);
+    this.key('Enter');
+  }
   async wait(pred, ms = 45000, label = 'event') {
     const end = Date.now() + ms;
     while (Date.now() < end) {
@@ -116,6 +145,18 @@ function launch({ mode = 'default', sources = 'project', model = MODEL } = {}) {
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
   tmux('new-session', '-d', '-s', 'run', '-x', '110', '-y', '42', '-c', WS, 'sh', '-c', cmd);
+}
+
+function launchInRex({ mode = 'default', sources = 'project', model = MODEL } = {}) {
+  const env = [
+    `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
+    'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
+  ];
+  const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
+    '--model', model, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
+  const made = JSON.parse(rex('new', 'run', '--json', '--cwd', WS, '--shell=none', '--', 'sh', '-c', cmd));
+  inRex.session = made.session_id;
+  inRex.block = made.initial_windows[0].block_ids[0];
 }
 
 async function ready(run) {
@@ -911,6 +952,106 @@ T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, a
   client.close();
 });
 
+if (hasRex) {
+  T('in_rex_a_session_can_be_typed_into_and_stopped_with_no_tmux', { rex: true, mode: 'bypassPermissions' }, async r => {
+    await r.type('Reply with only the word READY.');
+    await r.turnEnd();
+    const { id, pane } = await r.session();
+    assert.match(pane, /^block:/, 'the session said where it is');
+
+    r.mark();
+    await r.client.request('send', { sessionId: id, text: '- Reply with only the word TYPED.', clientId: 'c1' });
+    assert.equal((await r.kind('message.user', 12000)).clientId, 'c1');
+    await r.wait(e => e.kind === 'turn.end' && /TYPED/.test(e.lastMessage), 30000, 'turn.end TYPED');
+
+    r.mark();
+    await r.client.request('send', { sessionId: id, text: SLEEP(20, 'SLEPT') });
+    await r.kind('tool.start', 20000);
+    await r.client.request('interrupt', { sessionId: id });
+    await r.kind('turn.interrupted', 15000);
+  });
+
+  T('in_rex_a_prompt_on_the_screen_stops_a_message', { rex: true }, async r => {
+    await r.type(TOUCH('rex'));
+    const request = await r.request('permission');
+    const { id } = await r.session();
+    await assert.rejects(r.client.request('send', { sessionId: id, text: 'stray message' }), { code: 'request_pending' });
+    await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+    await r.turnEnd();
+    assert.ok(exists('e2e-rex.txt'), 'answered from here, in a session in Rex');
+  });
+
+  T('in_rex_the_model_and_effort_change_for_this_session', { rex: true }, keepingDefaults(async (r, before) => {
+    await r.type('Reply with only the word READY.');
+    await r.turnEnd();
+    const { id } = await r.session();
+    r.mark();
+    await r.client.request('configure', { sessionId: id, model: 'sonnet', effort: 'low' });
+    await r.kind('session.model', 5000);
+    await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
+    await r.wait(e => e.kind === 'session.effort' && e.effort === 'low', 30000, 'session.effort low');
+    assert.deepEqual(readDefaults(), before);
+  }));
+
+  T('in_rex_a_page_opened_from_here_is_closed_again', { rex: true }, async r => {
+    await r.type('Reply with only the word READY.');
+    await r.turnEnd();
+    const { id } = await r.session();
+    await assert.rejects(r.client.request('send', { sessionId: id, text: '/usage' }), { code: 'terminal_only' });
+    await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
+    await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'turn.end AFTER');
+  });
+
+  T('in_rex_a_stopped_session_resumes_with_no_tmux', { rex: true, mode: 'bypassPermissions' }, async r => {
+    await r.type('Reply with only the word STORED.');
+    await r.turnEnd();
+    const { id } = await r.session();
+    rex('kill', inRex.session);
+    await delay(1500);
+    const { client, run } = await forgetSessions();
+
+    const reply = await client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.', clientId: 'first' });
+    assert.equal(reply.resumed, true);
+    await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /AGAIN/.test(e.lastMessage), 30000, 'turn.end AGAIN');
+    const { sessions } = await client.request('sessions');
+    const { pane } = sessions.find(s => s.id === id);
+    assert.match(pane, /^block:/);
+    const { blocks } = JSON.parse(rex('block', 'ls', '-s', 'Venes', '--json'));
+    assert.equal(blocks.find(block => block.block_id === pane).label, `venes-${id.slice(0, 8)}`, 'it has a window in the session the helper keeps');
+    await client.request('send', { sessionId: id, text: 'Reply with only the word THIRD.' });
+    await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /THIRD/.test(e.lastMessage), 30000, 'turn.end THIRD');
+    rex('kill', 'Venes');
+    client.close();
+  });
+
+  T('in_rex_a_restart_keeps_the_session', { rex: true, mode: 'bypassPermissions' }, async r => {
+    await r.type('Reply with only the word READY.');
+    await r.turnEnd();
+    const before = await r.session();
+    await delay(2500);
+    await stopHelper();
+    startHelper();
+    const client = await connect();
+    const run = new Run(client);
+    await client.request('subscribe');
+    const session = (await client.request('sessions')).sessions.find(s => s.id === before.id);
+    assert.equal(session?.pane, before.pane, 'it came back with its block');
+    await client.request('send', { sessionId: before.id, text: 'Reply with only the word BACK.' });
+    await run.wait(e => e.kind === 'turn.end' && /BACK/.test(e.lastMessage), 30000, 'turn.end BACK');
+    client.close();
+  });
+
+  T('in_rex_a_running_session_ends_before_it_is_deleted', { rex: true, mode: 'bypassPermissions' }, async r => {
+    await r.type(SLEEP(20, 'SLEPT'));
+    await r.kind('tool.start', 20000);
+    const { id, transcriptPath } = await r.session();
+    await r.client.request('delete', { sessionId: id });
+    await r.kind('session.deleted', 2000);
+    await delay(1000);
+    assert.ok(!fs.existsSync(transcriptPath));
+  });
+}
+
 T('a_stopped_session_can_be_deleted_for_good', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word STORED.');
   await r.turnEnd();
@@ -1013,6 +1154,10 @@ async function runCase(name) {
   let client; let run;
   const started = Date.now();
   try {
+    if (opts.rex) {
+      await startRexServer();
+      inRex = {};
+    }
     if (opts.noHelper) {
       opts.before?.();
       if (opts.before) (await connect()).close();
@@ -1023,7 +1168,8 @@ async function runCase(name) {
       run = new Run(client);
       await client.request('subscribe');
     }
-    launch(opts);
+    if (opts.rex) launchInRex(opts);
+    else launch(opts);
     await ready(run);
     await fn(run);
     console.log(`ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
@@ -1034,9 +1180,11 @@ async function runCase(name) {
     return false;
   } finally {
     try { tmux('kill-session', '-t', 'run'); } catch { /* already gone */ }
+    try { if (inRex?.session) rex('kill', inRex.session); } catch { /* already gone */ }
     await delay(500);
     client?.close();
     await stopHelper();
+    inRex = undefined;
   }
 }
 

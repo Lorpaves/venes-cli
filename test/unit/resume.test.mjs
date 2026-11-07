@@ -11,13 +11,13 @@ function setUp({ running = [], info = { cwd: '/tmp', createdAt: 1000 }, onStart 
   const events = [];
   store.on('event', event => events.push(event));
   const started = [];
-  const tmux = {
-    startSession: async request => { started.push(request); onStart(store); return '%7'; },
+  const terminal = {
+    startSession: async request => { started.push(request); onStart(store); return { pane: '%7' }; },
     isSessionOpen: async () => open(),
     hasOpenDialog: async () => dialog(),
   };
   const library = { running: async () => running, info: async () => info };
-  return { deps: { store, library, tmux, env: { PATH: '/bin', ...env }, ...FAST }, store, events, started };
+  return { deps: { store, library, terminal, env: { PATH: '/bin', ...env }, ...FAST }, store, events, started };
 }
 
 const prompt = (store, text) => store.handleHook({ hook_event_name: 'UserPromptSubmit', session_id: ID, prompt: text, cwd: '/tmp' }, { pane: '%7' });
@@ -99,7 +99,7 @@ test('it gives up when nothing happens', async () => {
 
 test('a failure to start tmux ends the session too', async () => {
   const { deps, store } = setUp();
-  deps.tmux.startSession = async () => { throw Object.assign(new Error('no tmux'), { code: 'no_tmux' }); };
+  deps.terminal.startSession = async () => { throw Object.assign(new Error('no tmux'), { code: 'no_tmux' }); };
   await assert.rejects(resumeSession(deps, ID, { text: 'x' }), { code: 'no_tmux' });
   assert.equal(store.find(ID).status, 'ended');
 });
@@ -117,7 +117,7 @@ test('test settings reach the command and the environment', async () => {
   await resumeSession(deps, ID, { text: 'x' });
   assert.deepEqual(started[0].command, ['claude', '--model', 'haiku', '--resume', ID, '--', 'x']);
   assert.equal(started[0].env.VENES_HOME, '/h');
-  assert.equal(started[0].tmuxSocket, '/s');
+  assert.equal(started[0].env.VENES_TMUX_SOCKET, '/s');
 });
 
 test('what the reader chose goes on the command line, ahead of the message', async () => {

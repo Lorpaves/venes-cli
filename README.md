@@ -8,7 +8,7 @@ Venes is an independent project, not made by or affiliated with Anthropic.
 
 ## Install
 
-Requires Claude Code, Node.js 22 or later, and tmux to send input to a session. Tested on macOS.
+Requires Claude Code, Node.js 22 or later, and either [Rex](https://www.superlogical.com/rex) or tmux to send input to a session. Tested on macOS.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Lorpaves/venes-helper/main/install.sh | sh
@@ -24,7 +24,7 @@ Then start a new session, or run `/reload-plugins` in an open one. The helper st
 
 ## Try it
 
-Run Claude inside tmux, so the helper can type into it:
+Run Claude in Rex, or inside tmux, so the helper can type into it:
 
 ```sh
 tmux new -A -s cc      # then run claude inside it
@@ -95,7 +95,7 @@ rm -rf ~/.venes
 Claude Code ──hook──▶ hook.sock ┐
                                 ├─ helper ─▶ client.sock ◀─ ~/.venes/venes attach ◀─ SSH ◀─ app
 transcript ───── polled ────────┘     │
-                                      └─ tmux ─▶ sends text and Esc to the pane
+                                      └─ Rex or tmux ─▶ sends text and keys to the terminal
 ```
 
 ## Protocol
@@ -150,7 +150,7 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 
 `join` and `history` work on any of these. For a session the helper doesn't know, `turn` is empty and the session's `status` is `ended` unless it's running somewhere. `claude agents` calls a session busy for as long as a background shell runs, so `join` checks the transcript and says `idle` once the turn is over, though `library` still says `running`.
 
-`send` to a session that isn't running runs `claude --resume` in a new tmux session named `venes-<id>`, in the session's folder, with the message as its first prompt. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside tmux is refused with `no_pane`, because resuming it would put two processes on one transcript.
+`send` to a session that isn't running runs `claude --resume` in the session's folder, with the message as its first prompt: in a window labelled `venes-<id>` of a Rex session called `Venes` if Rex is on this Mac, and otherwise in a tmux session named `venes-<id>`. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside both is refused with `no_pane`, because resuming it would put two processes on one transcript.
 
 ### Commands and models
 
@@ -165,13 +165,19 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 
 A command that opens a page in the terminal, like `/config` or `/usage`, can't be used from a client. The helper closes the page again, because the next message would otherwise act on it, and `send` fails with `terminal_only`. To see whether one does, the reply to any slash command comes about a second and a half later. A `/model` or `/effort` with a value, sent as a message, is a `configure`. What a local command prints isn't sent to clients.
 
-A session that isn't running keeps the choice for its next `send`, which passes it as `--model` and `--effort`, so it stays with that session too. A session running outside tmux is refused with `no_pane`.
+A session that isn't running keeps the choice for its next `send`, which passes it as `--model` and `--effort`, so it stays with that session too. A session running outside Rex and tmux is refused with `no_pane`.
 
 A session reports its model and effort through `session.model`, `session.effort`, and `model` and `effort` in `sessions`. Effort is only known from the first hook that carries it, usually the end of the first turn. For a session that isn't running, `join` gives the model that last replied.
 
+### Rex
+
+A session running in Rex needs no tmux. Its hooks carry `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, and `pane` in `sessions` is then a block id, which is all a client has to know: everything above works the same. The helper uses the `rex` command, and finds it in Rex's install folder when it was started over SSH. It reaches the Mac's own Rex server. Phones still connect over SSH, so nothing here needs Rex's network access turned on.
+
+A session started before this version was installed has none of those variables, so it can't be typed into until it's restarted.
+
 ### Deleting a session
 
-`delete` removes a session's transcript and its subagents' through the Agent SDK's `deleteSession()`, so it's gone from `claude --resume` too. It can't be undone. A session that's running, in tmux or not, gets SIGTERM first and has to be gone from `claude agents` within five seconds, or `delete` fails with `session_running` and nothing is deleted. Its pane goes back to its shell, and a `venes-<id>` tmux session closes. Every client hears `session.deleted`.
+`delete` removes a session's transcript and its subagents' through the Agent SDK's `deleteSession()`, so it's gone from `claude --resume` too. It can't be undone. A session that's running, in tmux or not, gets SIGTERM first and has to be gone from `claude agents` within five seconds, or `delete` fails with `session_running` and nothing is deleted. Its pane goes back to its shell, and a `venes-<id>` window or tmux session closes. Every client hears `session.deleted`.
 
 Files the session changed stay as they are, and so does anything else Claude Code keeps under the session's id, such as file history.
 
@@ -264,16 +270,16 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 |---|---|
 | `request_pending`, `dialog_open` | `send` or `configure` was refused because Enter would have answered an open prompt |
 | `request_closed` | That request was already answered |
-| `no_pane` | The session isn't in tmux, so it can be watched and answered but not typed into |
+| `no_pane` | The session isn't in Rex or tmux, so it can be watched and answered but not typed into |
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
-| `no_tmux` | tmux isn't installed, so a stored session can't be resumed |
+| `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed |
 | `no_claude` | Claude Code isn't on the PATH, so `capabilities` has nothing to ask |
 | `session_running` | The session wouldn't stop, so `delete` left it alone |
 | `background_session` | `delete` doesn't handle background sessions. Use `claude rm`, which has its own rules about their worktrees. |
 | `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
-| `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels through tmux. Later ones don't. |
+| `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |
 | `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
@@ -293,10 +299,10 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 - **`send` has a short race.** A prompt that opens in the last moment before Enter can still be answered by it. Two checks narrow this to a few milliseconds but can't remove it.
 - **A crashed session can leave a request open.** If Claude Code is killed outright, no event closes it, and answering has no effect.
 - **The transcript format is undocumented,** so a Claude Code update could stop interrupt detection and `history` working until the parser is updated. The SDK's `getSessionMessages()` doesn't have this problem, but it stops at the last compaction, which can be nearly all of a long session, so `history` reads the transcript.
-- **A session outside tmux can't be typed into.** It's listed, and if it started with the plugin it can be watched and answered. One started before the plugin was installed shows only what's in its transcript.
-- **A dialog can stop a resume.** If Claude Code asks something first, such as whether to continue a long conversation, `send` fails with `dialog_open`, and someone at the Mac has to answer it in the `venes-<id>` tmux session.
+- **A session outside Rex and tmux can't be typed into.** It's listed, and if it started with the plugin it can be watched and answered. One started before the plugin was installed shows only what's in its transcript.
+- **A dialog can stop a resume.** If Claude Code asks something first, such as whether to continue a long conversation, `send` fails with `dialog_open`, and someone at the Mac has to answer it in the `venes-<id>` window or tmux session.
 - **`configure` reads the picker off the screen.** Its keys are documented but what it draws isn't, so a Claude Code update could stop `configure` working. It would then fail with `picker_failed` and change nothing. A rebound `modelPicker:thisSessionOnly` or `chat:modelPicker` key does the same. Changing a session's effort also needs its model to be a row in the picker.
-- **A restart forgets most of a session's state.** Sessions in tmux stay listed, as idle until they're next heard from. The rest reappear on their next event. Events, held messages and open requests are lost.
+- **A restart forgets most of a session's state.** Sessions in Rex or tmux stay listed, as idle until they're next heard from. The rest reappear on their next event. Events, held messages and open requests are lost.
 - **A release reaches everyone at once.** Pushing a new `version` to `main` installs it everywhere within about six hours. A push that doesn't change `version` reaches no one.
 - **Background tasks can't be stopped from here.** Claude Code offers no way to stop one from outside, so the only route is asking Claude in a message.
 - **Workflows report no progress.** A workflow appears as a task with a name and status, but its phases and agents aren't available to hooks.
@@ -306,7 +312,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 
 ```sh
 npm test                                     # unit tests, no Claude needed
-VENES_E2E_WS=/abs/workspace npm run e2e      # real Claude Code, in an isolated tmux
+VENES_E2E_WS=/abs/workspace npm run e2e      # real Claude Code, in an isolated tmux and Rex server
 ```
 
 The end-to-end suite loads this folder with `--plugin-dir`, so nothing gets installed, and it uses a small amount of model usage. A few cases use `/model` at the terminal, which writes to `~/.claude/settings.json`, and they put it back afterwards. Set `VENES_E2E_SSH=1` to add a case that goes through real SSH to this Mac, which needs key login to `localhost`.

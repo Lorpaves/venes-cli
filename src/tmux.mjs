@@ -5,27 +5,8 @@ import { HelperError } from './sessions.mjs';
 
 const exec = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 5000;
-const PASTE_SETTLE_MS = 150;
 const NEW_SESSION_COLUMNS = 120;
 const NEW_SESSION_ROWS = 40;
-
-// Pressing Enter while one of these is open picks its highlighted option, which for a permission
-// prompt means approving the tool, and on a page like /config changes a setting. Footers end in
-// "Esc to cancel", "clear", "close" or "dismiss". The status line's "esc" is in lower case.
-const DIALOG_FOOTER = /Esc to \w+|Enter to (select|confirm)|Do you want to proceed/;
-// Stricter, because Esc gets pressed on it: a footer, and not a sentence in a reply.
-const PAGE_FOOTER = /(^|[·│])\s*Esc to \w+/m;
-// Asked before a new model or effort level gives up a warm prompt cache. It has no footer.
-const SWITCH_QUESTION = /❯ 1\. Yes, switch to /;
-const DIALOG_SEARCH_LINES = 14;
-// What a command opens took under 100ms to appear when measured, so this allows for a busy Mac.
-const COMMAND_SETTLE_LIMIT_MS = 1500;
-const COMMAND_SETTLE_CHECK_MS = 50;
-// A request's hook can land just after its prompt shows, and Esc would then refuse it.
-const REQUEST_SETTLE_MS = 250;
-// /config takes two: one for its filter, and one for itself.
-const PAGE_CLOSE_PRESSES = 3;
-const PAGE_CLOSE_SETTLE_MS = 300;
 
 export function parseTmuxEnv(value) {
   return value ? value.split(',')[0] : undefined;
@@ -42,94 +23,31 @@ async function tmux(socket, args, input) {
   return stdout;
 }
 
-export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
-export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
 export const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-t', pane]);
 export const pressKey = ({ pane, tmuxSocket }, key) => tmux(tmuxSocket, ['send-keys', '-t', pane, key]);
 
-export function showsDialog(screen) {
-  const bottom = bottomOf(screen);
-  return DIALOG_FOOTER.test(bottom) || SWITCH_QUESTION.test(bottom);
-}
-
-export async function hasOpenDialog(session) {
-  return showsDialog(await readScreen(session));
-}
-
-export function refuseIfRequested(isBlocked) {
-  const pending = isBlocked();
-  if (pending) throw new HelperError('request_pending', 'Answer the open request first.', { requestId: pending.id });
-}
-
-export async function refuseIfBlocked(session, isBlocked) {
-  refuseIfRequested(isBlocked);
-  if (await hasOpenDialog(session)) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
-}
-
-// isBlocked is checked again just before Enter, because a request can open while
-// the text is on its way and Enter would then answer it.
-export async function sendText(session, text, isBlocked) {
-  const { pane, tmuxSocket } = session;
-  await refuseIfBlocked(session, isBlocked);
-  // Always a paste: as send-keys arguments, a leading "-" or trailing ";" would be
-  // read by tmux itself instead of reaching Claude.
+// Always a paste: as send-keys arguments, a leading "-" or trailing ";" would be read by tmux
+// itself instead of reaching Claude.
+export async function paste({ pane, tmuxSocket }, text) {
   await tmux(tmuxSocket, ['load-buffer', '-b', 'venes', '-'], text);
   await tmux(tmuxSocket, ['paste-buffer', '-p', '-d', '-b', 'venes', '-t', pane]);
-  await pause(PASTE_SETTLE_MS);
-  await refuseIfBlocked(session, isBlocked);
-  await pressKey(session, 'Enter');
-}
-
-// Only while a footer says Esc will close something: with nothing open it'd interrupt the turn.
-export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {
-  for (let press = 0; press < PAGE_CLOSE_PRESSES; press++) {
-    if (!PAGE_FOOTER.test(bottomOf(await readScreen(session)))) return;
-    await sendEscape(session);
-    await pause(settle);
-  }
-}
-
-// What a reader's slash command leaves on the screen, which nobody with the reader can see. A
-// question about the cache is one they answered by asking. A page goes, because the next
-// message would act on it.
-export async function settleCommand(session, isBlocked, {
-  limit = COMMAND_SETTLE_LIMIT_MS, check = COMMAND_SETTLE_CHECK_MS, requestSettle = REQUEST_SETTLE_MS, pageSettle = PAGE_CLOSE_SETTLE_MS,
-} = {}) {
-  const end = Date.now() + limit;
-  while (Date.now() < end) {
-    // A command like /exit takes its pane with it.
-    const screen = await readScreen(session).catch(() => undefined);
-    if (screen === undefined) return;
-    const bottom = bottomOf(screen);
-    const isQuestion = SWITCH_QUESTION.test(bottom);
-    if (isQuestion || PAGE_FOOTER.test(bottom)) {
-      await pause(requestSettle);
-      if (isBlocked()) return;
-      if (isQuestion) {
-        await pressKey(session, 'Enter');
-        return;
-      }
-      await closePage(session, pageSettle);
-      throw new HelperError('terminal_only', 'That command only works at the terminal.');
-    }
-    await pause(check);
-  }
 }
 
 // Runs a command in a new detached session and returns its pane. The session closes with it.
-export async function startSession({ name, cwd, command, env, tmuxSocket }) {
+export async function startSession({ name, cwd, command, env }) {
+  const tmuxSocket = env.VENES_TMUX_SOCKET;
   const variables = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
   const size = ['-x', String(NEW_SESSION_COLUMNS), '-y', String(NEW_SESSION_ROWS)];
   try {
     const output = await tmux(tmuxSocket, ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', name, ...size, '-c', cwd, ...variables, '--', ...command]);
-    return output.trim();
+    return { pane: output.trim(), tmuxSocket };
   } catch (error) {
-    if (error.code === 'ENOENT') throw new HelperError('no_tmux', 'Install tmux on your Mac to continue this session.');
+    if (error.code === 'ENOENT') throw new HelperError('no_tmux', 'Install tmux or Rex on your Mac to continue this session.');
     throw error;
   }
 }
 
-export async function isSessionOpen(name, tmuxSocket) {
+export async function isSessionOpen(name, { tmuxSocket }) {
   try {
     await tmux(tmuxSocket, ['has-session', '-t', `=${name}`]);
     return true;
@@ -137,8 +55,6 @@ export async function isSessionOpen(name, tmuxSocket) {
     return false;
   }
 }
-
-export const sendEscape = session => pressKey(session, 'Escape');
 
 function isClaude(command) {
   return path.basename(command) === 'claude';

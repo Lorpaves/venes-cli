@@ -1003,3 +1003,38 @@ test('the last hooks of a deleted session don\'t bring it back', () => {
   assert.equal(store.find('a'), undefined);
   assert.equal(kinds().length, before);
 });
+
+const inRex = { pane: 'block:1', rexSession: 'session:1', rexServer: 'unix:///s' };
+
+test('a session in Rex has a pane like any other, so clients can type into it', () => {
+  const { store, kinds } = setup();
+  store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'SessionStart' }, inRex);
+  assert.equal(store.sessions()[0].pane, 'block:1');
+  assert.equal(store.sessions()[0].tmuxSocket, null);
+  assert.equal(store.get('a').rexSession, 'session:1');
+  assert.equal(store.get('a').rexServer, 'unix:///s');
+  assert.ok(kinds().includes('session.attached'));
+});
+
+test('/clear in a Rex block retires the old session, as it does in a tmux pane', () => {
+  const { store } = setup();
+  store.handleHook({ session_id: 'old', cwd: '/w', hook_event_name: 'SessionStart' }, inRex);
+  store.handleHook({ session_id: 'new', cwd: '/w', hook_event_name: 'SessionStart' }, inRex);
+  assert.equal(store.get('old').status, 'ended');
+  assert.notEqual(store.get('new').status, 'ended');
+});
+
+test('a session that reopens forgets its old block', () => {
+  const { store } = setup();
+  store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'SessionStart' }, inRex);
+  store.handleHook({ session_id: 'a', hook_event_name: 'SessionEnd', reason: 'other' });
+  const session = store.reopen('a', { cwd: '/w' });
+  assert.deepEqual([session.pane, session.rexSession, session.rexServer], [undefined, undefined, undefined]);
+});
+
+test('a session that moves from tmux to Rex takes on the new terminal', () => {
+  const { store } = setup();
+  store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'SessionStart' }, { pane: '%1', socket: '/t' });
+  store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'Stop' }, inRex);
+  assert.deepEqual([store.get('a').pane, store.get('a').tmuxSocket, store.get('a').rexSession], ['block:1', undefined, 'session:1']);
+});

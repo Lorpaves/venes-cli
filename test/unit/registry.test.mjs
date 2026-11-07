@@ -18,6 +18,13 @@ test('sessions come back as they were saved', t => {
   assert.deepEqual(readRegistry(file), [record]);
 });
 
+test('a session in Rex comes back with its block', t => {
+  const file = tempDir(t);
+  const record = { id: 'a', pane: 'block:1', rexSession: 'session:1', rexServer: 'unix:///s' };
+  writeRegistry(file, [record]);
+  assert.deepEqual(readRegistry(file), [record]);
+});
+
 test('nothing said in a session reaches the disk', t => {
   const file = tempDir(t);
   writeRegistry(file, [{ id: 'a', pane: '%1', lastPrompt: 'my secret plan', lastMessage: 'a reply', tools: new Map(), held: [{ text: 'held' }] }]);

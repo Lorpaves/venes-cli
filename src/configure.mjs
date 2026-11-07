@@ -39,7 +39,7 @@ export async function configureSession({ store, library, sessionWithPane, switch
   const known = store.find(sessionId);
   if (!known || known.status === 'ended') {
     const running = await library.running();
-    if (running.some(session => session.id === sessionId)) throw new HelperError('no_pane', 'This session is running outside tmux.');
+    if (running.some(session => session.id === sessionId)) throw new HelperError('no_pane', 'This session is running outside tmux and Rex.');
     chosenForResume.set(sessionId, { ...chosenForResume.get(sessionId), ...(model && { model }), ...(effort && { effort }) });
     return {};
   }

@@ -47,6 +47,16 @@ export function libraryPage(stored, running, { limit, offset }) {
   return { items: [...unlisted, ...items], offset: offset + stored.length, hasMore: stored.length === limit };
 }
 
+// What a session that's running somewhere else is doing, for someone opening it. `claude agents`
+// only says whether its process is busy, which a background shell keeps it long after a turn has
+// ended, so the transcript gets the last word on that.
+export function joinedStatus(running, items) {
+  if (!running) return 'ended';
+  const last = items.at(-1);
+  const isTurnOver = last?.role === 'turn_end' || last?.kind === 'interrupted';
+  return running.status === 'running' && isTurnOver ? 'idle' : running.status;
+}
+
 // What a client needs of each. Names starting with two underscores are Claude Code's own plumbing.
 export function readCapabilities({ commands = [], models = [] }) {
   return {

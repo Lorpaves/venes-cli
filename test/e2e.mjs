@@ -899,6 +899,18 @@ T('a_choice_for_a_stopped_session_waits_for_its_resume', { mode: 'bypassPermissi
   client.close();
 }));
 
+T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Use the Bash tool with run_in_background set to true to run exactly this command: sleep 45 -- then reply with only the word STARTED.');
+  await r.wait(e => e.kind === 'turn.end' && /STARTED/.test(e.lastMessage), 30000, 'turn.end STARTED');
+  const { id } = await r.session();
+  const { client } = await forgetSessions();
+  const { items } = await client.request('library', { limit: 20 });
+  assert.equal(items.find(item => item.id === id)?.status, 'running', 'Claude Code still calls it busy');
+  const joined = await client.request('join', { sessionId: id, limit: 20 });
+  assert.equal(joined.sessions[0].status, 'idle', 'but its turn is over');
+  client.close();
+});
+
 T('a_session_running_elsewhere_is_listed_but_not_resumed', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word ELSEWHERE.');
   await r.turnEnd();

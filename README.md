@@ -147,7 +147,7 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 | `items` | `id`, `title`, `cwd`, `lastActiveAt`, `startedAt`, and `status`: `running`, `waiting`, `idle`, or null if it isn't running. What's running comes first, on the first page, wherever it would otherwise have been. |
 | `offset`, `hasMore` | Where the next page starts, and whether there is one |
 
-`join` and `history` work on any of these. For a session the helper doesn't know, `turn` is empty and the session's `status` is `ended` unless it's running somewhere.
+`join` and `history` work on any of these. For a session the helper doesn't know, `turn` is empty and the session's `status` is `ended` unless it's running somewhere. `claude agents` calls a session busy for as long as a background shell runs, so `join` checks the transcript and says `idle` once the turn is over, though `library` still says `running`.
 
 `send` to a session that isn't running runs `claude --resume` in a new tmux session named `venes-<id>`, in the session's folder, with the message as its first prompt. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside tmux is refused with `no_pane`, because resuming it would put two processes on one transcript.
 

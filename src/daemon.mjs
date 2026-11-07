@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
-import { Library } from './library.mjs';
+import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { resumeSession } from './resume.mjs';
 import { SessionStore, HelperError } from './sessions.mjs';
@@ -160,7 +160,7 @@ function createClientServer(store, checkForUpdate, library) {
       library.info(sessionId).catch(() => undefined),
       library.running().catch(() => []),
     ]);
-    const status = running.find(session => session.id === sessionId)?.status ?? 'ended';
+    const status = joinedStatus(running.find(session => session.id === sessionId), page.items);
     return { ...page, turn: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, model, tasks: [], backgroundTasks: 0 }] };
   };
 

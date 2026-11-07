@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dropParentSession } from '../../src/daemon.mjs';
-import { Library, libraryPage, readCapabilities, readRunning } from '../../src/library.mjs';
+import { Library, joinedStatus, libraryPage, readCapabilities, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -105,6 +105,30 @@ test('an id can\'t reach outside the projects folder', t => {
 test('a failure comes back as an error, not a crash', t => {
   const reply = read(configDir(t), { op: 'list', sdk: '/nowhere/sdk.mjs', limit: 1, offset: 0 });
   assert.ok(reply.error.message);
+});
+
+test('a session that isn\'t running has ended, whatever its transcript says', () => {
+  assert.equal(joinedStatus(undefined, [{ role: 'assistant' }]), 'ended');
+});
+
+test('a busy process whose turn is over is only running a background shell', () => {
+  assert.equal(joinedStatus({ status: 'running' }, [{ role: 'assistant' }, { role: 'turn_end' }]), 'idle');
+});
+
+test('a turn that was interrupted is over too', () => {
+  assert.equal(joinedStatus({ status: 'running' }, [{ role: 'user' }, { role: 'system', kind: 'interrupted' }]), 'idle');
+});
+
+test('a busy process in the middle of a turn is running', () => {
+  for (const role of ['user', 'assistant', 'thinking', 'tool']) {
+    assert.equal(joinedStatus({ status: 'running' }, [{ role: 'turn_end' }, { role }]), 'running', role);
+  }
+  assert.equal(joinedStatus({ status: 'running' }, []), 'running');
+});
+
+test('a session waiting on someone stays that way, and an idle one stays idle', () => {
+  assert.equal(joinedStatus({ status: 'waiting' }, [{ role: 'turn_end' }]), 'waiting');
+  assert.equal(joinedStatus({ status: 'idle' }, [{ role: 'assistant' }]), 'idle');
 });
 
 test('a client gets each command and model in the shape it reads', () => {

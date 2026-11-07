@@ -131,10 +131,11 @@ export function pairingLink({ host, port = 22, user, hostKey, seed, name }) {
 }
 
 // The host key isn't checked on this route. It's there so that a Mac the phone knows from SSH stays
-// one Mac.
-export function rexPairingLink({ address, hostKey, name }) {
+// one Mac. `account` is the Tailscale account Rex is signed in with, for the phone to sign in with.
+export function rexPairingLink({ address, hostKey, name, account }) {
   const query = new URLSearchParams({ r: address, n: name });
   if (hostKey) query.set('f', hostKey);
+  if (account) query.set('t', account);
   return `venes://pair?${query}`;
 }
 

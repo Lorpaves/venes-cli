@@ -151,6 +151,12 @@ test('a link for Rex says only where to call, and which Mac it is if that\'s kno
   assert.equal(new URL(rexPairingLink({ address: 'https://a', name: 'b' })).searchParams.has('f'), false);
 });
 
+test('a Rex link names the Tailscale account Rex is signed in with, when it knows', () => {
+  const url = new URL(rexPairingLink({ address: 'https://mac.tail.ts.net', name: 'My Mac', account: 'me+mac@example.com' }));
+  assert.equal(url.searchParams.get('t'), 'me+mac@example.com');
+  assert.equal(new URL(rexPairingLink({ address: 'https://a', name: 'b' })).searchParams.has('t'), false);
+});
+
 test('the link carries what the phone needs', () => {
   const url = new URL(pairingLink({ host: 'mac.local', user: 'me', hostKey: 'SHA256:abc+/', seed: Buffer.alloc(32, 1), name: 'My Mac' }));
   assert.equal(url.protocol, 'venes:');

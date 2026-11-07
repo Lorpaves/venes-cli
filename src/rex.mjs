@@ -67,6 +67,18 @@ export async function tailnetAddress() {
   }
 }
 
+// The Tailscale account Rex is signed in with, which is the one a phone has to use: Rex only lets
+// in the account it's signed in as.
+export const tailnetAccountOf = whoami => whoami?.tailscale?.account?.login_name || undefined;
+
+export async function tailnetAccount() {
+  try {
+    return tailnetAccountOf(JSON.parse(await rex({}, ['--autostart=false', 'whoami', '--json'])));
+  } catch {
+    return undefined;
+  }
+}
+
 function keptSession() {
   try { return fs.readFileSync(helperPaths().rexSession, 'utf8').trim(); } catch { return undefined; }
 }

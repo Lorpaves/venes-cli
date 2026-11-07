@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession } from '../../src/rex.mjs';
+import { isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from '../../src/terminal.mjs';
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
@@ -230,4 +230,11 @@ test('Esc reaches a session in Rex', async t => {
   const calls = fakeRex(t);
   await sendEscape(SESSION);
   assert.equal(calls()[0].args.at(-1), 'escape');
+});
+
+test('the account a phone has to use is the one Rex is signed in with', () => {
+  assert.equal(tailnetAccountOf({ tailscale: { state: 'running', account: { login_name: 'me@example.com' } } }), 'me@example.com');
+  assert.equal(tailnetAccountOf({ tailscale: { state: 'off' } }), undefined);
+  assert.equal(tailnetAccountOf({}), undefined);
+  assert.equal(tailnetAccountOf(undefined), undefined);
 });

@@ -12,7 +12,7 @@ import {
   addPairingKey, authorizedKeysFile, enrollPhone, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName, makeNonce, makeOneTimeKey,
   pairingLink, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink,
 } from '../src/pairing.mjs';
-import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAddress } from '../src/rex.mjs';
+import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAccount, tailnetAddress } from '../src/rex.mjs';
 import { readUpload } from '../src/ssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
@@ -157,7 +157,7 @@ const commands = {
     process.env.PATH = `${process.env.PATH}:${REX_FOLDER}`;
     const address = route === '--ssh' ? undefined : await tailnetAddress();
     if (address) {
-      showRexCode(address);
+      showRexCode(address, await tailnetAccount());
       return;
     }
     const port = Number(process.env.VENES_SSH_PORT || 22);
@@ -263,8 +263,8 @@ function openPipe(input) {
 }
 
 // Nothing to hand over: Rex asks Tailscale who's calling, so the code is only where to call.
-function showRexCode(address) {
-  const link = rexPairingLink({ address, hostKey: knownHostKey(), name: macName() });
+function showRexCode(address, account) {
+  const link = rexPairingLink({ address, hostKey: knownHostKey(), name: macName(), account });
   const code = renderQR(qrModules(link));
   console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nThe phone needs Tailscale, signed in as you are in Rex.\n`);
 }

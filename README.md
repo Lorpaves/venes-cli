@@ -51,10 +51,10 @@ Run this and scan the code in the app:
 
 The phone reaches this Mac in one of two ways, and `pair` picks for you:
 
-- **Through Rex,** if Tailscale is on in [Rex](https://www.superlogical.com/rex). The phone needs the Tailscale app, signed in with the account Rex uses. Nothing else is needed, not even Remote Login.
+- **Through Rex,** if Tailscale is on in [Rex](https://www.superlogical.com/rex). The phone has to be on your tailnet as the account Rex uses: the app signs in to Tailscale itself, for each Mac, or uses the Tailscale app. Nothing else is needed, not even Remote Login.
 - **Over SSH** otherwise. Turn on Remote Login first, in System Settings > General > Sharing. `pair --ssh` picks this even with Rex.
 
-Through Rex, the code holds this Mac's name and its address on your tailnet, and no credential: Rex asks Tailscale who's calling and lets in only the account that signed in. To stop a phone reaching this Mac, sign it out of that account or turn Tailscale off in Rex.
+Through Rex, the code holds this Mac's name, its address on your tailnet, and the Tailscale account Rex is signed in with, and no credential: Rex asks Tailscale who's calling and lets in only the account that signed in. To stop a phone reaching this Mac, sign it out of that account or turn Tailscale off in Rex.
 
 Over SSH, the code holds this Mac's name, address and host key, and a one-time key. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password. To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
 

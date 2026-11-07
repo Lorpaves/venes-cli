@@ -20,7 +20,7 @@ import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } fro
 import { avatarSource } from './avatar.mjs';
 import { readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, statusLines, terminalFrom } from './terminal.mjs';
 import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
-import { INSTALL_FOLDER as REX_FOLDER, runsClaude as rexRunsClaude } from './rex.mjs';
+import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
@@ -91,7 +91,7 @@ function createHookServer(store) {
   });
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads }) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads }, tailscaleAccount = () => undefined) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -191,7 +191,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   };
 
   const commands = {
-    ping: () => ({ protocol: PROTOCOL_VERSION, version: VERSION, quiet: store.isQuiet() }),
+    // The Tailscale account Rex is signed in with, which a phone reaches this Mac as through Rex.
+    ping: () => {
+      const account = tailscaleAccount();
+      return { protocol: PROTOCOL_VERSION, version: VERSION, quiet: store.isQuiet(), ...(account && { tailscaleAccount: account }) };
+    },
     update: async () => ({ version: VERSION, available: (await checkForUpdate()) ?? null }),
     sessions: listSessions,
     subscribe: async (msg, socket) => {
@@ -391,7 +395,9 @@ export async function startDaemon(paths) {
   library.prepare().catch(error => console.error(`library: ${error.message}`));
   // Old uploads go now, and not while the helper runs, when a message might be on its way with one.
   pruneUploads(paths.uploads);
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths);
+  const rexAccount = cachedAccount();
+  await rexAccount.refresh();
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current);
   const stopPolling = startTranscriptPolling(store);
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);

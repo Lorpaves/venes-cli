@@ -79,6 +79,30 @@ export async function tailnetAccount() {
   }
 }
 
+// Asked of Rex at most once a minute, since a client pings far more often than that.
+const ACCOUNT_REFRESH_MS = 60_000;
+
+// The account, as it was when last asked, with a fresh ask in the background when that's old.
+export function cachedAccount({ fetch = tailnetAccount, refreshMs = ACCOUNT_REFRESH_MS, now = Date.now } = {}) {
+  let account;
+  let fetchedAt = -Infinity;
+  let fetching;
+  const refresh = () => {
+    // One that couldn't be asked is asked again after the same while.
+    fetching ??= fetch()
+      .then(found => { account = found; }, () => {})
+      .finally(() => { fetchedAt = now(); fetching = undefined; });
+    return fetching;
+  };
+  return {
+    get current() {
+      if (now() - fetchedAt > refreshMs) refresh();
+      return account;
+    },
+    refresh,
+  };
+}
+
 function keptSession() {
   try { return fs.readFileSync(helperPaths().rexSession, 'utf8').trim(); } catch { return undefined; }
 }

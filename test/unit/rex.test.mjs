@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
+import { cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from '../../src/terminal.mjs';
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
@@ -237,4 +237,37 @@ test('the account a phone has to use is the one Rex is signed in with', () => {
   assert.equal(tailnetAccountOf({ tailscale: { state: 'off' } }), undefined);
   assert.equal(tailnetAccountOf({}), undefined);
   assert.equal(tailnetAccountOf(undefined), undefined);
+});
+
+test('the account is asked of Rex at most once a minute, and what it was serves meanwhile', async () => {
+  let clock = 0;
+  let asked = 0;
+  let answer = 'me@example.com';
+  const account = cachedAccount({ fetch: async () => { asked++; return answer; }, refreshMs: 60_000, now: () => clock });
+  await account.refresh();
+  assert.equal(account.current, 'me@example.com');
+  clock = 59_000;
+  assert.equal(account.current, 'me@example.com');
+  assert.equal(asked, 1);
+  answer = 'other@example.com';
+  clock = 61_000;
+  assert.equal(account.current, 'me@example.com', 'the old one, while it asks again');
+  await account.refresh();
+  assert.equal(account.current, 'other@example.com');
+  assert.equal(asked, 2, 'one ask, however often it was wanted meanwhile');
+});
+
+test('an account Rex couldn\'t be asked for is none, and is asked for again a minute later', async () => {
+  let clock = 0;
+  let fail = true;
+  const account = cachedAccount({ fetch: async () => { if (fail) throw new Error('no rex'); return 'me@example.com'; }, refreshMs: 60_000, now: () => clock });
+  await account.refresh();
+  assert.equal(account.current, undefined);
+  fail = false;
+  clock = 30_000;
+  assert.equal(account.current, undefined, 'not asked again within the minute');
+  clock = 61_000;
+  assert.equal(account.current, undefined, 'the old one, while it asks again');
+  await account.refresh();
+  assert.equal(account.current, 'me@example.com');
 });

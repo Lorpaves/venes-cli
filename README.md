@@ -113,7 +113,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 
 | Command | Fields | Reply or effect |
 |---|---|---|
-| `ping` | | `protocol`, `version`, `quiet` (whether the helper could restart now) |
+| `ping` | | `protocol`, `version`, `quiet` (whether the helper could restart now), and `tailscaleAccount` while Tailscale is on in Rex: the account Rex is signed in with, which a phone reaches this Mac as through Rex |
 | `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |

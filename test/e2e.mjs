@@ -1142,6 +1142,30 @@ T('a_page_opened_from_here_is_closed_again', {}, async r => {
   assert.equal(fs.readFileSync(USER_SETTINGS, 'utf8'), before, 'what was typed next reached Claude, and no setting');
 });
 
+// An app that shows pages says so, and has one a command opens left open to see and work: its keys
+// reach it, and closing it lets the next message through.
+T('a_page_opened_from_an_app_that_shows_pages_stays_for_it', {}, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  const before = fs.readFileSync(USER_SETTINGS, 'utf8');
+  const sent = await r.client.request('send', { sessionId: id, text: '/mcp', pages: true });
+  assert.equal(sent.page, true);
+  const { page } = await r.client.request('page', { sessionId: id });
+  const lines = page.lines.map(runs => runs.map(run => run.text).join(''));
+  assert.ok(lines.some(line => /MCP/.test(line)), JSON.stringify(lines));
+  assert.ok(lines.some(line => /Esc to \w+/.test(line)), 'down to its footer');
+  await r.client.request('pageKey', { sessionId: id, key: 'Down' });
+  await assert.rejects(r.client.request('pageKey', { sessionId: id, key: 'C-c' }), { code: 'bad_key' });
+  await assert.rejects(r.client.request('send', { sessionId: id, text: 'Reply with only the word BLOCKED.' }), { code: 'dialog_open' });
+  await r.client.request('pageClose', { sessionId: id });
+  assert.deepEqual((await r.client.request('page', { sessionId: id })).page, null);
+  await assert.rejects(r.client.request('pageKey', { sessionId: id, key: 'Escape' }), { code: 'no_page' }, 'no Esc for a turn');
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AFTER.' });
+  await r.wait(e => e.kind === 'turn.end' && /AFTER/.test(e.lastMessage), 30000, 'turn.end AFTER');
+  assert.equal(fs.readFileSync(USER_SETTINGS, 'utf8'), before, 'no setting changed');
+});
+
 T('a_change_typed_as_a_message_is_for_this_session_too', {}, keepingDefaults(async (r, before) => {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();

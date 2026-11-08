@@ -2,6 +2,7 @@
 // with `rexSession`, and any other pane is tmux's.
 
 import * as rex from './rex.mjs';
+import { plainText, runsOf, screenCells } from './screen.mjs';
 import { HelperError } from './sessions.mjs';
 import * as tmux from './tmux.mjs';
 import { referenceTo } from './uploads.mjs';
@@ -30,11 +31,17 @@ const PAGE_CLOSE_SETTLE_MS = 300;
 const IMAGE_SETTLE_LIMIT_MS = 4000;
 const IMAGE_SETTLE_CHECK_MS = 100;
 const IMAGE_MARK = /\[Image #\d+\]/g;
+// The edge a page opens under, across the pane from its first column.
+const PAGE_EDGE = /^─{20,}/;
+// What a reader can press on a page from afar, by the names tmux and Rex both know them by here.
+export const PAGE_KEYS = ['Up', 'Down', 'Left', 'Right', 'Enter', 'Escape', 'Tab', 'BTab', 'Space', 'BSpace'];
 
 export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
 const backendOf = session => (session.rexSession ? rex : tmux);
 export const readScreen = session => backendOf(session).readScreen(session);
+// With the escape sequences that colour it.
+export const readStyledScreen = session => backendOf(session).readStyledScreen(session);
 export const pressKey = (session, key) => backendOf(session).pressKey(session, key);
 export const sendEscape = session => pressKey(session, 'Escape');
 
@@ -88,6 +95,43 @@ export async function sendMessage(session, { text = '', attachments = [] }, isBl
 
 export const sendText = (session, text, isBlocked) => sendMessage(session, { text }, isBlocked);
 
+// What a command opened, like /mcp's servers or /config's settings, from the edge it opened under
+// to its footer, as runs of text that look alike: null when nothing is open. `screen` has the
+// escape sequences that colour it.
+export function pageOf(screen) {
+  const rows = screenCells(screen);
+  const plain = rows.map(plainText);
+  let end = plain.length;
+  while (end > 0 && !plain[end - 1].trim()) end -= 1;
+  if (!showsDialog(plain.slice(0, end).join('\n'))) return null;
+  const top = plain.slice(0, end).findLastIndex(line => PAGE_EDGE.test(line));
+  const lines = rows.slice(top + 1, end).map(cells => {
+    let last = cells.length;
+    while (last > 0 && cells[last - 1].char === ' ' && !cells[last - 1].style.background && !cells[last - 1].style.inverse) last -= 1;
+    return runsOf(cells.slice(0, last));
+  });
+  while (lines.length && !lines[0].length) lines.shift();
+  return { lines };
+}
+
+export async function readPage(session) {
+  return pageOf(await readStyledScreen(session));
+}
+
+// A key for what's open, and nothing else: with nothing open, Esc would interrupt the turn and
+// Enter would send what's in the box.
+export async function pressPageKey(session, key) {
+  if (!PAGE_KEYS.includes(key)) throw new HelperError('bad_key', `${key} isn't a key a page takes.`);
+  if (!(await hasOpenDialog(session))) throw new HelperError('no_page', 'Nothing is open in the terminal.');
+  await pressKey(session, key);
+}
+
+// Text for a page's search box.
+export async function typeOnPage(session, text) {
+  if (!(await hasOpenDialog(session))) throw new HelperError('no_page', 'Nothing is open in the terminal.');
+  await backendOf(session).paste(session, text);
+}
+
 // Only while a footer says Esc will close something: with nothing open it'd interrupt the turn.
 export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {
   for (let press = 0; press < PAGE_CLOSE_PRESSES; press++) {
@@ -97,11 +141,12 @@ export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {
   }
 }
 
-// What a reader's slash command leaves on the screen, which nobody with the reader can see. A
-// question about the cache is one they answered by asking. A page goes, because the next
-// message would act on it.
+// What a reader's slash command leaves on the screen. A question about the cache is one they
+// answered by asking. A page is 'page' when the reader can see it, through `keepPage`, and
+// otherwise it goes, because the next message would act on it.
 export async function settleCommand(session, isBlocked, {
   limit = COMMAND_SETTLE_LIMIT_MS, check = COMMAND_SETTLE_CHECK_MS, requestSettle = REQUEST_SETTLE_MS, pageSettle = PAGE_CLOSE_SETTLE_MS,
+  keepPage = false,
 } = {}) {
   const end = Date.now() + limit;
   while (Date.now() < end) {
@@ -115,8 +160,9 @@ export async function settleCommand(session, isBlocked, {
       if (isBlocked()) return;
       if (isQuestion) {
         await pressKey(session, 'Enter');
-        return;
+        return undefined;
       }
+      if (keepPage) return 'page';
       await closePage(session, pageSettle);
       throw new HelperError('terminal_only', 'That command only works at the terminal.');
     }

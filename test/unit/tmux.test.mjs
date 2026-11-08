@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hasTmux, startPane } from '../pane.mjs';
-import { closePage, hasOpenDialog, settleCommand, showsDialog } from '../../src/terminal.mjs';
+import { closePage, hasOpenDialog, pressPageKey, readPage, settleCommand, showsDialog, typeOnPage } from '../../src/terminal.mjs';
 
 const FAST = { limit: 400, check: 10, requestSettle: 20, pageSettle: 60 };
 const screen = (...lines) => [...lines, '────', '❯ ', '────', '  ⏸ manual mode on · ? for shortcuts', '', ''].join('\n');
@@ -126,3 +126,40 @@ test('the question shows as an open dialog on a real screen', { skip: !hasTmux }
   const { session } = await paneShowing(t, '  ❯ 1. Yes, switch to Sonnet 5.5');
   assert.ok(await hasOpenDialog(session));
 });
+
+test('a page a reader can see from afar is left open for them, and they\'re told', { skip: !hasTmux }, async t => {
+  const { session, keys } = await paneShowing(t, 'Manage MCP servers\n↑/↓ to navigate · Enter to confirm · Esc to cancel', 'plain');
+  assert.equal(await settleCommand(session, nothingOpen, { ...FAST, keepPage: true }), 'page');
+  assert.equal(await keys(), '');
+});
+
+test('a page\'s keys reach it, and only the keys a page takes', { skip: !hasTmux }, async t => {
+  const { session, keys } = await paneShowing(t, 'Manage MCP servers\n↑/↓ to navigate · Enter to confirm · Esc to cancel');
+  for (const key of ['Down', 'Up', 'Tab', 'Space', 'Enter']) await pressPageKey(session, key);
+  await assert.rejects(pressPageKey(session, 'C-c'), { code: 'bad_key' });
+  await typeOnPage(session, 'gi');
+  assert.equal(await keys(), `1b5b42${'1b5b41'}09200d${Buffer.from('gi').toString('hex')}`);
+});
+
+test('with nothing open, no key and no text gets there, as Esc would interrupt the turn and Enter send', { skip: !hasTmux }, async t => {
+  const { session, keys } = await paneShowing(t, 'plain');
+  await assert.rejects(pressPageKey(session, 'Escape'), { code: 'no_page' });
+  await assert.rejects(typeOnPage(session, 'hi'), { code: 'no_page' });
+  assert.equal(await keys(), '');
+  assert.equal(await readPage(session), null);
+});
+
+test('what\'s open is read with its colours, from under the edge it opened under', { skip: !hasTmux }, async t => {
+  const E = '\x1b';
+  const { session } = await paneShowing(t, [
+    '⏺ Done.', '─'.repeat(40), `  ${E}[1mManage MCP servers${E}[0m`, `  ${E}[38;5;153m❯ ✔ docs${E}[0m   8 tools`, '    ◯ computer-use', '',
+    `  ${E}[2m↑/↓ to navigate · Enter to confirm · Esc to cancel${E}[0m`,
+  ].join('\n'));
+  const { lines } = await readPage(session);
+  assert.deepEqual(lines.map(runs => runs.map(run => run.text).join('')), [
+    '  Manage MCP servers', '  ❯ ✔ docs   8 tools', '    ◯ computer-use', '', '  ↑/↓ to navigate · Enter to confirm · Esc to cancel',
+  ]);
+  assert.ok(lines[0].some(run => run.bold && run.text === 'Manage MCP servers'));
+  assert.ok(lines[1].some(run => run.color === '#afd7ff' && run.text.includes('docs')));
+});
+

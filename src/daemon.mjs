@@ -18,7 +18,9 @@ import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
-import { resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom } from './terminal.mjs';
+import {
+  closePage, pressPageKey, readPage, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
+} from './terminal.mjs';
 import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
@@ -102,12 +104,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const typing = oneAtATime();
   const avatar = avatarSource();
 
-  const deliver = (session, { clientId, text, attachments = [] }) => typing(session.id, async () => {
+  // A client that can show a page, which it says with `pages`, has one a command opens left open
+  // for it, and is told. Otherwise it goes, as the next message would act on it.
+  const deliver = (session, { clientId, text, attachments = [], pages = false }) => typing(session.id, async () => {
     if (clientId) store.expectEcho(session, clientId, text);
     const isBlocked = () => store.pendingFor(session)[0];
     try {
       await sendMessage(session, { text, attachments }, isBlocked);
-      if (!attachments.length && text.trimStart().startsWith('/')) await settleCommand(session, isBlocked);
+      if (!attachments.length && text.trimStart().startsWith('/')) return (await settleCommand(session, isBlocked, { keepPage: pages })) === 'page';
+      return false;
     } catch (error) {
       if (clientId) store.forgetEcho(session, clientId);
       throw error;
@@ -286,8 +291,27 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         store.hold(session, message);
         return { queued: true };
       }
-      await deliver(session, message);
-      return { queued: false };
+      const page = await deliver(session, { ...message, pages: msg.pages === true });
+      return { queued: false, ...(page && { page: true }) };
+    },
+    // What a command opened in the terminal, to see and work from afar: null when nothing is.
+    page: async ({ sessionId }) => ({ page: await readPage(sessionWithPane(sessionId)) }),
+    pageKey: async ({ sessionId, key }) => {
+      const session = sessionWithPane(sessionId);
+      await typing(session.id, () => pressPageKey(session, key));
+      return {};
+    },
+    pageText: async ({ sessionId, text }) => {
+      if (typeof text !== 'string' || !text) throw new HelperError('bad_text', 'Nothing to type.');
+      const session = sessionWithPane(sessionId);
+      await typing(session.id, () => typeOnPage(session, text));
+      return {};
+    },
+    // Closes what's open, as the reader leaves it.
+    pageClose: async ({ sessionId }) => {
+      const session = sessionWithPane(sessionId);
+      await typing(session.id, () => closePage(session));
+      return {};
     },
     cancel: msg => ({ cancelled: store.cancelHeld(store.get(msg.sessionId), msg.clientId) }),
     taskOutput: msg => {

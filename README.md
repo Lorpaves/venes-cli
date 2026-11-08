@@ -132,7 +132,11 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
 | `ssh` | `publicKey` | Lets the client's key in over SSH, for files: `user`, `port`, `hostKey`, `hosts`. See [Over SSH](#over-ssh) |
 | `statusLine` | `sessionId` | `status`: what Claude Code last told the session's status line, as the helper stands in for it, or `null` before it has. `model` and `effort` as Claude Code names them, `project` the folder it started in, `repo` as `owner/name`, `branch` checked out, `context` with its `percent` used, the input tokens `used` and the window's `size`, `fiveHour` and `sevenDay` with their `percent` used and `resetsAt` in Unix seconds, `cache` with its `percent` of input read from it, whether it's `warm` and when it `expiresAt`, `cost` in dollars, and `updatedAt`. Limits are there with a Claude plan, and an API has none, so its `cost` is what to show. A limit that has reset since is `0` with no `resetsAt`, and a session with no reply yet has the account's last limits. Each field is left out when Claude Code didn't say |
-| `send` | `sessionId`, `text`, `clientId`, `lane`, `attachments` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too, unless they open a page. A session that isn't running is resumed. See [The library](#the-library) and [Attachments](#attachments). |
+| `send` | `sessionId`, `text`, `clientId`, `lane`, `attachments`, `pages` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. One that opens a page leaves it open for a client that says it shows `pages`, and the reply has `page: true`; for any other, the page is closed. A session that isn't running is resumed. See [The library](#the-library) and [Attachments](#attachments). |
+| `page` | `sessionId` | `page`: what's open in the session's terminal, like `/mcp`'s servers, as `lines` of runs from the edge it opened under to its footer, each run with its `text`, and `color` and `background` as `#rrggbb` and `bold`, `dim`, `italic`, `underline`, `strikethrough` and `inverse` when set. Colours by number are xterm's. `null` when nothing is open |
+| `pageKey` | `sessionId`, `key` | Presses `Up`, `Down`, `Left`, `Right`, `Enter`, `Escape`, `Tab`, `BTab`, `Space` or `BSpace` on what's open. With nothing open, it's refused with `no_page`, as Esc would interrupt the turn and Enter would send what's in the box |
+| `pageText` | `sessionId`, `text` | Types into what's open, like a page's search box. `no_page` with nothing open |
+| `pageClose` | `sessionId` | Closes what's open, as Esc does, a press at a time while its footer says so |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
 | `interrupt` | `sessionId` | Presses Esc |
 | `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
@@ -178,7 +182,7 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 
 `configure` changes a running session for that session alone, the way a person would: it opens the model picker with Option+P, moves to the model and the effort level, and presses `s`, which [leaves the defaults for new sessions unchanged](https://code.claude.com/docs/en/model-config#setting-your-model). It takes effect at once, even during a turn, and anything being typed at the terminal stays where it is. Each key is checked on the screen before the next, and if the picker isn't as expected it's closed with nothing changed, and `configure` fails with `picker_failed`. `model` has to be one that `capabilities` lists.
 
-A command that opens a page in the terminal, like `/config` or `/usage`, can't be used from a client. The helper closes the page again, because the next message would otherwise act on it, and `send` fails with `terminal_only`. To see whether one does, the reply to any slash command comes about a second and a half later. A `/model` or `/effort` with a value, sent as a message, is a `configure`. What a local command prints isn't sent to clients.
+A command that opens a page in the terminal, like `/config` or `/mcp`, is left open for a client that sends `pages: true`, which can show it with `page` and work it with `pageKey` and `pageText`, and close it with `pageClose`; until then, a message is refused with `dialog_open`, because it would act on the page. For any other client the helper closes the page again, and `send` fails with `terminal_only`. To see whether one does, the reply to any slash command comes about a second and a half later. A `/model` or `/effort` with a value, sent as a message, is a `configure`. What a local command prints isn't sent to clients.
 
 A session that isn't running keeps the choice for its next `send`, which passes it as `--model` and `--effort`, so it stays with that session too. A session running outside Rex and tmux is refused with `no_pane`.
 
@@ -339,7 +343,9 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `bad_attachment` | `send` named an upload that isn't there any more, or more than 20 |
 | `unknown_file` | `file` named an upload the Mac no longer keeps, or that someone moved |
 | `bad_key` | `ssh` was given something that isn't an Ed25519 public key |
-| `terminal_only` | That slash command opens a page, which only works at the terminal. The page has been closed. |
+| `terminal_only` | That slash command opens a page, which only works at the terminal for a client that doesn't show `pages`. The page has been closed. |
+| `no_page` | `pageKey` or `pageText` with nothing open in the terminal |
+| `bad_key` | Also a `pageKey` key a page doesn't take |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
 | `nothing_to_remember` | `always` was sent for a request with no rule to save |

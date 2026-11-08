@@ -16,7 +16,10 @@ const OUTPUT_BYTES = 8 * 1024 * 1024;
 const SCREEN_BYTES = 32 * 1024;
 // A read can come back with less than it asked for, which is more reads to the end.
 const SCREEN_READS = 8;
-const KEYS = { Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p' };
+const KEYS = {
+  Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p', Tab: 'tab', BTab: 'shift+tab',
+  Space: 'space', BSpace: 'backspace',
+};
 const PROGRAM_NAME = 'claude';
 // Sessions the helper starts share this one, a window each, because Rex keeps a session in its
 // sidebar after its last window closes.
@@ -58,6 +61,8 @@ async function readFormatted(session, format) {
 }
 
 export const readScreen = session => readFormatted(session, 'text');
+// With the escape sequences that colour it.
+export const readStyledScreen = session => readFormatted(session, 'vt');
 
 export async function pressKey(session, key) {
   await rex(session, ['--autostart=false', 'send-key', ...blockTarget(session), KEYS[key] ?? key]);

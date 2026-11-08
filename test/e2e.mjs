@@ -1395,6 +1395,19 @@ if (hasRex) {
     assert.deepEqual(readDefaults(), before);
   }));
 
+  // /config is the tallest page there is, and fills the screen.
+  T('in_rex_config_opened_from_an_app_that_shows_pages_can_be_read', { rex: true }, async r => {
+    await r.type('Reply with only the word READY.');
+    await r.turnEnd();
+    const { id } = await r.session();
+    assert.equal((await r.client.request('send', { sessionId: id, text: '/config', pages: true })).page, true);
+    const { page } = await r.client.request('page', { sessionId: id });
+    const lines = page.lines.map(runs => runs.map(run => run.text).join(''));
+    assert.ok(lines.some(line => /Settings/.test(line)) && lines.some(line => /Auto-compact/.test(line)), JSON.stringify(lines));
+    await r.client.request('pageClose', { sessionId: id });
+    assert.deepEqual((await r.client.request('page', { sessionId: id })).page, null);
+  });
+
   T('in_rex_a_page_opened_from_here_is_closed_again', { rex: true }, async r => {
     await r.type('Reply with only the word READY.');
     await r.turnEnd();

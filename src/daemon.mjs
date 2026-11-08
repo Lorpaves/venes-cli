@@ -187,7 +187,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       library.running().catch(() => []),
     ]);
     const status = joinedStatus(running.find(session => session.id === sessionId), page.items);
-    return { ...page, turn: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, model, tasks: [], backgroundTasks: 0 }] };
+    return { ...page, turn: [], queued: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, model, tasks: [], backgroundTasks: 0 }] };
   };
 
   const listSessions = async () => {
@@ -262,7 +262,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const start = first && { at: first.at, prompt: first.kind === 'message.user' ? first.text : undefined };
       return {
         ...readHistory(session.transcriptPath, { limit: msg.limit, turn: start }),
-        turn, seq: store.seq,
+        turn, queued: store.queuedFor(session), seq: store.seq,
         sessions: store.sessions().filter(s => s.id === session.id),
         requests: store.requests().filter(r => r.sessionId === session.id),
       };

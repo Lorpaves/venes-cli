@@ -156,6 +156,7 @@ On `gap: true`, throw away everything built from earlier events, including any d
 |---|---|
 | `items`, `before`, `hasMore` | A page of `history` that stops where the current turn begins |
 | `turn` | This session's events since that turn began. Empty when no turn is going. |
+| `queued` | Messages sent during the turn that Claude hasn't read yet, oldest first, each `{text, clientId, attachments}`. `clientId` is the send's, for one sent from a client, and there's none for one typed in the terminal. Each comes as `message.user` once Claude reads it. |
 | `seq` | The last event this reply accounts for |
 | `sessions`, `requests` | This session's current state, in the form a snapshot has it |
 

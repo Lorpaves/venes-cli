@@ -579,8 +579,16 @@ T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissi
   await r.type(SLEEP(5, 'FIRST'));
   await r.kind('tool.start', 30000);
   const { id } = await r.session();
-  await r.client.request('send', { sessionId: id, text: 'Also say the word QUEUED.' });
+  await r.client.request('send', { sessionId: id, text: 'Also say the word QUEUED.', clientId: 'queued-1' });
+  // Until Claude reads it, a page opened now still has it, as waiting. Its hook can take a moment.
+  let waiting = [];
+  for (let tries = 0; tries < 20 && !waiting.length; tries += 1) {
+    waiting = (await r.client.request('join', { sessionId: id })).queued;
+    if (!waiting.length) await delay(200);
+  }
+  assert.deepEqual(waiting, [{ text: 'Also say the word QUEUED.', clientId: 'queued-1' }]);
   await r.turnEnd(40000);
+  assert.deepEqual((await r.client.request('join', { sessionId: id })).queued, [], 'read by now');
   await delay(1500);
   const all = await r.client.request('history', { sessionId: id, limit: 1000 });
   assert.equal(all.hasMore, false);

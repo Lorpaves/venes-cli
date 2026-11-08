@@ -217,6 +217,18 @@ export class SessionStore extends EventEmitter {
     if (s.echoes.length > MAX_ECHOES) s.echoes.shift();
   }
 
+  // What's queued for Claude and not read yet, oldest first: what each says, its files, and the send it
+  // came from when that was here. One typed in the terminal has none.
+  queuedFor(s) {
+    const echoes = [...s.echoes];
+    return s.queued.map(typed => {
+      const { text, files } = this.#splitAttachments(typed, s.id);
+      const at = echoes.findIndex(echo => echo.text === normalized(text));
+      const clientId = at >= 0 ? echoes.splice(at, 1)[0].clientId : undefined;
+      return { text, ...(clientId && { clientId }), ...(files.length ? { attachments: files } : {}) };
+    });
+  }
+
   forgetEcho(s, clientId) {
     s.echoes = s.echoes.filter(echo => echo.clientId !== clientId);
   }

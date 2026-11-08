@@ -1351,3 +1351,18 @@ test('only the caveat just before a line says Claude won\'t answer it', () => {
   assert.equal(events.find(e => e.kind === 'message.output').replies, true);
   assert.equal(store.get('a').status, 'running');
 });
+
+test('what is queued for Claude and not read yet is listed, with the send each came from', () => {
+  const { store, hook } = setup();
+  hook('UserPromptSubmit', { prompt: 'first' });
+  const s = store.get('a');
+  store.expectEcho(s, 'c1', 'second');
+  hook('UserPromptSubmit', { prompt: 'second' });
+  hook('UserPromptSubmit', { prompt: 'typed in the terminal' });
+  assert.deepEqual(store.queuedFor(s), [{ text: 'second', clientId: 'c1' }, { text: 'typed in the terminal' }]);
+  assert.deepEqual(store.queuedFor(s), [{ text: 'second', clientId: 'c1' }, { text: 'typed in the terminal' }], 'listing takes nothing away');
+  store.handleTranscriptRecord('a', { type: 'queue-operation', operation: 'remove', content: 'second' });
+  assert.deepEqual(store.queuedFor(s), [{ text: 'typed in the terminal' }]);
+  hook('Stop', {});
+  assert.deepEqual(store.queuedFor(s), [], 'what was left starts the next turn');
+});

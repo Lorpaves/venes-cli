@@ -1142,6 +1142,21 @@ T('a_page_opened_from_here_is_closed_again', {}, async r => {
   assert.equal(fs.readFileSync(USER_SETTINGS, 'utf8'), before, 'what was typed next reached Claude, and no setting');
 });
 
+// What an @ can name comes from the session's folder, best match first.
+T('an_at_offers_the_files_of_the_sessions_folder', {}, async r => {
+  await r.kind('session.started', 8000);
+  const { id } = await r.session();
+  fs.writeFileSync(path.join(WS, 'mention-target.md'), 'here\n');
+  try {
+    const { items } = await r.client.request('mentions', { sessionId: id, query: '@mention-tar' });
+    assert.deepEqual(items[0], { path: 'mention-target.md', kind: 'file' });
+    assert.deepEqual((await r.client.request('mentions', { sessionId: id, query: 'zzzzzz-nothing' })).items, []);
+    await assert.rejects(r.client.request('mentions', { sessionId: id, query: 3 }), { code: 'bad_query' });
+  } finally {
+    fs.rmSync(path.join(WS, 'mention-target.md'), { force: true });
+  }
+});
+
 // An app that shows pages says so, and has one a command opens left open to see and work: its keys
 // reach it, and closing it lets the next message through.
 T('a_page_opened_from_an_app_that_shows_pages_stays_for_it', {}, async r => {

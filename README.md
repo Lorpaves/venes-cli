@@ -120,6 +120,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `sessions` | | `sessions`, `unattached` |
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |
 | `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). |
+| `mentions` | `sessionId`, `query`, `limit` | `items`: what an `@` followed by `query` can name in the session's folder, as Claude Code's own `@` offers it, best match first: each with its `path` from the folder and `kind`, `file` or `dir`, a folder's path ending in `/`. Best is the path starting with `query`, then its name, then `query` anywhere in it, then its letters in order; with nothing typed, the top of the folder comes first. In a git repository they're the files git knows, new ones too, ignored ones not; elsewhere the folder is looked through, leaving out hidden and built folders. A leading `@` in `query` is ignored. Up to `limit`, 20 unless asked, at most 50. A folder is listed again after ten seconds |
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
@@ -345,6 +346,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `bad_key` | `ssh` was given something that isn't an Ed25519 public key |
 | `terminal_only` | That slash command opens a page, which only works at the terminal for a client that doesn't show `pages`. The page has been closed. |
 | `no_page` | `pageKey` or `pageText` with nothing open in the terminal |
+| `bad_query` | `mentions` was given something other than a string, or a very long one |
 | `bad_key` | Also a `pageKey` key a page doesn't take |
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |

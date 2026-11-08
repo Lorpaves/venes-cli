@@ -25,6 +25,7 @@ import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } 
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
 import { pruneStatus, readStatus } from './status.mjs';
+import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
@@ -103,6 +104,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
 
   const typing = oneAtATime();
   const avatar = avatarSource();
+  const findMentions = mentionFinder();
 
   // A client that can show a page, which it says with `pages`, has one a command opens left open
   // for it, and is told. Otherwise it goes, as the next message would act on it.
@@ -217,6 +219,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { gap: gap || !sameBoot };
     },
     library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
+    // What an @ in a message can name, from the session's folder: files, and folders ending in /.
+    mentions: async ({ sessionId, query = '', limit = MENTION_LIMIT }) => {
+      if (typeof query !== 'string' || query.length > 500) throw new HelperError('bad_query', 'That can\'t be looked for.');
+      const cwd = store.find(sessionId)?.cwd ?? (await library.info(sessionId).catch(() => undefined))?.cwd;
+      if (!cwd) return { items: [] };
+      const wanted = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 50) : MENTION_LIMIT;
+      return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
+    },
     capabilities: async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);

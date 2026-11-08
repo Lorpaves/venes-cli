@@ -58,8 +58,6 @@ async function readFormatted(session, format) {
 }
 
 export const readScreen = session => readFormatted(session, 'text');
-// With the escape sequences that colour it.
-export const readStyledScreen = session => readFormatted(session, 'vt');
 
 export async function pressKey(session, key) {
   await rex(session, ['--autostart=false', 'send-key', ...blockTarget(session), KEYS[key] ?? key]);

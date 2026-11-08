@@ -35,6 +35,10 @@ const paths = helperPaths(HOME);
 // Where uploads go, and the keys a phone is let in with: this run's own, never this Mac's.
 const DOWNLOADS = `${HOME}-downloads`;
 const AUTHORIZED_KEYS = `${HOME}-authorized_keys`;
+// The Claude Code settings the helper stands in for the status line in: this run's own. Every
+// session and helper here takes it from the environment, and none ever touches this Mac's.
+const CLAUDE_SETTINGS = `${HOME}-claude-settings.json`;
+process.env.VENES_CLAUDE_SETTINGS = CLAUDE_SETTINGS;
 // Kept between runs, so that a run doesn't download the SDK for each case.
 const SDK_DIR = process.env.VENES_E2E_SDK || `${HOME}-sdk`;
 const RESUME_ARGS = ['--model', MODEL, '--permission-mode', 'default', '--setting-sources', 'project', '--plugin-dir', PLUGIN];
@@ -148,25 +152,28 @@ class Run {
   }
 }
 
-function launch({ mode = 'default', sources = 'project', model = MODEL } = {}) {
+// `settings` are Claude Code's for this session alone, on its command line.
+const settingsArgs = settings => (settings ? ['--settings', shq(JSON.stringify(settings))] : []);
+
+function launch({ mode = 'default', sources = 'project', model = MODEL, settings } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
-    `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`,
+    `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
     'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
-    '--model', model, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
+    '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
   tmux('new-session', '-d', '-s', 'run', '-x', '110', '-y', '42', '-c', WS, 'sh', '-c', cmd);
 }
 
-function launchInRex({ mode = 'default', sources = 'project', model = MODEL } = {}) {
+function launchInRex({ mode = 'default', sources = 'project', model = MODEL, settings } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
-    `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`,
+    `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
     'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
-    '--model', model, '--permission-mode', mode, '--setting-sources', sources, '--plugin-dir', shq(PLUGIN)].join(' ');
+    '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
   const made = JSON.parse(rex('new', 'run', '--json', '--cwd', WS, '--shell=none', '--', 'sh', '-c', cmd));
   inRex.session = made.session_id;
   inRex.block = made.initial_windows[0].block_ids[0];
@@ -544,21 +551,28 @@ T('a_phone_lets_its_key_in_for_ssh', {}, async r => {
   }
 });
 
-// Claude Code here has no status line of its own, so what's under its box is its line for the mode.
-async function readsTheStatusLine(r) {
+// The session runs the helper as its status line, as setup sets it up in Claude Code's settings,
+// and after a reply the phone has what Claude Code told it.
+const STAND_IN = { statusLine: { type: 'command', command: `'${HOME}/venes' statusline` } };
+async function readsTheStatus(r) {
+  const { id } = await r.session();
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
-  const { id } = await r.session();
-  const { lines, styled, items } = await r.client.request('statusLine', { sessionId: id });
-  assert.ok(lines.some(line => /mode on|shortcuts/.test(line)), JSON.stringify(lines));
-  assert.deepEqual(styled.map(runs => runs.map(run => run.text).join('')), lines);
-  assert.ok(styled.flat().some(run => run.color), JSON.stringify(styled));
-  // A mode is an item; "? for shortcuts" is a hint, and none.
-  assert.equal(items.some(item => item.kind === 'mode'), lines.some(line => /mode on|permissions on|edits on/.test(line)), JSON.stringify(items));
-  assert.ok(items.every(item => item.kind !== 'other' || !/shortcuts/.test(item.value)), JSON.stringify(items));
+  let status;
+  for (const deadline = Date.now() + 15000; Date.now() < deadline && !status?.context?.used; await delay(250)) {
+    ({ status } = await r.client.request('statusLine', { sessionId: id }));
+  }
+  assert.ok(status?.model, JSON.stringify(status));
+  assert.equal(status.project, path.basename(WS));
+  assert.ok(status.context.used > 0 && status.context.size >= 200000, JSON.stringify(status.context));
+  assert.ok(typeof status.updatedAt === 'number');
+  // A plan's limits, or an API's cost, and one of the two.
+  assert.ok(status.fiveHour || status.sevenDay || typeof status.cost === 'number', JSON.stringify(status));
+  // Setup stood in for the status line in this run's settings, and in nobody else's.
+  assert.equal(JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')).statusLine.command, STAND_IN.statusLine.command);
 }
 
-T('the_status_line_under_the_box_can_be_read', {}, readsTheStatusLine);
+T('the_status_line_is_kept_for_the_phone', { settings: STAND_IN }, readsTheStatus);
 
 
 T('history_pages_and_keeps_messages_sent_during_a_turn', { mode: 'bypassPermissions' }, async r => {
@@ -1305,7 +1319,7 @@ if (hasRex) {
   });
 
   T('in_rex_an_attached_picture_and_file_reach_claude', { rex: true }, sendsAPictureAndAFile);
-  T('in_rex_the_status_line_under_the_box_can_be_read', { rex: true }, readsTheStatusLine);
+  T('in_rex_the_status_line_is_kept_for_the_phone', { rex: true, settings: STAND_IN }, readsTheStatus);
 
   // Rex can have Claude Code name the session it's in after its task, and Claude Code resumed in
   // the helper's session does that too. The helper keeps it by id, and names it back.
@@ -1571,7 +1585,7 @@ function forgetSessionsSince(before) {
 fs.mkdirSync(WS, { recursive: true });
 const sessionsBefore = storedSessions();
 fs.rmSync(HOME, { recursive: true, force: true });
-for (const own of [DOWNLOADS, AUTHORIZED_KEYS]) fs.rmSync(own, { recursive: true, force: true });
+for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS]) fs.rmSync(own, { recursive: true, force: true });
 fs.rmSync(path.join(WS, '.claude'), { recursive: true, force: true });
 try { tmux('kill-server'); } catch { /* not running */ }
 tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'keep', 'sleep', '86400');
@@ -1584,7 +1598,7 @@ let failed = 0;
 for (const name of names) if (!(await runCase(name))) failed++;
 try { tmux('kill-server'); } catch { /* already gone */ }
 fs.rmSync(HOME, { recursive: true, force: true });
-for (const own of [DOWNLOADS, AUTHORIZED_KEYS]) fs.rmSync(own, { recursive: true, force: true });
+for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS]) fs.rmSync(own, { recursive: true, force: true });
 forgetSessionsSince(sessionsBefore);
 console.log(failed ? `${failed} FAILED` : 'all passed');
 process.exit(failed ? 1 : 0);

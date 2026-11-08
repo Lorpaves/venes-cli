@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { writeLauncher } from '../src/setup.mjs';
+import { installStatusLine, removeStatusLine, runStatusLine, switchOnStatusLine } from '../src/status.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
@@ -33,6 +34,7 @@ Helper
   update                        Check for a new version now
   auto-update [on|off]          Show or change automatic updates
   pair [--ssh]                  Show a QR code that pairs the Venes app, through Rex if it's on a tailnet
+  statusline [on|off]           Run as Claude Code's status line (set up by setup), or stop or start doing so
 
 Control
   sessions                      List sessions
@@ -106,6 +108,8 @@ async function readLine(stream) {
   return text.split('\n')[0].trim();
 }
 
+const statusLineOptions = () => ({ settingsFile: paths.claudeSettings, stateFile: paths.statusLineState, launcher: paths.launcher });
+
 const commands = {
   // Runs at every session start, and from the old helper when it finds a new version.
   async setup() {
@@ -113,6 +117,11 @@ const commands = {
     // A session that's still on an older version must not take the helper back with it.
     if (isNewer(running?.version, VERSION)) return;
     writeLauncher(paths);
+    try {
+      installStatusLine(statusLineOptions());
+    } catch {
+      // The phone shows less of a session, and nothing else changes.
+    }
     if (running && isNewer(VERSION, running.version) && running.quiet !== false) await stopRunningHelper();
     await ensureRunning();
   },
@@ -131,6 +140,17 @@ const commands = {
     if (!(await isRunning())) { console.log('not running'); return; }
     await stopRunningHelper();
     console.log('stopped');
+  },
+  // Claude Code runs this as the status line, with what it knows of the session on stdin.
+  async statusline([toggle]) {
+    if (toggle === 'off') {
+      removeStatusLine(statusLineOptions());
+      console.log('The status line is back as it was.');
+    } else if (toggle === 'on') {
+      console.log(switchOnStatusLine(statusLineOptions()) === 'installed' ? 'The helper reads the status line again.' : `Claude Code's settings at ${paths.claudeSettings} couldn't be read.`);
+    } else {
+      process.exitCode = await runStatusLine({ stdin: process.stdin, dir: paths.statusDir, stateFile: paths.statusLineState });
+    }
   },
   async status() {
     console.log((await isRunning()) ? 'running' : 'not running');

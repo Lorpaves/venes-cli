@@ -24,7 +24,6 @@ async function tmux(socket, args, input) {
 }
 
 export const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-t', pane]);
-export const readStyledScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-e', '-t', pane]);
 export const pressKey = ({ pane, tmuxSocket }, key) => tmux(tmuxSocket, ['send-keys', '-t', pane, key]);
 
 // Always a paste: as send-keys arguments, a leading "-" or trailing ";" would be read by tmux

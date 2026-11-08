@@ -18,5 +18,12 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     // The Rex session the helper starts sessions in, by id, since its label can change.
     rexSession: path.join(home, 'rex-session'),
     sdkDir: process.env.VENES_SDK_DIR || path.join(home, 'sdk'),
+    // What Claude Code last told each session's status line, by session.
+    statusDir: path.join(home, 'status'),
+    // The status line the helper's stands in for, and whether it's switched off.
+    statusLineState: path.join(home, 'statusline.json'),
+    // Claude Code's own settings, where the status line is set up.
+    claudeSettings: process.env.VENES_CLAUDE_SETTINGS
+      || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json'),
   };
 }

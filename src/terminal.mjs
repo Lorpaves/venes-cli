@@ -2,7 +2,6 @@
 // with `rexSession`, and any other pane is tmux's.
 
 import * as rex from './rex.mjs';
-import { isBlank, plainText, runsOf, screenCells } from './screen.mjs';
 import { HelperError } from './sessions.mjs';
 import * as tmux from './tmux.mjs';
 import { referenceTo } from './uploads.mjs';
@@ -32,18 +31,10 @@ const IMAGE_SETTLE_LIMIT_MS = 4000;
 const IMAGE_SETTLE_CHECK_MS = 100;
 const IMAGE_MARK = /\[Image #\d+\]/g;
 
-// The edge of Claude Code's input box, across the pane.
-const BOX_EDGE = /^\s*─{8,}/;
-// The start of what's typed in the box. "!" is the same box running a shell command.
-const PROMPT = /^\s*[❯!]/;
-// Spaces this wide or wider are the terminal keeping two things apart, like a notice at the right.
-const GAP = 3;
-
 export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
 const backendOf = session => (session.rexSession ? rex : tmux);
 export const readScreen = session => backendOf(session).readScreen(session);
-export const readStyledScreen = session => backendOf(session).readStyledScreen(session);
 export const pressKey = (session, key) => backendOf(session).pressKey(session, key);
 export const sendEscape = session => pressKey(session, 'Escape');
 
@@ -96,47 +87,6 @@ export async function sendMessage(session, { text = '', attachments = [] }, isBl
 }
 
 export const sendText = (session, text, isBlocked) => sendMessage(session, { text }, isBlocked);
-
-// What Claude Code shows under its input box: the status line a person set up, in whatever look
-// they gave it, then its own line for the mode and what's running. None when something covers the
-// box. `screen` has the escape sequences that colour it. Things the terminal keeps apart on one
-// line come as lines of their own, for a narrower screen.
-export function statusLines(screen) {
-  const rows = screenCells(screen);
-  const plain = rows.map(plainText);
-  const none = { lines: [], styled: [] };
-  if (showsDialog(plain.join('\n'))) return none;
-  // A status line can draw edges of its own, so the box is found by what's typed in it first.
-  const prompt = plain.findLastIndex(line => PROMPT.test(line));
-  const under = prompt < 0 ? -1 : plain.findIndex((line, i) => i > prompt && BOX_EDGE.test(line));
-  const edge = under < 0 ? plain.findLastIndex(line => BOX_EDGE.test(line)) : under;
-  if (edge < 0) return none;
-  const pieces = rows.slice(edge + 1).flatMap(piecesOf);
-  return { lines: pieces.map(plainText), styled: pieces.map(runsOf) };
-}
-
-// A line's parts, without the spaces around them that show nothing.
-function piecesOf(cells) {
-  const pieces = [];
-  let piece = [];
-  let gap = [];
-  for (const cell of cells) {
-    if (isBlank(cell)) {
-      gap.push(cell);
-      continue;
-    }
-    if (piece.length && gap.length >= GAP) {
-      pieces.push(piece);
-      piece = [];
-    } else if (piece.length) {
-      piece.push(...gap);
-    }
-    gap = [];
-    piece.push(cell);
-  }
-  if (piece.length) pieces.push(piece);
-  return pieces;
-}
 
 // Only while a footer says Esc will close something: with nothing open it'd interrupt the turn.
 export async function closePage(session, settle = PAGE_CLOSE_SETTLE_MS) {

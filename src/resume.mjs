@@ -15,7 +15,7 @@ const FIRST_MESSAGE_LIMIT_BYTES = 12_000;
 const SESSION_PREFIX = 'venes-';
 const SHORT_ID_LENGTH = 8;
 // A terminal server keeps the environment it started with, which may be older or barer than this one.
-const PASSED_ENV = ['PATH', 'LANG', 'LC_ALL', 'CLAUDE_CONFIG_DIR', 'VENES_HOME', 'VENES_TMUX_SOCKET', 'DISABLE_UPDATES'];
+const PASSED_ENV = ['PATH', 'LANG', 'LC_ALL', 'CLAUDE_CONFIG_DIR', 'VENES_HOME', 'VENES_CLAUDE_SETTINGS', 'VENES_TMUX_SOCKET', 'DISABLE_UPDATES'];
 
 const delay = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 

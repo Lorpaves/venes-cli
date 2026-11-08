@@ -22,6 +22,8 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     statusDir: path.join(home, 'status'),
     // The status line the helper's stands in for, and whether it's switched off.
     statusLineState: path.join(home, 'statusline.json'),
+    // The phones to notify while they aren't connected, each with its device token and key.
+    pushFile: path.join(home, 'push.json'),
     // Claude Code's own settings, where the status line is set up.
     claudeSettings: process.env.VENES_CLAUDE_SETTINGS
       || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json'),

@@ -12,6 +12,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
+import http from 'node:http';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
@@ -53,6 +55,20 @@ const PLAN = n => `Make a one-step plan to create the file e2e-${n}.txt using to
 const SLEEP = (s, word) => `Use the Bash tool in the foreground to run exactly this command: python3 -c 'import time; time.sleep(${s})' -- then reply with only the word ${word}.`;
 
 // A Rex server of this run's own, so that nothing shows up in the one on this Mac.
+// Where the helper sends notifications for a phone that's away, in place of the relay.
+const pushes = [];
+const pushServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', chunk => { body += chunk; });
+  req.on('end', () => {
+    pushes.push(JSON.parse(body));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"status":200}');
+  });
+});
+await new Promise(resolve => { pushServer.listen(0, '127.0.0.1', resolve); });
+const PUSH_URL = `http://127.0.0.1:${pushServer.address().port}/push`;
+
 const REX_SOCKET = `${HOME}-rex.sock`;
 const REX_SERVER = `unix://${REX_SOCKET}`;
 const barerEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(CLAUDE|REX_)/.test(key)));
@@ -78,7 +94,7 @@ function startHelper(cli = CLI) {
   // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
   const env = {
     ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR, VENES_TERMINAL: inRex ? 'rex' : 'tmux',
-    VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS,
+    VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS, VENES_PUSH_URL: PUSH_URL,
     VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
     ...(inRex && { REX_SERVER }),
   };
@@ -1032,6 +1048,44 @@ T('a_new_session_starts_in_a_folder_from_the_list_and_can_be_typed_into', {}, as
   }
 });
 
+T('a_phone_that_is_away_hears_a_turn_end_sealed_and_one_that_is_here_does_not', {}, async r => {
+  const key = crypto.randomBytes(32).toString('base64');
+  const token = 'ab'.repeat(32);
+  const open = sealed => {
+    const text = Buffer.from(sealed.c, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(key, 'base64'), Buffer.from(sealed.n, 'base64'));
+    decipher.setAuthTag(text.subarray(text.length - 16));
+    return JSON.parse(Buffer.concat([decipher.update(text.subarray(0, text.length - 16)), decipher.final()]).toString('utf8'));
+  };
+  // Another connection stands for the phone. It registers, so it's here.
+  const phone = await connect();
+  await phone.request('pushRegister', { deviceId: 'phone-1', token, key, sandbox: true, mac: 'mac-1' });
+  pushes.length = 0;
+  await r.type('Reply with only the word HERE.');
+  await r.turnEnd();
+  await delay(1000);
+  assert.equal(pushes.length, 0, 'a phone that is connected shows its own');
+
+  phone.close();
+  await delay(500);
+  r.mark();
+  await r.type('Reply with only the word AWAY.');
+  await r.turnEnd();
+  for (const end = Date.now() + 10000; !pushes.length && Date.now() < end;) await delay(100);
+  const [push] = pushes;
+  assert.ok(push, 'the phone away heard');
+  assert.equal(push.token, token);
+  assert.equal(push.sandbox, true);
+  assert.match(push.collapseId, /\.finished$/);
+  assert.equal(push.payload.aps['mutable-content'], 1);
+  const notice = open(push.payload.v);
+  assert.equal(notice.kind, 'finished');
+  assert.match(notice.body, /AWAY/);
+  assert.equal(notice.mac, 'mac-1');
+  assert.ok(notice.title, 'with the session\'s name');
+  await r.client.request('pushUnregister', { deviceId: 'phone-1' });
+});
+
 // /model and /effort save themselves as the defaults for new sessions, in the real settings
 // of the Claude this suite borrows. Those three keys go back afterwards, and nothing else moves.
 const USER_SETTINGS = path.join(process.env.HOME, '.claude/settings.json');
@@ -1753,5 +1807,6 @@ try { tmux('kill-server'); } catch { /* already gone */ }
 fs.rmSync(HOME, { recursive: true, force: true });
 for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS]) fs.rmSync(own, { recursive: true, force: true });
 forgetSessionsSince(sessionsBefore);
+pushServer.close();
 console.log(failed ? `${failed} FAILED` : 'all passed');
 process.exit(failed ? 1 : 0);

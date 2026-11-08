@@ -126,6 +126,8 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `folders` | `path`, `hidden` (both optional) | Where a new session can start. Without `path`: `home`, and `recent`, the folders sessions ran in lately. With it: that folder's `path`, `name` and `trusted`, its `entries`, and `truncated`. See [Starting a session](#starting-a-session). |
+| `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
+| `pushUnregister` | `deviceId` | That phone doesn't want them any more |
 | `start` | `cwd`, `trust` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
@@ -223,6 +225,12 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 `start` opens Claude Code in a new terminal session of its own in `cwd`, in Rex if it's on this Mac and otherwise in tmux, as a resumed session gets. It replies once the session's first hook arrives, and the session is in `sessions` by then. If it doesn't start within 30 seconds, `start` fails, and the terminal stays open when a dialog is waiting in it.
 
 Claude Code asks before it works in a folder it doesn't trust yet, and runs no hooks, the helper's included, until that's answered. `trusted` reads its own rules from `~/.claude.json`. A folder is trusted when the folder, or one above it, has been accepted. Inside a git repository the search stops at the repository's top folder, and outside one it goes up to the top of the disk. The home folder is asked about every time. `start` for a folder that isn't trusted fails with `needs_trust` and starts nothing. With `trust: true`, the reader's word in the app, it answers Claude Code's question with "Yes, I trust this folder", as the keys at the Mac would. If Claude Code asks about a folder that looked trusted, `start` picks "No, exit", so nothing is left running, and fails with `needs_trust`.
+
+### Notifications
+
+A phone that isn't connected hears when a session asks for something (`request.opened`) and when a turn ends (`turn.end`). A phone that's connected is left to show its own. The phone sends `pushRegister` with its own `deviceId`, its push `token` in hex, a `key` of 32 bytes in base64, `sandbox` for a development build, and `mac`, its own name for this Mac, which comes back in each notification. The connection it sends that on counts as that phone's, so while the connection is open, nothing is pushed to it. Phones are kept in `push.json` in the helper's folder, readable only by you.
+
+What a notification says is sealed with the phone's key, with AES-256-GCM: the JSON `{kind, session, title, body, mac}`, where `kind` is `needsInput` or `finished`, `title` is the session's name as the app lists it, and `body` is the start of what Claude said last, or empty, for the phone to say in its own words. It goes to the relay at `venes-push.kirass1230.workers.dev`, or `VENES_PUSH_URL`, as `{token, sandbox, collapseId, payload}`. The relay holds the key Apple's push service wants and passes the notification on, and can't read it. The payload's `aps` has `mutable-content`, so the app opens the seal before the notification shows, and a localized line in case it can't. A token Apple no longer takes is forgotten.
 
 ### Sending during a turn
 
@@ -354,6 +362,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
 | `needs_trust` | Claude Code asks first whether to trust the folder. Ask the reader, and send `start` again with `trust: true`. |
 | `start_failed` | Claude Code quit, or took too long, starting a new session |
+| `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |
 | `unreadable_folder` | `folders` couldn't read what's in that folder |
 | `no_claude` | Claude Code isn't on the PATH, so `capabilities` has nothing to ask |

@@ -15,6 +15,7 @@ import { switchInPicker } from './picker.mjs';
 import { removeSession } from './remove.mjs';
 import { resumeSession } from './resume.mjs';
 import { startNewSession } from './start.mjs';
+import { PushDevices, notify, titleFor } from './push.mjs';
 import { RECENT_SESSIONS, checkedFolder, homeFolder, recentFolders, runningIn, subfolders } from './folders.mjs';
 import { isTrusted, readClaudeConfig } from './trust.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
@@ -98,11 +99,16 @@ function createHookServer(store) {
   });
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir }, tailscaleAccount = () => undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
   const subscribers = new Set();
+  // Every connection, each with the phone it's from once that phone says, for not notifying a phone
+  // that's there to see for itself.
+  const clients = new Set();
+  const devices = new PushDevices(pushFile);
+  const isConnected = deviceId => [...clients].some(socket => socket.pushDevice === deviceId);
   const write = (socket, message) => socket.write(`${JSON.stringify(message)}\n`);
 
   const typing = oneAtATime();
@@ -141,6 +147,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
 
   store.on('event', event => {
     for (const socket of subscribers) write(socket, { type: 'event', event });
+    const title = async () => {
+      const info = await library.info(event.sessionId).catch(() => undefined);
+      return titleFor({ id: event.sessionId, title: info?.summary, cwd: store.find(event.sessionId)?.cwd ?? info?.cwd });
+    };
+    notify({ devices, isConnected, event, title }).catch(error => console.error(`push: ${error.message}`));
   });
 
   const sessionWithPane = sessionId => {
@@ -222,6 +233,18 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { gap: gap || !sameBoot };
     },
     library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
+    // A phone that wants notifications while it isn't connected, and this connection is that phone's.
+    pushRegister: (msg, socket) => {
+      devices.register(msg);
+      socket.pushDevice = msg.deviceId;
+      return {};
+    },
+    pushUnregister: ({ deviceId }, socket) => {
+      if (typeof deviceId !== 'string') throw new HelperError('bad_device', 'That isn\'t a device.');
+      devices.unregister(deviceId);
+      socket.pushDevice = deviceId;
+      return {};
+    },
     // Where a new session can start: where sessions ran lately, with how many go on in each, or the
     // folders in one. Each says whether Claude Code trusts it already.
     folders: async ({ path: folder, hidden }) => {
@@ -357,8 +380,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   };
 
   const server = net.createServer(socket => {
+    clients.add(socket);
     socket.on('error', () => {});
-    socket.on('close', () => subscribers.delete(socket));
+    socket.on('close', () => {
+      subscribers.delete(socket);
+      clients.delete(socket);
+    });
     write(socket, { type: 'hello', protocol: PROTOCOL_VERSION, version: VERSION });
     const lines = readline.createInterface({ input: socket });
     lines.on('error', () => {}); // readline re-emits socket errors; a dropped client must not crash the helper

@@ -549,10 +549,13 @@ async function readsTheStatusLine(r) {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
   const { id } = await r.session();
-  const { lines, styled } = await r.client.request('statusLine', { sessionId: id });
+  const { lines, styled, items } = await r.client.request('statusLine', { sessionId: id });
   assert.ok(lines.some(line => /mode on|shortcuts/.test(line)), JSON.stringify(lines));
   assert.deepEqual(styled.map(runs => runs.map(run => run.text).join('')), lines);
   assert.ok(styled.flat().some(run => run.color), JSON.stringify(styled));
+  // A mode is an item; "? for shortcuts" is a hint, and none.
+  assert.equal(items.some(item => item.kind === 'mode'), lines.some(line => /mode on|permissions on|edits on/.test(line)), JSON.stringify(items));
+  assert.ok(items.every(item => item.kind !== 'other' || !/shortcuts/.test(item.value)), JSON.stringify(items));
 }
 
 T('the_status_line_under_the_box_can_be_read', {}, readsTheStatusLine);

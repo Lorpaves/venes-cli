@@ -22,6 +22,7 @@ import { readStyledScreen, resumeTerminal, sendEscape, sendMessage, settleComman
 import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
+import { checkedOutBranch, statusItems } from './statusline.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
@@ -255,7 +256,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     upload: msg => saveUpload(uploads, msg, downloads),
     // For a phone to send files over SSH, which takes its key.
     ssh: ({ publicKey }) => sshAccess(publicKey),
-    statusLine: async ({ sessionId }) => statusLines(await readStyledScreen(sessionWithPane(sessionId))),
+    statusLine: async ({ sessionId }) => {
+      const session = sessionWithPane(sessionId);
+      const shown = statusLines(await readStyledScreen(session));
+      const branch = shown.styled.length ? await checkedOutBranch(session.cwd) : undefined;
+      return { ...shown, items: statusItems(shown.styled, { cwd: session.cwd, branch }) };
+    },
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {
       const upload = findUpload(uploads, sessionId, uploadId);

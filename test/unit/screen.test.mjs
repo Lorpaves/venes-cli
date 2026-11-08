@@ -54,15 +54,15 @@ test('tmux\'s screen: spaces as spaces, and a look that lasts until something ch
 
 test('a powerline look keeps its coloured spaces, its arrows and its icons', () => {
   const screen = box(
-    `${E}[48;2;40;44;52m${E}[38;2;171;178;191m  Opus ${E}[0m${E}[38;2;40;44;52m${E}[48;5;31m${E}[38;5;231m  venes ${E}[0m${E}[38;5;31m${E}[0m     ${E}[7m 3 ${E}[27m`,
+    `${E}[48;2;40;44;52m${E}[38;2;171;178;191m  Opus ${E}[0m${E}[38;2;40;44;52m${E}[48;5;31m\ue0b0${E}[38;5;231m \uf07b venes ${E}[0m${E}[38;5;31m\ue0b0${E}[0m     ${E}[7m 3 ${E}[27m`,
   );
   const { lines, styled } = statusLines(screen);
-  assert.deepEqual(lines, ['  Opus   venes ', ' 3 ']);
+  assert.deepEqual(lines, ['  Opus \ue0b0 \uf07b venes \ue0b0', ' 3 ']);
   assert.deepEqual(styled[0], [
     { text: '  Opus ', background: '#282c34', color: '#abb2bf' },
-    { text: '', color: '#282c34', background: '#0087af' },
-    { text: '  venes ', color: '#ffffff', background: '#0087af' },
-    { text: '', color: '#0087af' },
+    { text: '\ue0b0', color: '#282c34', background: '#0087af' },
+    { text: ' \uf07b venes ', color: '#ffffff', background: '#0087af' },
+    { text: '\ue0b0', color: '#0087af' },
   ]);
   assert.deepEqual(styled[1], [{ text: ' 3 ', inverse: true }]);
 });

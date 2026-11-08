@@ -18,7 +18,7 @@ import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
-import { readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, statusLines, terminalFrom } from './terminal.mjs';
+import { readStyledScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, statusLines, terminalFrom } from './terminal.mjs';
 import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
@@ -255,7 +255,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     upload: msg => saveUpload(uploads, msg, downloads),
     // For a phone to send files over SSH, which takes its key.
     ssh: ({ publicKey }) => sshAccess(publicKey),
-    statusLine: async ({ sessionId }) => ({ lines: statusLines(await readScreen(sessionWithPane(sessionId))) }),
+    statusLine: async ({ sessionId }) => statusLines(await readStyledScreen(sessionWithPane(sessionId))),
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {
       const upload = findUpload(uploads, sessionId, uploadId);

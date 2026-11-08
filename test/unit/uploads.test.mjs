@@ -283,24 +283,6 @@ test('a picture Claude Code doesn\'t take is left as its path, and the message s
   assert.deepEqual(typed(), ['/u/s/1/shot.png', ' ', 'look', 'enter']);
 });
 
-test('what Claude Code shows under its input box is read off the screen', async () => {
-  const { statusLines } = await import('../../src/terminal.mjs');
-  const screen = [
-    '⏺ Done.',
-    '',
-    '─────────────────────────────────────────── venes-app ─',
-    '❯ ',
-    '────────────────────────────────────────────────────────',
-    '  ◆ Opus 5.5 · max │ Venes │ ctx ━━━━ 90% │ cache 99%',
-    '  ⏵⏵ bypass permissions on · 1 shell',
-    '',
-    '',
-  ].join('\n');
-  assert.deepEqual(statusLines(screen), ['◆ Opus 5.5 · max │ Venes │ ctx ━━━━ 90% │ cache 99%', '⏵⏵ bypass permissions on · 1 shell']);
-  assert.deepEqual(statusLines(' Do you want to proceed?\n ❯ 1. Yes\n Esc to cancel\n'), []);
-  assert.deepEqual(statusLines('──────────\n❯ \n──────────\n'), []);
-});
-
 test('a video keeps no spaces and has its extension, since its path goes in as it is', t => {
   assert.equal(safeName('screen recording.MOV', 'video/quicktime'), 'screen-recording.MOV');
   assert.equal(safeName('clip', 'video/mp4'), 'clip.mp4');

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
+import { cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, readStyledScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from '../../src/terminal.mjs';
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
@@ -52,12 +52,43 @@ test('a short terminal comes back in one call', async t => {
 test('a long one is only read from the end, where the screen is', async t => {
   const calls = fakeRex(t, {
     format: JSON.stringify({ content: 'the start', id: 4, total: 1_000_000 }),
-    blob_read: JSON.stringify({ data: 'the end', id: 4, total: 1_000_000 }),
+    blob_read: JSON.stringify({ data: 'the end', id: 4, total: 1_000_000, eof: true }),
   });
   assert.equal(await readScreen(SESSION), 'the end');
   const read = calls().at(-1).args;
   assert.equal(read[7], 'blob_read');
   assert.deepEqual(JSON.parse(read[8]), { id: 4, offset: 1_000_000 - 32 * 1024, max_bytes: 32 * 1024 });
+});
+
+// Rex sends less than was asked for when it's a lot to put in its reply, as colours are.
+test('a read that comes back short goes on from where it stopped, to the very end', async t => {
+  const total = 1_000_000;
+  const first = 'é'.repeat(10);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-rex-'));
+  const log = path.join(dir, 'calls');
+  fs.writeFileSync(path.join(dir, 'rex'), `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args.includes('format')) process.stdout.write(JSON.stringify({ content: 'the start', id: 4, total: ${total} }));
+else {
+  const { offset } = JSON.parse(args.at(-1));
+  const short = offset === ${total} - 32 * 1024;
+  process.stdout.write(JSON.stringify({ data: short ? ${JSON.stringify(first)} : 'the end', id: 4, total: ${total}, eof: !short }));
+}
+`, { mode: 0o755 });
+  const { PATH } = process.env;
+  process.env.PATH = `${dir}:${PATH}`;
+  t.after(() => {
+    process.env.PATH = PATH;
+    fs.rmSync(dir, { recursive: true });
+  });
+  assert.equal(await readStyledScreen(SESSION), `${first}the end`);
+  const reads = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(args => args.includes('blob_read'));
+  assert.equal(reads.length, 2);
+  assert.deepEqual(JSON.parse(reads[1].at(-1)), { id: 4, offset: total - 32 * 1024 + 20, max_bytes: 32 * 1024 - 20 });
+  const [format] = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(JSON.parse(format.at(-1)).format, 'vt');
 });
 
 test('keys go by Rex\'s names', async t => {

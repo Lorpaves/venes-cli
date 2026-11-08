@@ -14,6 +14,8 @@ const COMMAND_TIMEOUT_MS = 5000;
 const OUTPUT_BYTES = 8 * 1024 * 1024;
 // A terminal can hold 64 MiB of scrollback, and only the end of it is the screen.
 const SCREEN_BYTES = 32 * 1024;
+// A read can come back with less than it asked for, which is more reads to the end.
+const SCREEN_READS = 8;
 const KEYS = { Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p' };
 const PROGRAM_NAME = 'claude';
 // Sessions the helper starts share this one, a window each, because Rex keeps a session in its
@@ -41,12 +43,23 @@ async function callBlock(session, method, args) {
   return JSON.parse(await rex(session, ['--autostart=false', 'block', 'call', ...blockTarget(session), method, JSON.stringify(args)]));
 }
 
-export async function readScreen(session) {
-  const start = await callBlock(session, 'format', { format: 'text', trim: true, max_bytes: SCREEN_BYTES });
+async function readFormatted(session, format) {
+  const start = await callBlock(session, 'format', { format, trim: true, max_bytes: SCREEN_BYTES });
   if (start.id === undefined) return start.content;
-  const end = await callBlock(session, 'blob_read', { id: start.id, offset: Math.max(0, start.total - SCREEN_BYTES), max_bytes: SCREEN_BYTES });
-  return end.data;
+  let offset = Math.max(0, start.total - SCREEN_BYTES);
+  let screen = '';
+  for (let reads = 0; reads < SCREEN_READS && offset < start.total; reads++) {
+    const { data = '', eof } = await callBlock(session, 'blob_read', { id: start.id, offset, max_bytes: start.total - offset });
+    screen += data;
+    offset += Buffer.byteLength(data);
+    if (eof || !data) break;
+  }
+  return screen;
 }
+
+export const readScreen = session => readFormatted(session, 'text');
+// With the escape sequences that colour it.
+export const readStyledScreen = session => readFormatted(session, 'vt');
 
 export async function pressKey(session, key) {
   await rex(session, ['--autostart=false', 'send-key', ...blockTarget(session), KEYS[key] ?? key]);

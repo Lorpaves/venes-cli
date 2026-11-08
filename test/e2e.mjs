@@ -549,8 +549,10 @@ async function readsTheStatusLine(r) {
   await r.type('Reply with only the word READY.');
   await r.turnEnd();
   const { id } = await r.session();
-  const { lines } = await r.client.request('statusLine', { sessionId: id });
+  const { lines, styled } = await r.client.request('statusLine', { sessionId: id });
   assert.ok(lines.some(line => /mode on|shortcuts/.test(line)), JSON.stringify(lines));
+  assert.deepEqual(styled.map(runs => runs.map(run => run.text).join('')), lines);
+  assert.ok(styled.flat().some(run => run.color), JSON.stringify(styled));
 }
 
 T('the_status_line_under_the_box_can_be_read', {}, readsTheStatusLine);

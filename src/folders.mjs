@@ -58,10 +58,16 @@ export function recentFolders(sessions, limit = RECENT_FOLDERS) {
   return folders;
 }
 
-// How many sessions are going in each folder, counting each session once.
-export function runningIn(sessionsByID) {
+// How many sessions are going in each folder, counting each session once. Claude Code's own list has the
+// folder each started in. The helper's has the one its last hook came from, which follows a cd, so it
+// only counts for a session Claude Code doesn't list.
+export function runningIn(listed, live = []) {
+  const going = new Map(listed.filter(session => session.cwd).map(session => [session.id, session]));
+  for (const session of live) {
+    if (session.cwd && !going.has(session.id)) going.set(session.id, session);
+  }
   const counts = new Map();
-  for (const session of sessionsByID.values()) {
+  for (const session of going.values()) {
     if (!session.cwd) continue;
     const folder = path.resolve(session.cwd);
     counts.set(folder, (counts.get(folder) ?? 0) + 1);

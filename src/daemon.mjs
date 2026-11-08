@@ -233,9 +233,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         return { ...named(checked), ...subfolders(checked) };
       }
       const [stored, running] = await Promise.all([library.recent(RECENT_SESSIONS).catch(() => []), library.running().catch(() => [])]);
-      const going = new Map(running.filter(session => session.cwd).map(session => [session.id, session]));
-      for (const session of store.liveSessions()) if (session.cwd) going.set(session.id, session);
-      const counts = runningIn(going);
+      const counts = runningIn(running, store.liveSessions());
       return { home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })) };
     },
     start: msg => startNewSession({ store, terminal: resumeTerminal() }, msg),

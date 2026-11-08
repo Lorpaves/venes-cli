@@ -126,9 +126,11 @@ test('recent folders are newest first, once each, and only those still there', t
   assert.deepEqual(recentFolders(sessions, 1), [one]);
 });
 
-test('each session going counts once, in its folder', () => {
-  const going = new Map([['a', { cwd: '/x' }], ['b', { cwd: '/x/' }], ['c', { cwd: '/y' }], ['d', {}]]);
-  assert.deepEqual([...runningIn(going)], [['/x', 2], ['/y', 1]]);
+test('each session going counts once, in the folder it started in', () => {
+  const listed = [{ id: 'a', cwd: '/x' }, { id: 'b', cwd: '/x/' }, { id: 'c', cwd: '/y' }, { id: 'd' }];
+  const live = [{ id: 'a', cwd: '/x/helper' }, { id: 'e', cwd: '/z' }, { id: 'f' }];
+  assert.deepEqual([...runningIn(listed, live)], [['/x', 2], ['/y', 1], ['/z', 1]],
+    'the helper\'s folder follows a cd, so Claude Code\'s counts first, and the helper\'s only for one it doesn\'t list');
 });
 
 test('trust is the folder\'s, or a folder\'s above it, but not past the top of its git repository', t => {

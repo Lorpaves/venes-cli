@@ -10,9 +10,10 @@ import { installStatusLine, removeStatusLine, runStatusLine, switchOnStatusLine 
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
-  addPairingKey, authorizedKeysFile, enrollPhone, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName, makeNonce, makeOneTimeKey,
-  pairingLink, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink,
+  WAY_STEPS, addPairingKey, authorizedKeysFile, defaultWay, enrollPhone, findTmux, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName,
+  makeNonce, makeOneTimeKey, pairingLink, pairingWays, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink, wayNote,
 } from '../src/pairing.mjs';
+import { choose } from '../src/choice.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAccount, tailnetAddress } from '../src/rex.mjs';
 import { pairingHost, readUpload, tailscaleStatus } from '../src/ssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
@@ -22,6 +23,8 @@ const START_TIMEOUT_MS = 4000;
 const STOP_TIMEOUT_MS = 3000;
 const PAIRING_LIMIT_MS = 5 * 60_000;
 const PAIRING_CHECK_MS = 300;
+// How often a setting someone is turning on is looked at again.
+const SETTING_CHECK_MS = 2000;
 // Well past the client's keep-alive, which is every 15 seconds.
 const PIPE_IDLE_MS = 60_000;
 const USAGE = `venes <command>
@@ -33,7 +36,7 @@ Helper
   version                       Print this version and the running helper's
   update                        Check for a new version now
   auto-update [on|off]          Show or change automatic updates
-  pair [--ssh]                  Show a QR code that pairs the Venes app, through Rex if it's on a tailnet
+  pair [--rex|--ssh]            Show a QR code that pairs the Venes app, asking whether through Rex or tmux over SSH
   statusline [on|off]           Run as Claude Code's status line (set up by setup), or stop or start doing so
 
 Control
@@ -172,51 +175,27 @@ const commands = {
     }
     console.log(autoUpdateEnabled(paths) ? 'on' : 'off');
   },
-  async pair([route]) {
+  // In a terminal it asks which way the phone comes in, starting on one that works now. Elsewhere it
+  // takes Rex when that works, and SSH otherwise, as `--rex` and `--ssh` pick one outright.
+  async pair(args) {
     writeLauncher(paths);
     process.env.PATH = `${process.env.PATH}:${REX_FOLDER}`;
-    const address = route === '--ssh' ? undefined : await tailnetAddress();
-    if (address) {
-      showRexCode(address, await tailnetAccount());
-      return;
-    }
     const port = Number(process.env.VENES_SSH_PORT || 22);
-    if (!(await isPortOpen(port))) {
-      const other = isRexInstalled() ? ' Or turn on Tailscale in Rex.' : '';
-      throw new Error(`Turn on Remote Login first, in System Settings > General > Sharing.${other}`);
-    }
-    const file = authorizedKeysFile();
-    const nonce = makeNonce();
-    const { seed, publicKey } = makeOneTimeKey();
-    const host = pairingHost(await tailscaleStatus(), localHostName());
-    // All of this can fail, so it comes before anything is added to authorized_keys.
-    const link = pairingLink({
-      host, port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
+    const asked = args.includes('--ssh') ? 'ssh' : args.includes('--rex') ? 'rex' : undefined;
+    const rexInstalled = isRexInstalled();
+    const ways = pairingWays({
+      rexInstalled, rexAddress: asked !== 'ssh' && rexInstalled ? await tailnetAddress() : undefined,
+      tmuxInstalled: !!findTmux(), remoteLogin: await isPortOpen(port),
     });
-    const code = renderQR(qrModules(link));
-    // An override has to reach the command too, since sshd runs it with a clean environment.
-    const prefix = process.env.VENES_AUTHORIZED_KEYS ? `VENES_AUTHORIZED_KEYS='${file}' ` : '';
-    addPairingKey(file, publicKey, `${prefix}'${paths.launcher}' enroll ${nonce}`, nonce);
-    const cleanUp = () => removePairingKey(file, nonce);
-    // SIGHUP is what closing the terminal window sends.
-    for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
-      process.on(signal, () => { cleanUp(); process.exit(130); });
-    }
-    // On the tailnet, the phone signs in to Tailscale in the app first, as any account that reaches this Mac.
-    const reach = host.endsWith('.local')
-      ? 'Tailscale is off on this Mac, so the phone can only reach it on this network. Turn Tailscale on to reach it from anywhere.'
-      : 'The phone reaches this Mac on your tailnet: sign in to Tailscale in the app when it asks.';
-    console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes. ${reach}\n`);
-    const deadline = Date.now() + PAIRING_LIMIT_MS;
-    while (Date.now() < deadline) {
-      if (!hasPairingKey(file, nonce)) {
-        console.log('Paired.');
-        return;
-      }
-      await new Promise(resolve => { setTimeout(resolve, PAIRING_CHECK_MS); });
-    }
-    cleanUp();
-    throw new Error('That code has expired. Run this again for a new one.');
+    const isTerminal = !!(process.stdin.isTTY && process.stdout.isTTY);
+    const [rex, ssh] = ways;
+    let way;
+    if (asked) way = ways.find(each => each.id === asked);
+    else if (isTerminal) way = await askWay(ways);
+    else way = rex.state === 'ready' ? rex : ssh;
+    if (!way) process.exit(130);
+    if (way.id === 'rex') await pairThroughRex(way, isTerminal);
+    else await pairOverSSH(way, port, { isTerminal, needsTmux: isTerminal && !asked });
   },
   // What the one-time key in authorized_keys runs. It takes one line, the phone's public key.
   async enroll([nonce]) {
@@ -285,6 +264,100 @@ function openPipe(input) {
   };
   stay();
   input.on('data', stay);
+}
+
+// Asks which way the phone comes in, starting on one that works now. Undefined when it's stopped.
+async function askWay(ways) {
+  const question = ways.every(way => way.state === 'missing')
+    ? 'Neither Rex nor tmux is on this Mac yet. Pick one to see how to set it up.'
+    : 'How will the Venes app reach this Mac?';
+  console.log(`\n${question}\n\x1b[2m↑/↓ to choose · Enter to go on · Esc to stop\x1b[22m\n`);
+  const index = await choose({ options: ways.map(way => ({ label: way.label, note: wayNote(way) })), start: ways.indexOf(defaultWay(ways)) });
+  console.log('');
+  return index === undefined ? undefined : ways[index];
+}
+
+// What to do first, for a way that can't be used yet. It isn't a failure, but nothing was paired.
+function guide(steps) {
+  console.log(`${steps}\n`);
+  process.exitCode = 1;
+}
+
+// Checks every few seconds until `check` finds something, for as long as a pairing code lasts.
+async function waitFor(check) {
+  const deadline = Date.now() + PAIRING_LIMIT_MS;
+  while (Date.now() < deadline) {
+    const found = await check();
+    if (found) return found;
+    await new Promise(resolve => { setTimeout(resolve, SETTING_CHECK_MS); });
+  }
+  return undefined;
+}
+
+// System Settings, at General > Sharing.
+function openSharingSettings() {
+  try {
+    spawn('open', ['x-apple.systempreferences:com.apple.Sharing-Settings.extension'], { stdio: 'ignore', detached: true }).unref();
+  } catch { /* the words say where it is */ }
+}
+
+// Rex reaches this Mac over its own Tailscale, once Serve over Tailscale is on in it.
+async function pairThroughRex(way, isTerminal) {
+  if (way.state === 'missing') return guide(WAY_STEPS.rex.missing);
+  let address = way.address ?? await tailnetAddress();
+  if (!address) {
+    if (!isTerminal) throw new Error(`Rex isn't on a tailnet. ${WAY_STEPS.rex.off}`);
+    console.log(`${WAY_STEPS.rex.off} Waiting for it to be on…\n`);
+    address = await waitFor(tailnetAddress);
+    if (!address) throw new Error('Serve over Tailscale is still off in Rex. Run this again once it\'s on.');
+  }
+  showRexCode(address, await tailnetAccount());
+  return undefined;
+}
+
+// A Mac without Rex is reached over SSH, which needs Remote Login. In a terminal, that is waited for
+// while the person turns it on. `needsTmux` is for a way picked as tmux, which can't be used without it.
+async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
+  if (needsTmux && way.state === 'missing') return guide(WAY_STEPS.ssh.missing);
+  if (!(await isPortOpen(port))) {
+    if (!isTerminal) throw new Error(`Turn on Remote Login first, in System Settings > General > Sharing.${isRexInstalled() ? ' Or turn on Serve over Tailscale in Rex.' : ''}`);
+    console.log(`${WAY_STEPS.ssh.off} Waiting for it to be on…\n`);
+    openSharingSettings();
+    if (!(await waitFor(() => isPortOpen(port)))) throw new Error('Remote Login is still off. Run this again once it\'s on.');
+  }
+  const file = authorizedKeysFile();
+  const nonce = makeNonce();
+  const { seed, publicKey } = makeOneTimeKey();
+  const host = pairingHost(await tailscaleStatus(), localHostName());
+  // All of this can fail, so it comes before anything is added to authorized_keys.
+  const link = pairingLink({
+    host, port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
+  });
+  const code = renderQR(qrModules(link));
+  // An override has to reach the command too, since sshd runs it with a clean environment.
+  const prefix = process.env.VENES_AUTHORIZED_KEYS ? `VENES_AUTHORIZED_KEYS='${file}' ` : '';
+  addPairingKey(file, publicKey, `${prefix}'${paths.launcher}' enroll ${nonce}`, nonce);
+  const cleanUp = () => removePairingKey(file, nonce);
+  // SIGHUP is what closing the terminal window sends.
+  for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
+    process.on(signal, () => { cleanUp(); process.exit(130); });
+  }
+  // On the tailnet, the phone signs in to Tailscale in the app first, as any account that reaches this Mac.
+  const reach = host.endsWith('.local')
+    ? 'Tailscale is off on this Mac, so the phone can only reach it on this network. Turn Tailscale on to reach it from anywhere.'
+    : 'The phone reaches this Mac on your tailnet: sign in to Tailscale in the app when it asks.';
+  const tmux = needsTmux ? '\n\nRun Claude Code inside tmux, so the app can type into it: tmux new -A -s cc' : '';
+  console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes. ${reach}${tmux}\n`);
+  const deadline = Date.now() + PAIRING_LIMIT_MS;
+  while (Date.now() < deadline) {
+    if (!hasPairingKey(file, nonce)) {
+      console.log('Paired.');
+      return;
+    }
+    await new Promise(resolve => { setTimeout(resolve, PAIRING_CHECK_MS); });
+  }
+  cleanUp();
+  throw new Error('That code has expired. Run this again for a new one.');
 }
 
 // Nothing to hand over: Rex asks Tailscale who's calling, so the code is only where to call.

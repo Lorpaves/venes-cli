@@ -1,6 +1,6 @@
 {
   "name": "venes-helper",
-  "version": "0.3.31",
+  "version": "0.3.32",
   "description": "Claude Code plugin that turns hooks and transcripts into a structured event stream for the Venes app.",
   "private": true,
   "type": "module",

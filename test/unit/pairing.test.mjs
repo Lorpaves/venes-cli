@@ -8,7 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  addPairingKey, enrollPhone, hasPairingKey, hostKeyFingerprint, makeNonce, makeOneTimeKey, pairingLine, pairingLink, removePairingKey, renderQR, rexPairingLink,
+  addPairingKey, defaultWay, enrollPhone, findTmux, hasPairingKey, hostKeyFingerprint, makeNonce, makeOneTimeKey, pairingLine, pairingLink, pairingWays,
+  removePairingKey, renderQR, rexPairingLink, wayNote,
 } from '../../src/pairing.mjs';
 
 function tempKeys(t, content) {
@@ -226,4 +227,91 @@ test('--ssh keeps to SSH even with Tailscale on in Rex', async t => {
   fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
   const pair = await startPair(t, file, `${file}.host`, { path: fakeRex(t, '{"url":"https://mac.tail.ts.net"}') });
   assert.equal(linkIn(await codeShown(pair)).searchParams.has('r'), false);
+});
+
+const ways = setup => pairingWays({ rexInstalled: false, rexAddress: undefined, tmuxInstalled: false, remoteLogin: false, ...setup });
+const shown = list => list.map(way => [way.id, way.state, wayNote(way)]);
+
+test('a way is ready, only switched off, or needs something downloaded first', () => {
+  assert.deepEqual(shown(ways({ rexInstalled: true, rexAddress: 'https://mac.tail.ts.net', tmuxInstalled: true, remoteLogin: true })), [
+    ['rex', 'ready', 'ready to use, nothing to download'], ['ssh', 'ready', 'ready to use, nothing to download'],
+  ]);
+  assert.deepEqual(shown(ways({ rexInstalled: true, tmuxInstalled: true })), [
+    ['rex', 'off', 'turn on Serve over Tailscale in Rex first'], ['ssh', 'off', 'turn on Remote Login first'],
+  ]);
+  assert.deepEqual(shown(ways({ remoteLogin: true })), [['rex', 'missing', 'download Rex first'], ['ssh', 'missing', 'install tmux first']]);
+});
+
+test('the choice starts on a way that works now, then one that is only switched off, Rex first', () => {
+  const pick = setup => defaultWay(ways(setup)).id;
+  assert.equal(pick({ rexInstalled: true, rexAddress: 'https://mac.tail.ts.net', tmuxInstalled: true, remoteLogin: true }), 'rex');
+  assert.equal(pick({ rexInstalled: true, tmuxInstalled: true, remoteLogin: true }), 'ssh');
+  assert.equal(pick({ rexInstalled: true, tmuxInstalled: true }), 'rex');
+  assert.equal(pick({ tmuxInstalled: true }), 'ssh');
+  assert.equal(pick({}), 'rex');
+});
+
+test('tmux is found on the PATH', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-tmux-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+  fs.writeFileSync(path.join(dir, 'tmux'), '#!/bin/sh\n', { mode: 0o755 });
+  assert.equal(findTmux({ PATH: dir }), path.join(dir, 'tmux'));
+});
+
+// `pair` in a terminal, which `script` gives it, with keys typed into it. `script` takes them only from
+// a pipe, not the socket a child's input is here, so `cat` passes them on, and `script` lasts until
+// they end.
+async function pairInTerminal(t, file, hostKey, env) {
+  const sshd = net.createServer().listen(0, '127.0.0.1');
+  t.after(() => sshd.close());
+  await once(sshd, 'listening');
+  const pair = spawn('/bin/sh', ['-c', 'cat | script -q /dev/null "$0" "$@"', process.execPath, CLI, 'pair'], {
+    env: {
+      ...process.env, VENES_HOME: path.join(path.dirname(file), 'home'), VENES_AUTHORIZED_KEYS: file, VENES_HOST_KEY: hostKey,
+      VENES_SSH_PORT: String(sshd.address().port), ...env,
+    },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  t.after(() => pair.kill('SIGKILL'));
+  let text = '';
+  pair.stdout.on('data', chunk => { text += chunk; });
+  const plain = () => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const waitFor = pattern => new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error(`no ${pattern} in ${JSON.stringify(plain())}`)), 15000);
+    const check = () => {
+      if (pattern.test(plain())) {
+        clearTimeout(deadline);
+        resolve(plain());
+      } else setTimeout(check, 50);
+    };
+    check();
+  });
+  const exited = once(pair, 'exit');
+  return { waitFor, type: input => pair.stdin.write(input), end: async () => { pair.stdin.end(); return (await exited)[0]; } };
+}
+
+test('in a terminal, pair asks which way, starting on the one that works, and Enter takes it', async t => {
+  const file = tempKeys(t, MINE);
+  fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
+  const run = await pairInTerminal(t, file, `${file}.host`, { PATH: fakeRex(t, '{"url":"https://mac.tail.ts.net"}') });
+  assert.match(await run.waitFor(/❯ Rex \(ready to use, nothing to download\)/), /How will the Venes app reach this Mac\?/);
+  run.type('\r');
+  assert.equal(linkIn(await run.waitFor(/venes:\/\/pair\S+/)).searchParams.get('r'), 'https://mac.tail.ts.net');
+  assert.equal(await run.end(), 0);
+  assert.equal(fs.readFileSync(file, 'utf8'), MINE);
+});
+
+test('in a terminal, a way that needs something downloaded says how to get it, and pairs nothing', async t => {
+  const file = tempKeys(t, MINE);
+  fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true }));
+  const run = await pairInTerminal(t, file, `${file}.host`, { HOME: home, PATH: '/usr/bin:/bin' });
+  await run.waitFor(/Rex \(download Rex first\)/);
+  run.type('1');
+  await run.waitFor(/❯ Rex \(download Rex first\)\s*\n\s+tmux, over SSH[^\n]*\n*$/);
+  run.type('\r');
+  await run.waitFor(/Download Rex from https:\/\/www\.superlogical\.com\/rex/);
+  assert.equal(await run.end(), 1);
+  assert.equal(fs.readFileSync(file, 'utf8'), MINE);
 });

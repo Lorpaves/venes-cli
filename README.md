@@ -49,10 +49,12 @@ Run this and scan the code in the app:
 ~/.venes/venes pair
 ```
 
-The phone reaches this Mac in one of two ways, and `pair` picks for you:
+The phone reaches this Mac in one of two ways, and `pair` asks which, starting on one that works now, Rex first. A way that's ready says it needs nothing downloaded:
 
-- **Through Rex,** if Tailscale is on in [Rex](https://www.superlogical.com/rex). The phone has to be on your tailnet as the account Rex uses: the app signs in to Tailscale itself, for each Mac, or uses the Tailscale app. Nothing else is needed, not even Remote Login.
-- **Over SSH** otherwise. Turn on Remote Login first, in System Settings > General > Sharing. `pair --ssh` picks this even with Rex.
+- **Rex,** with *Serve over Tailscale* on in [Rex](https://www.superlogical.com/rex)'s settings. The phone has to be on your tailnet as the account Rex uses: the app signs in to Tailscale itself, for each Mac, or uses the Tailscale app. Nothing else is needed, not even Remote Login.
+- **tmux, over SSH,** with Claude Code running inside tmux (`brew install tmux`) and Remote Login on, in System Settings > General > Sharing.
+
+A way that's only switched off is waited for while you turn it on, and Remote Login's settings open for you. One that needs something downloaded says how to get it. `pair --rex` and `pair --ssh` pick a way without asking, as running it anywhere but a terminal does: Rex when that works, and SSH otherwise. `--ssh` doesn't ask for tmux, for a Mac whose sessions run in Rex.
 
 Through Rex, the code holds this Mac's name, its address on your tailnet, and the Tailscale account Rex is signed in with, and no credential: Rex asks Tailscale who's calling and lets in only the account that signed in. To stop a phone reaching this Mac, sign it out of that account or turn Tailscale off in Rex.
 

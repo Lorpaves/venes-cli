@@ -139,6 +139,54 @@ export function rexPairingLink({ address, hostKey, name, account }) {
   return `venes://pair?${query}`;
 }
 
+// The ways a phone can reach this Mac, Rex first. Each is `ready`, `off` when what it needs is
+// installed but switched off, or `missing` when something has to be downloaded first.
+export function pairingWays({ rexInstalled, rexAddress, tmuxInstalled, remoteLogin }) {
+  return [
+    { id: 'rex', label: 'Rex', state: rexAddress ? 'ready' : rexInstalled ? 'off' : 'missing', address: rexAddress },
+    { id: 'ssh', label: 'tmux, over SSH', state: !tmuxInstalled ? 'missing' : remoteLogin ? 'ready' : 'off' },
+  ];
+}
+
+const WAY_NOTES = {
+  rex: { off: 'turn on Serve over Tailscale in Rex first', missing: 'download Rex first' },
+  ssh: { off: 'turn on Remote Login first', missing: 'install tmux first' },
+};
+
+export const wayNote = way => (way.state === 'ready' ? 'ready to use, nothing to download' : WAY_NOTES[way.id][way.state]);
+
+// What a choice starts on: a way that works now, then one that's only switched off, Rex first.
+export function defaultWay(ways) {
+  return ways.find(way => way.state === 'ready') ?? ways.find(way => way.state === 'off') ?? ways[0];
+}
+
+// What to do to use a way that isn't ready.
+export const WAY_STEPS = {
+  rex: {
+    off: 'In Rex\'s settings, turn on Serve over Tailscale.',
+    missing: 'Download Rex from https://www.superlogical.com/rex and open it. In its settings, turn on Serve over Tailscale, '
+      + 'and run Claude Code in Rex. Then run `~/.venes/venes pair` again.',
+  },
+  ssh: {
+    off: 'Turn on Remote Login, in System Settings > General > Sharing.',
+    missing: 'Install tmux with Homebrew: `brew install tmux` (Homebrew itself is at https://brew.sh). Turn on Remote Login, in '
+      + 'System Settings > General > Sharing, and run Claude Code inside tmux: `tmux new -A -s cc`. Then run `~/.venes/venes pair` again.',
+  },
+};
+
+// Where tmux is, looking where Homebrew puts it too.
+export function findTmux(env = process.env) {
+  const folders = [...(env.PATH ?? '').split(':'), '/opt/homebrew/bin', '/usr/local/bin'];
+  return folders.map(folder => path.join(folder, 'tmux')).find(file => {
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function isPortOpen(port, host = '127.0.0.1') {
   return new Promise(resolve => {
     const probe = net.connect(port, host);

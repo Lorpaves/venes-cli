@@ -120,7 +120,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `sessions` | | `sessions`, `unattached` |
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |
 | `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). |
-| `mentions` | `sessionId`, `query`, `limit` | `items`: what an `@` followed by `query` can name in the session's folder, as Claude Code's own `@` offers it, best match first: each with its `path` from the folder and `kind`, `file` or `dir`, a folder's path ending in `/`. Best is the path starting with `query`, then its name, then `query` anywhere in it, then its letters in order; with nothing typed, the top of the folder comes first. In a git repository they're the files git knows, new ones too, ignored ones not; elsewhere the folder is looked through, leaving out hidden and built folders. A leading `@` in `query` is ignored. Up to `limit`, 20 unless asked, at most 50. A folder is listed again after ten seconds |
+| `mentions` | `sessionId`, `query`, `limit` | `items`: what an `@` followed by `query` can name for the session, as Claude Code's own `@` offers it: each with its `path` and `kind`, `file` or `dir`, a folder's path ending in `/`. A `query` that starts like a path (`./`, `../`, `~/`, `/`, or just `~`, `.` or `..`) lists the folder it points into, folders first, hidden entries left out, written the way it was typed, as in `../helper/`. Anything else is looked for among the project's files and the folders above them, best match first, scored as Claude Code scores them: in a git repository every file git has, from the session's folder, then new ones unless ignored; elsewhere what ripgrep finds. With nothing typed, or just `.` or `./`, it's what's in the session's folder. A leading `@` in `query` is ignored. As many as Claude Code shows, 15, or 10 of a folder, and fewer if `limit` asks |
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
@@ -224,6 +224,8 @@ Held messages go out in order, each once the session is idle and any compaction 
 
 `message.user` carries the `clientId` of the send it came from. A message typed in the terminal has none. For a message sent during a turn it comes when Claude reads it, not when it's typed, so a client can show it as waiting until then, as Claude Code does. If someone takes it back at the terminal, `send.failed` with `taken_back` comes instead. Slash commands that Claude Code runs itself, such as `/compact`, fire no hook, so they never echo.
 
+A message that starts with `!` is a line for the shell, which runs in the terminal, as typing it there does. Claude Code fires no hook for one, so it echoes from the transcript once it has run: `message.user` with `shell: true` and the text as typed, then `message.output` with what it printed, `stdout` and `stderr` apart, as Claude Code shows them. Unless `respondToBashCommands` is off, Claude answers it in a turn of its own, so the session goes `running`, and `replies` is true. When `replies` is false nothing follows, and the line is all there is. Both carry the time the transcript has for them as `at`.
+
 ### Images
 
 Images stay out of pages and events, because a page can have dozens of them. `history` and `join` items with the role `user` or `tool` can have `images`, each `{id, mediaType, bytes}`, and `image` fetches one when given that `id` as `imageId`, with `unknown_image` if the transcript no longer has it. An image's `id` only means something to `image`, and calls made by a subagent have none.
@@ -258,7 +260,9 @@ Pass `before` from one reply to get the page before it. It counts items from the
 
 | `role` | Fields |
 |---|---|
-| `user`, `assistant` | `text` |
+| `user` | `text`, and `shell: true` for a line run with `!` |
+| `assistant` | `text` |
+| `output` | `stdout`, `stderr`, `replies`: what a line run with `!` printed |
 | `tool` | `toolUseId`, `name`, `input`, `result`, `isError`, `parentToolUseId` |
 | `thinking` | `text`, `durationMs` |
 | `turn_end` | `durationMs` |
@@ -294,7 +298,8 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
 | `session.deleted` | |
-| `message.user` | `text`, `clientId`, `attachments` (only when it has files) |
+| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`) |
+| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |

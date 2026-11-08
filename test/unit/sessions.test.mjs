@@ -1288,3 +1288,66 @@ test('a session that moves from tmux to Rex takes on the new terminal', () => {
   store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'Stop' }, inRex);
   assert.deepEqual([store.get('a').pane, store.get('a').tmuxSocket, store.get('a').rexSession], ['block:1', undefined, 'session:1']);
 });
+
+// A line run with `!` reaches the store only as transcript records.
+const CAVEAT_TEXT = '<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request.</local-command-caveat>';
+const shellLine = (command, { uuid, after, at = new Date().toISOString() } = {}) => ({
+  type: 'user', uuid, parentUuid: after, timestamp: at, message: { content: `<bash-input>${command}</bash-input>` },
+});
+const printed = (stdout, stderr = '', at = new Date().toISOString()) => ({
+  type: 'user', timestamp: at, message: { content: `<bash-stdout>${stdout}</bash-stdout><bash-stderr>${stderr}</bash-stderr>` },
+});
+
+test('a line run with ! from here echoes with its send, prints, and Claude answers it in a turn', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', {});
+  const s = store.get('a');
+  store.expectEcho(s, 'c1', '!pwd');
+  const typedAt = '2026-11-08T09:30:41.259Z';
+  store.handleTranscriptRecord('a', shellLine('pwd', { uuid: 'i1', after: 'p0', at: typedAt }));
+  store.handleTranscriptRecord('a', printed('a&lt;b'));
+  const user = events.find(e => e.kind === 'message.user');
+  assert.deepEqual([user.text, user.clientId, user.shell, user.at], ['!pwd', 'c1', true, Date.parse(typedAt)]);
+  const output = events.find(e => e.kind === 'message.output');
+  assert.deepEqual([output.stdout, output.stderr, output.replies, output.clientId], ['a<b', '', true, 'c1']);
+  assert.equal(s.status, 'running');
+  assert.equal(s.lastPrompt, '!pwd');
+  hook('Stop', { last_assistant_message: 'It is a<b.' });
+  assert.equal(s.status, 'idle');
+});
+
+test('a line run with ! in the terminal echoes with no send', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', {});
+  store.handleTranscriptRecord('a', shellLine(' ls'));
+  store.handleTranscriptRecord('a', printed('x'));
+  const user = events.find(e => e.kind === 'message.user');
+  assert.deepEqual([user.text, user.clientId], ['! ls', undefined]);
+  assert.equal(events.find(e => e.kind === 'message.output').clientId, undefined);
+});
+
+test('a line run with ! that Claude won\'t answer leaves the session idle, and is over once it has printed', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', {});
+  const s = store.get('a');
+  const typed = Date.now();
+  store.handleTranscriptRecord('a', { type: 'user', isMeta: true, uuid: 'c', message: { content: CAVEAT_TEXT } });
+  store.handleTranscriptRecord('a', shellLine('ls nothere', { uuid: 'i', after: 'c', at: new Date(typed).toISOString() }));
+  store.handleTranscriptRecord('a', printed('', 'ls: nothere: No such file or directory', new Date(typed).toISOString()));
+  const output = events.find(e => e.kind === 'message.output');
+  assert.deepEqual([output.stderr, output.replies], ['ls: nothere: No such file or directory', false]);
+  assert.equal(s.status, 'idle');
+  assert.ok(!events.some(e => e.kind === 'session.status' && e.status === 'running'));
+  assert.deepEqual(store.openTurn(s, typed + 1000).map(e => e.kind), ['message.user', 'message.output']);
+  assert.deepEqual(store.openTurn(s, typed + 3000), []);
+});
+
+test('only the caveat just before a line says Claude won\'t answer it', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', {});
+  store.handleTranscriptRecord('a', { type: 'user', isMeta: true, uuid: 'c', message: { content: CAVEAT_TEXT } });
+  store.handleTranscriptRecord('a', shellLine('pwd', { uuid: 'i', after: 'other' }));
+  store.handleTranscriptRecord('a', printed('/w'));
+  assert.equal(events.find(e => e.kind === 'message.output').replies, true);
+  assert.equal(store.get('a').status, 'running');
+});

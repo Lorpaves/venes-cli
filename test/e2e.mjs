@@ -1157,6 +1157,66 @@ T('an_at_offers_the_files_of_the_sessions_folder', {}, async r => {
   }
 });
 
+// What follows an @ that's a path lists the folder it points into, written the way it was typed.
+T('an_at_path_lists_the_folder_it_points_into', {}, async r => {
+  await r.kind('session.started', 8000);
+  const { id } = await r.session();
+  const folder = path.join(WS, 'mention-dir');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'inner.txt'), 'here\n');
+  const mentions = async query => (await r.client.request('mentions', { sessionId: id, query })).items;
+  try {
+    assert.deepEqual(await mentions('./mention-d'), [{ path: 'mention-dir/', kind: 'dir' }]);
+    assert.deepEqual(await mentions('@./mention-dir/'), [{ path: 'mention-dir/inner.txt', kind: 'file' }]);
+    const here = path.basename(WS);
+    assert.deepEqual(await mentions(`../${here}/mention-d`), [{ path: `../${here}/mention-dir/`, kind: 'dir' }]);
+    assert.deepEqual((await mentions('inner')).map(item => item.path), ['mention-dir/inner.txt']);
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+// A line for the shell sent from here runs in the terminal, echoes with its send, and prints; Claude
+// then answers it, unless it's been told not to.
+const runsAShellLine = async r => {
+  await r.kind('session.started', 8000);
+  const { id } = await r.session();
+  const text = '!printf "a<b & c>d\\n"; echo VENES_SHELL_$((40+2)) >&2';
+  await r.client.request('send', { sessionId: id, text, clientId: 'shell-1' });
+  const user = await r.wait(e => e.kind === 'message.user' && e.shell, 30000, 'message.user for the line');
+  assert.deepEqual([user.text, user.clientId], [text, 'shell-1']);
+  const output = await r.wait(e => e.kind === 'message.output', 30000, 'message.output');
+  assert.match(`${output.stdout}${output.stderr}`, /a<b & c>d\n[\s\S]*VENES_SHELL_42/);
+  assert.equal(output.clientId, 'shell-1');
+  return { id, user, output };
+};
+
+T('a_line_for_the_shell_prints_and_claude_answers_it', {}, async r => {
+  const { id, output } = await runsAShellLine(r);
+  assert.equal(output.replies, true);
+  await r.turnEnd(60000);
+  await delay(2500);
+  const { items, turn } = await r.client.request('join', { sessionId: id });
+  assert.deepEqual(turn, []);
+  const at = items.findIndex(item => item.role === 'user' && item.shell);
+  assert.ok(at >= 0, JSON.stringify(items));
+  assert.equal(items[at + 1].role, 'output');
+  assert.match(`${items[at + 1].stdout}${items[at + 1].stderr}`, /VENES_SHELL_42/);
+  assert.equal(items[at + 1].replies, true);
+  assert.ok(items.slice(at + 2).some(item => item.role === 'assistant'), 'Claude answered it');
+});
+
+T('a_line_for_the_shell_that_claude_wont_answer_is_over_once_it_has_printed', { settings: { respondToBashCommands: false } }, async r => {
+  const { id, output } = await runsAShellLine(r);
+  assert.equal(output.replies, false);
+  await delay(4000);
+  assert.ok(!r.events.some(e => e.kind === 'turn.end' || (e.kind === 'session.status' && e.status === 'running')), 'no turn');
+  assert.equal((await r.session()).status, 'idle');
+  const { items, turn } = await r.client.request('join', { sessionId: id });
+  assert.deepEqual(turn, [], 'nothing left open');
+  assert.deepEqual(items.slice(-2).map(item => [item.role, item.replies]), [['user', undefined], ['output', false]]);
+});
+
 // An app that shows pages says so, and has one a command opens left open to see and work: its keys
 // reach it, and closing it lets the next message through.
 T('a_page_opened_from_an_app_that_shows_pages_stays_for_it', {}, async r => {
@@ -1359,6 +1419,11 @@ if (hasRex) {
 
   T('in_rex_an_attached_picture_and_file_reach_claude', { rex: true }, sendsAPictureAndAFile);
   T('in_rex_the_status_line_is_kept_for_the_phone', { rex: true, settings: STAND_IN }, readsTheStatus);
+  T('in_rex_a_line_for_the_shell_prints', { rex: true }, async r => {
+    const { output } = await runsAShellLine(r);
+    assert.equal(output.replies, true);
+    await r.turnEnd(60000);
+  });
 
   // Rex can have Claude Code name the session it's in after its task, and Claude Code resumed in
   // the helper's session does that too. The helper keeps it by id, and names it back.

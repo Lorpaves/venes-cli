@@ -28,6 +28,13 @@ const COMPACT_LIMIT_MS = 30 * 60_000;
 // Stop can fire before the turn's last words reach the transcript.
 const TRANSCRIPT_SETTLE_MS = 2000;
 const ENDS_TURN = new Set(['turn.end', 'turn.interrupted', 'turn.error', 'session.ended']);
+// A line run with `!` that Claude won't answer is over once it has printed.
+const endsTurn = e => ENDS_TURN.has(e.kind) || (e.kind === 'message.output' && e.replies === false);
+// When a transcript record was written, for an event that comes from one.
+const writtenAt = timestamp => {
+  const at = Date.parse(timestamp);
+  return Number.isFinite(at) ? { at } : {};
+};
 
 
 // Only Rex and tmux can be typed into, and a session started before the plugin was installed sends
@@ -254,7 +261,7 @@ export class SessionStore extends EventEmitter {
   // now, and any that ended so recently its last words may not have reached the file.
   openTurn(s, now = Date.now()) {
     const events = this.#log.filter(e => e.sessionId === s.id);
-    const settled = events.findLastIndex(e => ENDS_TURN.has(e.kind) && now - e.at > TRANSCRIPT_SETTLE_MS);
+    const settled = events.findLastIndex(e => endsTurn(e) && now - e.at > TRANSCRIPT_SETTLE_MS);
     const start = events.findIndex((e, index) => index > settled && startsTurn(e));
     return start < 0 ? [] : events.slice(start);
   }
@@ -366,6 +373,9 @@ export class SessionStore extends EventEmitter {
       else if (type === 'refusal') this.#emit(s, 'model.refusal', { ...signal, prompt: s.lastPrompt });
       else if (type === 'toolImages') this.#emit(s, 'tool.images', signal);
       else if (type === 'userImages') this.#emit(s, 'message.images', signal);
+      else if (type === 'caveat') s.caveat = signal.id;
+      else if (type === 'shellInput') this.#onShellInput(s, signal);
+      else if (type === 'shellOutput') this.#onShellOutput(s, signal);
       else if (type === 'queueRead') this.#onQueueRead(s, signal.text);
       else if (type === 'queueTakenBack') this.#dropQueued(s, { code: 'taken_back', message: 'Taken back in the terminal.' });
     }
@@ -444,6 +454,24 @@ export class SessionStore extends EventEmitter {
     const { text, files } = this.#splitAttachments(typed, s.id);
     s.lastPrompt = text;
     this.#emit(s, 'message.user', { text, clientId: this.#takeEcho(s, text), ...(files.length ? { attachments: files } : {}) });
+  }
+
+  // A line run with `!`, from here or the terminal. It reaches the transcript once it has run, as the
+  // command and then what it printed. Claude then answers it in a turn, unless a caveat came first.
+  #onShellInput(s, { command, at, after }) {
+    const text = `!${command}`;
+    const replies = !after || after !== s.caveat;
+    const clientId = this.#takeEcho(s, text);
+    s.lastPrompt = text;
+    s.shell = { replies, clientId };
+    this.#emit(s, 'message.user', { text, clientId, shell: true, ...writtenAt(at) });
+    if (replies) this.#setStatus(s, 'running');
+  }
+
+  #onShellOutput(s, { stdout, stderr, at }) {
+    const { replies = true, clientId } = s.shell ?? {};
+    s.shell = undefined;
+    this.#emit(s, 'message.output', { stdout, stderr, replies, ...(clientId && { clientId }), ...writtenAt(at) });
   }
 
   // Claude has a queued message, which `text` may not name. It joins the conversation here, where

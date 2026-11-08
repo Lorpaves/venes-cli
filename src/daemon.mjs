@@ -224,7 +224,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       if (typeof query !== 'string' || query.length > 500) throw new HelperError('bad_query', 'That can\'t be looked for.');
       const cwd = store.find(sessionId)?.cwd ?? (await library.info(sessionId).catch(() => undefined))?.cwd;
       if (!cwd) return { items: [] };
-      const wanted = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 50) : MENTION_LIMIT;
+      const wanted = Number.isInteger(limit) ? Math.max(limit, 1) : MENTION_LIMIT;
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
     },
     capabilities: async msg => {

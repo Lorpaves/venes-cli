@@ -31,6 +31,78 @@ export function unwrapPasted(text) {
   return text.replace(PASTED_BLOCK, (match, id, body, offset) => (offset === 0 ? body : `\n\n${body}`));
 }
 
+// A line typed after `!` runs in the terminal, and Claude Code keeps the command, then what it printed
+// with &, < and > in it written as entities. It's read here as Claude Code reads it to show it. When
+// Claude won't answer it, a caveat comes just before the command.
+const SHELL_INPUT_OPEN = '<bash-input>';
+const SHELL_INPUT_CLOSE = '</bash-input>';
+const STDOUT_OPEN = '<bash-stdout>';
+const STDOUT_CLOSE = '</bash-stdout>';
+const PERSISTED_OPEN = '<persisted-output>';
+const PERSISTED_CLOSE = '</persisted-output>';
+const CAVEAT = /^<local-command-caveat>/;
+const ENTITY = /&(?:amp|lt|gt);/g;
+const ENTITY_TEXT = { '&amp;': '&', '&lt;': '<', '&gt;': '>' };
+
+const unescaped = text => text.replace(ENTITY, entity => ENTITY_TEXT[entity] ?? entity);
+
+// What output sent from elsewhere is wrapped in, taken off.
+function unpasted(text) {
+  return text.replace(/^\n+/, '').startsWith('<pasted_content ') ? text.replace(PASTED_BLOCK, (match, id, body) => body) : text;
+}
+
+// What's inside the first `name` element of `text` that has anything in it.
+function elementText(text, name) {
+  if (!text.trim() || !name.trim()) return undefined;
+  const open = new RegExp(`<${name}(?=[\\s>])`, 'gi');
+  const close = new RegExp(`<\\/${name}>`, 'gi');
+  for (let from = 0; ;) {
+    open.lastIndex = from;
+    const start = open.exec(text);
+    close.lastIndex = from;
+    const firstClose = close.exec(text);
+    if (!start || !firstClose) return undefined;
+    const end = text.indexOf('>', start.index + start[0].length);
+    if (end === -1) return undefined;
+    close.lastIndex = end + 1;
+    const closing = close.exec(text);
+    if (!closing) return undefined;
+    const inside = text.slice(end + 1, closing.index);
+    if (inside && firstClose.index + firstClose[0].length > start.index) return inside;
+    from = closing.index + closing[0].length;
+  }
+}
+
+// The command of a line run with `!`, or undefined for any other text.
+export function shellCommand(text) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(SHELL_INPUT_OPEN) || !trimmed.endsWith(SHELL_INPUT_CLOSE)) return undefined;
+  if (trimmed.length < SHELL_INPUT_OPEN.length + SHELL_INPUT_CLOSE.length) return undefined;
+  return trimmed.slice(SHELL_INPUT_OPEN.length, trimmed.length - SHELL_INPUT_CLOSE.length) || undefined;
+}
+
+// What a line run with `!` printed, as `stdout` and `stderr`, or undefined for any other text. Output
+// too long to keep whole is a note about where it went, which is left as it is.
+export function shellOutput(text) {
+  if (!text.startsWith('<bash-stdout') && !text.startsWith('<bash-stderr')) return undefined;
+  const close = text.lastIndexOf(STDOUT_CLOSE);
+  const hasStdout = text.startsWith(STDOUT_OPEN) && close !== -1;
+  const stdout = unpasted(hasStdout ? text.slice(STDOUT_OPEN.length, close) : '');
+  const rest = hasStdout ? text.slice(close + STDOUT_CLOSE.length) : text;
+  return {
+    stdout: stdout.startsWith(PERSISTED_OPEN) ? withoutPersistedTags(stdout) : unescaped(stdout),
+    stderr: unescaped(unpasted(elementText(rest, 'bash-stderr') ?? '')),
+  };
+}
+
+function withoutPersistedTags(text) {
+  const inside = text.slice(PERSISTED_OPEN.length);
+  const end = inside.lastIndexOf(PERSISTED_CLOSE);
+  return end === -1 ? inside : inside.slice(0, end) + inside.slice(end + PERSISTED_CLOSE.length);
+}
+
+const isCaveat = record => blocksOf(record).some(block => block?.type === 'text' && CAVEAT.test(block.text ?? ''));
+
 export const normalized = text => text.trim().split(/\s+/).join(' ');
 
 function blocksOf(record) {
@@ -88,10 +160,19 @@ function userSignals(record) {
     } else if (block?.type === 'text' && INTERRUPTED.test(block.text ?? '')) {
       signals.push({ type: 'interrupted' });
     } else if (block?.type === 'text') {
-      signals.push(...localOutputSignals(block.text));
+      signals.push(...shellSignals(record, block.text ?? ''), ...localOutputSignals(block.text));
     }
   }
   return signals;
+}
+
+// A line run with `!` says nothing to hooks, so the transcript is all there is of it.
+function shellSignals(record, text) {
+  const command = shellCommand(text);
+  if (command !== undefined) return [{ type: 'shellInput', command, at: record.timestamp, after: record.parentUuid }];
+  const output = shellOutput(text);
+  if (output) return [{ type: 'shellOutput', ...output, at: record.timestamp }];
+  return CAVEAT.test(text) ? [{ type: 'caveat', id: record.uuid }] : [];
 }
 
 function localOutputSignals(text) {
@@ -283,6 +364,9 @@ function conversationItems(file) {
   const items = [];
   const tools = new Map();
   let model;
+  // The caveat before a line run with `!` that Claude won't answer.
+  let caveat;
+  let shellReplies = true;
   // A tool's images go with its call, and the rest with what the record said, from `first` on.
   const addImages = (record, first) => {
     for (const { toolUseId, ...image } of imageRefs(record)) {
@@ -291,14 +375,23 @@ function conversationItems(file) {
     }
   };
   // What Venes typed ahead of a message for its attachments isn't part of its text.
-  const addUserText = (typed, at) => {
-    if (INTERRUPTED.test(typed)) items.push({ role: 'system', at, kind: 'interrupted' });
+  const addUserText = (typed, at, record) => {
+    const command = shellCommand(typed);
+    const output = command === undefined ? shellOutput(typed) : undefined;
+    if (command !== undefined) {
+      shellReplies = !record?.parentUuid || record.parentUuid !== caveat;
+      items.push({ role: 'user', at, text: `!${command}`, shell: true });
+    } else if (output) {
+      items.push({ role: 'output', at, ...output, replies: shellReplies });
+      shellReplies = true;
+    } else if (INTERRUPTED.test(typed)) items.push({ role: 'system', at, kind: 'interrupted' });
     else if (!HIDDEN_USER_TEXT.test(typed)) {
       const { text, files } = splitAttachments(unwrapPasted(typed), { sessionId });
       items.push({ role: 'user', at, text, ...(files.length ? { attachments: files } : {}) });
     }
   };
   for (const record of readRecords(file)) {
+    if (record.isMeta && !record.isSidechain && isCaveat(record)) caveat = record.uuid;
     if (record.isSidechain || record.isMeta || record.isCompactSummary) continue;
     model = modelOf(record) ?? model;
     const at = record.timestamp;
@@ -326,7 +419,7 @@ function conversationItems(file) {
           items.push({ role: 'thinking', at, text: block.thinking ?? '', durationMs: record.thinkingDurationMs });
         } else if (block.type === 'text') {
           if (record.type === 'assistant') items.push({ role: 'assistant', at, text: block.text ?? '' });
-          else addUserText(block.text ?? '', at);
+          else addUserText(block.text ?? '', at, record);
         }
       }
       addImages(record, first);

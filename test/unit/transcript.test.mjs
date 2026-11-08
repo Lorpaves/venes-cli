@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { TranscriptTail, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, signalsFrom, unwrapPasted } from '../../src/transcript.mjs';
+import {
+  TranscriptTail, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand, shellOutput, signalsFrom, unwrapPasted,
+} from '../../src/transcript.mjs';
 
 const line = record => `${JSON.stringify(record)}\n`;
 
@@ -628,5 +630,73 @@ test('history with no replies has no model to name', () => {
   const { file, cleanup } = tempFile(userText('hello'));
   try {
     assert.equal(readHistory(file).model, undefined);
+  } finally { cleanup(); }
+});
+
+// What Claude Code writes for a line run with `!`, as it wrote it in a real session.
+const CAVEAT_TEXT = '<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes '
+  + 'straight to the user. It\'s recorded here as context for later messages.</local-command-caveat>';
+const caveatRecord = uuid => ({ type: 'user', isMeta: true, uuid, message: { role: 'user', content: CAVEAT_TEXT } });
+const shellRecord = (command, { uuid, after, at } = {}) => ({
+  type: 'user', uuid, parentUuid: after, timestamp: at, message: { role: 'user', content: `<bash-input>${command}</bash-input>` },
+});
+const printedRecord = (content, at) => ({ type: 'user', timestamp: at, message: { role: 'user', content } });
+
+test('a line run with ! is read as Claude Code shows it: the command as typed, then what it printed', () => {
+  assert.equal(shellCommand('<bash-input>ls -la</bash-input>'), 'ls -la');
+  assert.equal(shellCommand(' <bash-input> ~/x update</bash-input>\n'), ' ~/x update');
+  assert.equal(shellCommand('<bash-input>echo "a<b"\nls</bash-input>'), 'echo "a<b"\nls');
+  assert.equal(shellCommand('<bash-input></bash-input>'), undefined);
+  assert.equal(shellCommand('ls'), undefined);
+  assert.deepEqual(shellOutput('<bash-stdout>a&lt;b &amp; c&gt;d &amp;lt; &quot;\noops</bash-stdout><bash-stderr></bash-stderr>'),
+    { stdout: 'a<b & c>d &lt; &quot;\noops', stderr: '' });
+  assert.deepEqual(shellOutput('<bash-stdout></bash-stdout><bash-stderr>one\n\ntwo\nls: x: No such file or directory\n</bash-stderr>'),
+    { stdout: '', stderr: 'one\n\ntwo\nls: x: No such file or directory\n' });
+  assert.deepEqual(shellOutput('<bash-stderr>Command failed: spawn /bin/zsh ENOENT</bash-stderr>'), { stdout: '', stderr: 'Command failed: spawn /bin/zsh ENOENT' });
+  assert.deepEqual(shellOutput('<bash-stdout><persisted-output>Output too large &amp; saved</persisted-output></bash-stdout><bash-stderr></bash-stderr>'),
+    { stdout: 'Output too large &amp; saved', stderr: '' });
+  assert.equal(shellOutput('hello'), undefined);
+  assert.equal(shellOutput('<local-command-stdout>x</local-command-stdout>'), undefined);
+});
+
+test('a line run with ! comes as signals, saying which record came before the command', () => {
+  assert.deepEqual(signalsFrom(caveatRecord('c1')), [{ type: 'caveat', id: 'c1' }]);
+  assert.deepEqual(signalsFrom(shellRecord('pwd', { uuid: 'i1', after: 'c1', at: '2026-11-08T09:30:41.259Z' })),
+    [{ type: 'shellInput', command: 'pwd', at: '2026-11-08T09:30:41.259Z', after: 'c1' }]);
+  assert.deepEqual(signalsFrom(printedRecord('<bash-stdout>/w</bash-stdout><bash-stderr></bash-stderr>', '2026-11-08T09:30:41.291Z')),
+    [{ type: 'shellOutput', stdout: '/w', stderr: '', at: '2026-11-08T09:30:41.291Z' }]);
+});
+
+test('in history a line run with ! is the line as typed and what it printed, with whether Claude answered it', () => {
+  const { file, cleanup } = tempFile([
+    line(shellRecord('pwd', { uuid: 'i1', after: 'p0' })),
+    line(printedRecord('<bash-stdout>/w</bash-stdout><bash-stderr></bash-stderr>')),
+    assistantText('It is /w.'), turnEnd,
+    line(caveatRecord('c2')),
+    line(shellRecord('ls nothere', { uuid: 'i2', after: 'c2' })),
+    line(printedRecord('<bash-stdout></bash-stdout><bash-stderr>ls: nothere: No such file or directory\n</bash-stderr>')),
+    userText('next'),
+  ].join(''));
+  try {
+    const { items } = readHistory(file);
+    assert.deepEqual(items.map(({ at, durationMs, ...item }) => item), [
+      { role: 'user', text: '!pwd', shell: true },
+      { role: 'output', stdout: '/w', stderr: '', replies: true },
+      { role: 'assistant', text: 'It is /w.' },
+      { role: 'turn_end' },
+      { role: 'user', text: '!ls nothere', shell: true },
+      { role: 'output', stdout: '', stderr: 'ls: nothere: No such file or directory\n', replies: false },
+      { role: 'user', text: 'next' },
+    ]);
+  } finally { cleanup(); }
+});
+
+test('a page that starts at what a line printed reaches back to the line', () => {
+  const { file, cleanup } = tempFile([
+    userText('old'), assistantText('old reply'), turnEnd,
+    line(shellRecord('pwd')), line(printedRecord('<bash-stdout>/w</bash-stdout><bash-stderr></bash-stderr>')), assistantText('It is /w.'), turnEnd,
+  ].join(''));
+  try {
+    assert.deepEqual(shown(readHistory(file, { limit: 3 })), ['!pwd', 'output', 'It is /w.', 'turn_end']);
   } finally { cleanup(); }
 });

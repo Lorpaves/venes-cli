@@ -224,13 +224,13 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
     // Where a new session can start: where sessions ran lately, with how many go on in each, or the
     // folders in one. Each says whether Claude Code trusts it already.
-    folders: async ({ path: folder }) => {
+    folders: async ({ path: folder, hidden }) => {
       const config = readClaudeConfig();
       const home = homeFolder();
       const named = where => ({ path: where, name: path.basename(where) || where, trusted: isTrusted(where, { config, home }) });
       if (folder !== undefined && folder !== null) {
         const checked = checkedFolder(folder);
-        return { ...named(checked), ...subfolders(checked) };
+        return { ...named(checked), ...subfolders(checked, undefined, { hidden: hidden === true }) };
       }
       const [stored, running] = await Promise.all([library.recent(RECENT_SESSIONS).catch(() => []), library.running().catch(() => [])]);
       const counts = runningIn(running, store.liveSessions());

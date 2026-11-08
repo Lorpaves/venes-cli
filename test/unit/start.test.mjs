@@ -116,6 +116,8 @@ test('a folder lists the folders in it, hidden ones left out, by name as Finder 
   assert.equal(entries[0].path, path.join(where, 'A'));
   assert.equal(truncated, false);
   assert.deepEqual(subfolders(where, 2), { entries: entries.slice(0, 2), truncated: true });
+  assert.deepEqual(subfolders(where, undefined, { hidden: true }).entries.map(entry => entry.name), ['.git', 'A', 'a9', 'a10', 'b', 'link', 'node_modules'],
+    'hidden ones too when asked, as a path typed with a dot wants them');
 });
 
 test('recent folders are newest first, once each, and only those still there', t => {

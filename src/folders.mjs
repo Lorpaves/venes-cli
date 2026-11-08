@@ -28,8 +28,9 @@ export function checkedFolder(folder) {
   return resolved;
 }
 
-// The folders in one, as Claude Code's @ lists a folder: no hidden ones, by name as Finder sorts them.
-export function subfolders(folder, limit = FOLDER_ENTRIES) {
+// The folders in one, as Claude Code's @ lists a folder: no hidden ones unless asked for, by name as
+// Finder sorts them.
+export function subfolders(folder, limit = FOLDER_ENTRIES, { hidden = false } = {}) {
   let entries;
   try {
     entries = fs.readdirSync(folder, { withFileTypes: true });
@@ -37,7 +38,7 @@ export function subfolders(folder, limit = FOLDER_ENTRIES) {
     throw new HelperError('unreadable_folder', `${folder} can't be read.`);
   }
   const names = entries
-    .filter(entry => !entry.name.startsWith('.') && (entry.isDirectory() || (entry.isSymbolicLink() && isFolder(path.join(folder, entry.name)))))
+    .filter(entry => (hidden || !entry.name.startsWith('.')) && (entry.isDirectory() || (entry.isSymbolicLink() && isFolder(path.join(folder, entry.name)))))
     .map(entry => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
   return { entries: names.slice(0, limit).map(name => ({ name, path: path.join(folder, name) })), truncated: names.length > limit };

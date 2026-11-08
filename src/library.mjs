@@ -135,6 +135,12 @@ export class Library {
     return libraryPage(sessions, running, { limit, offset });
   }
 
+  // The newest stored sessions, for the folders they ran in.
+  async recent(limit) {
+    const { sessions } = await this.#read({ op: 'list', sdk: await this.prepare(), limit, offset: 0 });
+    return sessions;
+  }
+
   async info(sessionId) {
     const { session } = await this.#read({ op: 'info', sdk: await this.prepare(), sessionId });
     return session;

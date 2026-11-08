@@ -125,6 +125,8 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `mentions` | `sessionId`, `query`, `limit` | `items`: what an `@` followed by `query` can name for the session, as Claude Code's own `@` offers it: each with its `path` and `kind`, `file` or `dir`, a folder's path ending in `/`. A `query` that starts like a path (`./`, `../`, `~/`, `/`, or just `~`, `.` or `..`) lists the folder it points into, folders first, hidden entries left out, written the way it was typed, as in `../helper/`. Anything else is looked for among the project's files and the folders above them, best match first, scored as Claude Code scores them: in a git repository every file git has, from the session's folder, then new ones unless ignored; elsewhere what ripgrep finds. With nothing typed, or just `.` or `./`, it's what's in the session's folder. A leading `@` in `query` is ignored. As many as Claude Code shows, 15, or 10 of a folder, and fewer if `limit` asks |
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
+| `folders` | `path` (optional) | Where a new session can start. Without `path`: `home`, and `recent`, the folders sessions ran in lately. With it: that folder's `path`, `name` and `trusted`, its `entries`, and `truncated`. See [Starting a session](#starting-a-session). |
+| `start` | `cwd`, `trust` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -213,6 +215,14 @@ A client on the same tailnet can reach the helper with no SSH. It runs `attach -
 `delete` removes a session's transcript and its subagents' through the Agent SDK's `deleteSession()`, so it's gone from `claude --resume` too. It can't be undone. A session that's running, in tmux or not, gets SIGTERM first and has to be gone from `claude agents` within five seconds, or `delete` fails with `session_running` and nothing is deleted. Its pane goes back to its shell, and a `venes-<id>` window or tmux session closes. Every client hears `session.deleted`.
 
 Files the session changed stay as they are, and so does anything else Claude Code keeps under the session's id, such as file history.
+
+### Starting a session
+
+`folders` lists, newest first, the folders where the last 200 stored sessions ran, up to 20 of them, leaving out any that have gone. Each has its `path`, `name`, `running` (how many sessions are going in it now) and `trusted`. With `path`, it lists the folders in that one, as Claude Code's `@` lists a folder: hidden ones left out, by name as Finder sorts them, up to 1,000 with `truncated` past that. Each entry has its `name` and `path`.
+
+`start` opens Claude Code in a new terminal session of its own in `cwd`, in Rex if it's on this Mac and otherwise in tmux, as a resumed session gets. It replies once the session's first hook arrives, and the session is in `sessions` by then. If it doesn't start within 30 seconds, `start` fails, and the terminal stays open when a dialog is waiting in it.
+
+Claude Code asks before it works in a folder it doesn't trust yet, and runs no hooks, the helper's included, until that's answered. `trusted` reads its own rules from `~/.claude.json`. A folder is trusted when the folder, or one above it, has been accepted. Inside a git repository the search stops at the repository's top folder, and outside one it goes up to the top of the disk. The home folder is asked about every time. `start` for a folder that isn't trusted fails with `needs_trust` and starts nothing. With `trust: true`, the reader's word in the app, it answers Claude Code's question with "Yes, I trust this folder", as the keys at the Mac would. If Claude Code asks about a folder that looked trusted, `start` picks "No, exit", so nothing is left running, and fails with `needs_trust`.
 
 ### Sending during a turn
 
@@ -336,12 +346,16 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 
 | `code` | Meaning |
 |---|---|
-| `request_pending`, `dialog_open` | `send` or `configure` was refused because Enter would have answered an open prompt |
+| `request_pending`, `dialog_open` | `send` or `configure` was refused because Enter would have answered an open prompt, or `start` found a dialog waiting in the new terminal for someone at the Mac |
 | `request_closed` | That request was already answered |
 | `no_pane` | The session isn't in Rex or tmux, or started before the plugin was installed, so it can't be typed into until it's restarted |
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
-| `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed |
+| `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
+| `needs_trust` | Claude Code asks first whether to trust the folder. Ask the reader, and send `start` again with `trust: true`. |
+| `start_failed` | Claude Code quit, or took too long, starting a new session |
+| `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |
+| `unreadable_folder` | `folders` couldn't read what's in that folder |
 | `no_claude` | Claude Code isn't on the PATH, so `capabilities` has nothing to ask |
 | `session_running` | The session wouldn't stop, so `delete` left it alone |
 | `background_session` | `delete` doesn't handle background sessions. Use `claude rm`, which has its own rules about their worktrees. |

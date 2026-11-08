@@ -1004,6 +1004,34 @@ T('a_stored_session_can_be_listed_read_and_continued', { mode: 'bypassPermission
   client.close();
 });
 
+T('a_new_session_starts_in_a_folder_from_the_list_and_can_be_typed_into', {}, async r => {
+  const home = await r.client.request('folders');
+  assert.equal(home.home, os.homedir());
+  for (const folder of home.recent) assert.deepEqual(Object.keys(folder).sort(), ['name', 'path', 'running', 'trusted']);
+  const workspace = fs.realpathSync(WS);
+  const level = await r.client.request('folders', { path: path.dirname(workspace) });
+  const listed = level.entries.find(entry => entry.path === workspace);
+  assert.equal(listed?.name, path.basename(workspace), 'a folder lists the folders in it');
+  assert.equal(level.entries.some(entry => entry.name.startsWith('.')), false);
+  await assert.rejects(r.client.request('start', { cwd: path.join(workspace, 'e2e-none') }), { code: 'no_folder' });
+
+  const { sessionId } = await r.client.request('start', { cwd: workspace });
+  try {
+    const { sessions } = await r.client.request('sessions');
+    const started = sessions.find(s => s.id === sessionId);
+    assert.ok(started?.pane, 'it can be typed into');
+    assert.equal(fs.realpathSync(started.cwd), workspace);
+    await r.client.request('send', { sessionId, text: 'Reply with only the word FRESH.', clientId: 'fresh' });
+    const said = await r.wait(e => e.kind === 'message.user' && e.sessionId === sessionId, 10000, 'message.user');
+    assert.equal(said.clientId, 'fresh');
+    await r.wait(e => e.kind === 'turn.end' && e.sessionId === sessionId && /FRESH/.test(e.lastMessage), 30000, 'turn.end FRESH');
+    const again = await r.client.request('folders');
+    assert.ok(again.recent.find(folder => folder.path === workspace)?.running >= 2, 'its folder is a recent one, with both sessions going');
+  } finally {
+    for (const name of tmux('ls', '-F', '#{session_name}').split('\n').filter(name => name.startsWith('venes-new-'))) tmux('kill-session', '-t', name);
+  }
+});
+
 // /model and /effort save themselves as the defaults for new sessions, in the real settings
 // of the Claude this suite borrows. Those three keys go back afterwards, and nothing else moves.
 const USER_SETTINGS = path.join(process.env.HOME, '.claude/settings.json');

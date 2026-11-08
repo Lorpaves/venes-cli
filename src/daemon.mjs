@@ -14,6 +14,9 @@ import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession } from './remove.mjs';
 import { resumeSession } from './resume.mjs';
+import { startNewSession } from './start.mjs';
+import { RECENT_SESSIONS, checkedFolder, homeFolder, recentFolders, runningIn, subfolders } from './folders.mjs';
+import { isTrusted, readClaudeConfig } from './trust.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
@@ -219,6 +222,23 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { gap: gap || !sameBoot };
     },
     library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
+    // Where a new session can start: where sessions ran lately, with how many go on in each, or the
+    // folders in one. Each says whether Claude Code trusts it already.
+    folders: async ({ path: folder }) => {
+      const config = readClaudeConfig();
+      const home = homeFolder();
+      const named = where => ({ path: where, name: path.basename(where) || where, trusted: isTrusted(where, { config, home }) });
+      if (folder !== undefined && folder !== null) {
+        const checked = checkedFolder(folder);
+        return { ...named(checked), ...subfolders(checked) };
+      }
+      const [stored, running] = await Promise.all([library.recent(RECENT_SESSIONS).catch(() => []), library.running().catch(() => [])]);
+      const going = new Map(running.filter(session => session.cwd).map(session => [session.id, session]));
+      for (const session of store.liveSessions()) if (session.cwd) going.set(session.id, session);
+      const counts = runningIn(going);
+      return { home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })) };
+    },
+    start: msg => startNewSession({ store, terminal: resumeTerminal() }, msg),
     // What an @ in a message can name, from the session's folder: files, and folders ending in /.
     mentions: async ({ sessionId, query = '', limit = MENTION_LIMIT }) => {
       if (typeof query !== 'string' || query.length > 500) throw new HelperError('bad_query', 'That can\'t be looked for.');

@@ -151,14 +151,15 @@ export function findUpload(root, sessionId, uploadId) {
 }
 
 // A message has the upload, so its file is the person's from now on, and taking it back out of the
-// composer no longer takes it away.
-export function markSent(root, sessionId, uploadId) {
+// composer no longer takes it away. A message taken back before it went gives it back to the composer,
+// with `sent` false.
+export function markSent(root, sessionId, uploadId, sent = true) {
   if (typeof uploadId !== 'string' || !UPLOAD_ID.test(uploadId)) return;
   const file = path.join(sessionFolder(root, sessionId), uploadId, ABOUT);
   try {
-    const about = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (about.sent) return;
-    fs.writeFileSync(file, JSON.stringify({ ...about, sent: true }), { mode: 0o600 });
+    const { sent: was, ...about } = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Boolean(was) === sent) return;
+    fs.writeFileSync(file, JSON.stringify(sent ? { ...about, sent } : about), { mode: 0o600 });
   } catch { /* gone already */ }
 }
 

@@ -252,10 +252,13 @@ export class SessionStore extends EventEmitter {
   }
 
   cancelHeld(s, clientId) {
+    return this.takeHeld(s, clientId) !== undefined;
+  }
+
+  // The held message taken back, with what it had attached, or undefined when there's none by that id.
+  takeHeld(s, clientId) {
     const position = s.held.findIndex(message => message.clientId === clientId);
-    if (position < 0) return false;
-    s.held.splice(position, 1);
-    return true;
+    return position < 0 ? undefined : s.held.splice(position, 1)[0];
   }
 
   failSend(s, { clientId }, { code = 'internal', message }) {

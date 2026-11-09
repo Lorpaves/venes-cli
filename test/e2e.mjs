@@ -701,9 +701,16 @@ T('send_during_a_turn', { mode: 'bypassPermissions' }, async r => {
 
   const later = { sessionId: id, lane: 'later' };
   assert.equal((await r.client.request('send', { ...later, text: 'Reply with only the word LATER.', clientId: 'later' })).queued, true);
-  assert.equal((await r.client.request('send', { ...later, text: 'Reply with only the word DROPPED.', clientId: 'drop' })).queued, true);
+  const dropped = await r.client.request('upload', { sessionId: id, name: 'dropped.txt', mediaType: 'text/plain', data: base64('Never read.\n') });
+  const droppedAt = findUpload(paths.uploads, id, dropped.uploadId).path;
+  const drop = { ...later, text: 'Reply with only the word DROPPED.', clientId: 'drop', attachments: [dropped.uploadId] };
+  assert.equal((await r.client.request('send', drop)).queued, true);
+  assert.equal((await r.client.request('discard', { sessionId: id, uploadId: dropped.uploadId })).discarded, false, 'a message has it');
   assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'drop' })).cancelled, true);
   assert.equal((await r.client.request('cancel', { sessionId: id, clientId: 'drop' })).cancelled, false);
+  // Taken back, its file is the composer's again, to take out.
+  assert.equal((await r.client.request('discard', { sessionId: id, uploadId: dropped.uploadId })).discarded, true);
+  assert.equal(fs.existsSync(droppedAt), false, 'taken out, it goes from Downloads');
 
   await r.kind('tool.end', 20000);
   await echoed('next');

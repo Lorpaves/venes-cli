@@ -445,6 +445,9 @@ test('a held message can be cancelled once, and only by its id', () => {
   assert.equal(store.cancelHeld(s, 'nope'), false);
   assert.equal(store.cancelHeld(s, 'c1'), true);
   assert.equal(store.cancelHeld(s, 'c1'), false);
+  store.hold(s, { clientId: 'c3', text: 'three', attachments: [{ uploadId: 'u' }] });
+  assert.deepEqual(store.takeHeld(s, 'c3'), { clientId: 'c3', text: 'three', attachments: [{ uploadId: 'u' }] }, 'it comes back with its files');
+  assert.equal(store.takeHeld(s, 'c3'), undefined);
   hook('Stop', {});
   assert.equal(store.nextHeld(s).clientId, 'c2');
   assert.equal(store.nextHeld(s), undefined);

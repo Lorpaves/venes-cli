@@ -164,6 +164,17 @@ test('an upload a message has stays, file and all, and it shows as it did', t =>
   assert.equal(fs.existsSync(path.join(root, SESSION_ID, 'f'.repeat(32))), false, 'one that isn\'t there stays not there');
 });
 
+test('an upload whose message was taken back before it went is the composer\'s again', t => {
+  const { root, downloads } = tempFolders(t);
+  const back = saveUpload(root, { sessionId: SESSION_ID, name: 'back.txt', mediaType: 'text/plain', data: base64('x') }, downloads);
+  markSent(root, SESSION_ID, back.uploadId);
+  markSent(root, SESSION_ID, back.uploadId, false);
+  markSent(root, SESSION_ID, back.uploadId, false);
+  assert.equal('sent' in JSON.parse(fs.readFileSync(path.join(root, SESSION_ID, back.uploadId, 'upload.json'), 'utf8')), false);
+  assert.deepEqual(discardUpload(root, SESSION_ID, back.uploadId), { discarded: true });
+  assert.deepEqual(fs.readdirSync(downloads), []);
+});
+
 test('a file changed, touched or moved since it came is the person\'s, so only what is known of it goes', t => {
   const { root, downloads } = tempFolders(t);
   const save = name => saveUpload(root, { sessionId: SESSION_ID, name, mediaType: 'text/plain', data: base64('x') }, downloads);

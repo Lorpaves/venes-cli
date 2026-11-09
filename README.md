@@ -278,7 +278,7 @@ A message can come with pictures, videos and files: `upload` each one, then `sen
 
 Uploads go in the Mac's Downloads folder, as anything else it's sent does, numbered the way Finder numbers a copy when the name is taken. They stay there when their session is deleted: what the helper forgets is which session they were for, then and after 30 days. A Mac that won't let the helper write in Downloads gets them in `~/.venes/uploads` instead.
 
-A file taken back out of the composer before its message went is no one's yet, so `discard` it: its file goes from Downloads too, and `discarded` says so. A file a message has, or one moved or changed since it came, stays, and so does one the helper got before 0.3.44, which it can't tell from one changed since.
+A file taken back out of the composer before its message went is no one's yet, so `discard` it: its file goes from Downloads too, and `discarded` says so. A file a message has, or one moved or changed since it came, stays, and so does one the helper got before 0.3.44, which it can't tell from one changed since. A message taken back with `cancel` before it went gives its files back to the composer, to take out the same way.
 
 | `kind` | When | How it reaches Claude |
 |---|---|---|

@@ -380,7 +380,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       await typing(session.id, () => closePage(session));
       return {};
     },
-    cancel: msg => ({ cancelled: store.cancelHeld(store.get(msg.sessionId), msg.clientId) }),
+    cancel: msg => {
+      const taken = store.takeHeld(store.get(msg.sessionId), msg.clientId);
+      // Its files go back in the composer, to go with another message or be taken out.
+      for (const { uploadId } of taken?.attachments ?? []) markSent(uploads, msg.sessionId, uploadId, false);
+      return { cancelled: taken !== undefined };
+    },
     taskOutput: msg => {
       const task = store.task(msg.sessionId, msg.taskId);
       if (task.result !== undefined) return { output: task.result, truncated: false };

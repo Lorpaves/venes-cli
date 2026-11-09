@@ -14,7 +14,7 @@ Requires Claude Code, Node.js 22 or later, and either [Rex](https://www.superlog
 brew install lorpaves/venes/venes
 ```
 
-That installs the plugin into Claude Code, starts its background helper, and puts `venes` on your PATH. Sessions that were open before need a restart or `/reload-plugins` to be seen. The plugin then keeps itself up to date through Claude Code, so `brew upgrade` leaves it alone.
+That installs the plugin into Claude Code, starts its background helper, and puts `venes` on your PATH. Sessions that were open before need a restart or `/reload-plugins` to be seen. The plugin then keeps itself up to date through Claude Code, and `brew upgrade` updates it whenever there's a new release.
 
 Without Homebrew, run the install script, which does the same but leaves the command at `~/.venes/venes`:
 
@@ -88,6 +88,7 @@ An update is new code running with the helper's access, which can approve tools 
 venes auto-update off    # or on
 venes update             # check now, whatever the setting
 venes version
+brew upgrade venes       # installed with Homebrew: update to the newest release now
 ```
 
 The helper also leaves updates alone when `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, unless `FORCE_AUTOUPDATE_PLUGINS` is too. If you update the plugin another way, the next session to start moves the helper to the new version.
@@ -105,7 +106,7 @@ Installed without Homebrew, run `~/.venes/venes uninstall`, which is what Homebr
 - takes the keys phones were let in with out of `~/.ssh/authorized_keys`: only lines marked `venes-phone`, or `venes-pairing-…` from a pairing that never finished;
 - deletes `~/.venes`.
 
-`brew reinstall`, or an upgrade with `--greedy`, only stops the helper before installing it again, and paired phones stay paired.
+`brew upgrade` and `brew reinstall` only stop the helper, bring the plugin up to date and start it again, and paired phones stay paired.
 
 Sessions that are open still run the plugin's hooks until they restart or run `/reload-plugins`, but those hooks don't set the helper up again.
 

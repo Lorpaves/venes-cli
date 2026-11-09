@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installs the Venes plugin into Claude Code, and starts it. Homebrew's cask runs it too.
+# Installs the Venes plugin into Claude Code, or brings it up to date, and starts it. Homebrew's cask
+# runs it to install, upgrade and reinstall.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Lorpaves/venes-cli/main/install.sh | sh
 
@@ -33,9 +34,13 @@ installed() {
   ' || true
 }
 
-# Installed already, as on a reinstall, it's only started.
 if [ -z "$(installed)" ]; then
   claude plugin install venes --marketplace "$REPO"
+else
+  # Installed already, as on an upgrade: brought up to date first. Offline, it starts as it is.
+  echo "Updating the plugin…"
+  claude plugin marketplace update venes >/dev/null 2>&1 || true
+  claude plugin update venes@venes >/dev/null 2>&1 || true
 fi
 
 # The plugin sets itself up, with the launcher at ~/.venes/venes, as a session starts. That's done

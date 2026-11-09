@@ -7,7 +7,7 @@ import { SessionStore } from '../../src/sessions.mjs';
 import { sendMessage } from '../../src/terminal.mjs';
 import { readHistory } from '../../src/transcript.mjs';
 import {
-  MAX_UPLOAD_BYTES, findUpload, pruneUploads, referenceTo, removeUploads, safeName, saveUpload, splitAttachments,
+  MAX_UPLOAD_BYTES, answersWithAttachments, findUpload, pruneUploads, referenceTo, removeUploads, safeName, saveUpload, splitAttachments,
 } from '../../src/uploads.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
@@ -305,3 +305,31 @@ test('a video is typed as its path, between the other attachments and the text',
   await sendMessage(SESSION, { text: 'look', attachments: [video, notes] }, () => undefined, { imageLimit: 2000, imageCheck: 5 });
   assert.deepEqual(typed(), ['/u/s/3/clip.mov ', '@"/u/s/2/my notes.txt" ', 'look', 'enter']);
 });
+
+test('files given with an answer follow what was typed, and stand alone for one answered with files only', () => {
+  const uploads = {
+    u1: { kind: 'image', path: '/d/Venes/shot.png' },
+    u2: { kind: 'file', path: '/d/Venes/notes final.txt' },
+    u3: { kind: 'video', path: '/d/Venes/clip.mov' },
+  };
+  const resolve = ids => ids.map(id => uploads[id]);
+  const answers = answersWithAttachments({ Colour: 'Red', Size: 'Big' }, { Colour: ['u1', 'u2'], Why: ['u3'] }, resolve);
+  assert.deepEqual(answers, {
+    Colour: 'Red @"/d/Venes/shot.png" @"/d/Venes/notes final.txt"',
+    Size: 'Big',
+    Why: '/d/Venes/clip.mov',
+  });
+});
+
+test('an answer without files stays as it came', () => {
+  const answers = { Q: 'a' };
+  assert.equal(answersWithAttachments(answers, undefined, () => { throw new Error('not asked'); }), answers);
+  assert.deepEqual(answersWithAttachments(answers, { Q: [] }, ids => ids), { Q: 'a' });
+});
+
+test('files that do not go by question are refused', () => {
+  for (const attachments of [null, ['u1'], 'u1']) {
+    assert.throws(() => answersWithAttachments({}, attachments, ids => ids), { code: 'bad_attachment' });
+  }
+});
+

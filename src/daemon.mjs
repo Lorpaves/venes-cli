@@ -25,7 +25,7 @@ import { avatarSource } from './avatar.mjs';
 import {
   closePage, pressPageKey, readPage, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
 } from './terminal.mjs';
-import { MAX_ATTACHMENTS, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
+import { MAX_ATTACHMENTS, answersWithAttachments, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
 import { pruneStatus, readStatus } from './status.mjs';
@@ -174,6 +174,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     });
   };
 
+  // A question's answer can come with files, uploaded to the request's session as a message's are. They
+  // follow what was typed, as the references a message gives Claude Code.
+  const attachedAnswers = ({ requestId, answers, attachments }) => {
+    if (attachments === undefined) return answers;
+    const sessionId = store.requests().find(request => request.id === requestId)?.sessionId;
+    if (!sessionId) throw new HelperError('request_closed', 'This request has already been answered or closed.');
+    return answersWithAttachments(answers, attachments, ids => attachmentsOf({ sessionId, attachments: ids }));
+  };
+
   // A message for a session that's resuming waits for it, and then goes the usual way.
   const resuming = new Map();
   // What a reader chose for a session that isn't running, for when it next is.
@@ -308,7 +317,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         requests: store.requests().filter(r => r.sessionId === session.id),
       };
     },
-    respond: msg => { store.respond(msg.requestId, msg); return {}; },
+    respond: msg => { store.respond(msg.requestId, { ...msg, answers: attachedAnswers(msg) }); return {}; },
     upload: msg => saveUpload(uploads, msg, downloads),
     // For a phone to send files over SSH, which takes its key.
     ssh: ({ publicKey }) => sshAccess(publicKey),

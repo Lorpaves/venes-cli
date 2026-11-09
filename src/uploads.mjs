@@ -173,6 +173,22 @@ export function pruneUploads(root, { now = Date.now(), keepMs = KEEP_MS } = {}) 
 // video's path goes in as it is, because Claude Code has nothing to fill in for one.
 export const referenceTo = upload => (upload.kind === 'video' ? upload.path : `@"${upload.path}"`);
 
+// Each question's answer with the files it came with after what was typed, as the references a message
+// gives Claude Code, which it reads: a question answered with files alone has them alone. `resolve`
+// turns a question's upload ids into its uploads, and refuses any that aren't there.
+export function answersWithAttachments(answers = {}, attachments, resolve) {
+  if (attachments === undefined) return answers;
+  if (attachments === null || typeof attachments !== 'object' || Array.isArray(attachments)) {
+    throw new HelperError('bad_attachment', 'Attachments go with the question they answer.');
+  }
+  const withFiles = { ...answers };
+  for (const [question, ids] of Object.entries(attachments)) {
+    const references = resolve(ids).map(referenceTo);
+    if (references.length) withFiles[question] = [withFiles[question], ...references].filter(Boolean).join(' ');
+  }
+  return withFiles;
+}
+
 // A file kept in `root`, as they were before Downloads, told by its path: the folders are the
 // session's and the upload's.
 function describeUpload(root, file) {

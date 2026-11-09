@@ -321,6 +321,25 @@ T('question_in_bypass_mode', { mode: 'bypassPermissions' }, async r => {
   assert.match((await r.turnEnd()).lastMessage, /Red/);
 });
 
+// A file given with an answer follows the option picked, as a reference Claude reads. In bypass mode, so
+// reading it out of Downloads asks nothing.
+T('question_with_a_file', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Use the AskUserQuestion tool to ask me one question, "Which color?", with exactly two options: Red and Blue. '
+    + 'After I answer, read any file my answer names, then reply with only the color I picked and the marker word in the file.');
+  const request = await r.request('question');
+  const { id } = await r.session();
+  const notes = await r.client.request('upload', { sessionId: id, name: 'answer notes.txt', mediaType: 'text/plain', data: base64('The marker word is FIG.\n') });
+  const answers = { 'Which color?': 'Red' };
+  await assert.rejects(
+    r.client.request('respond', { requestId: request.id, decision: 'allow', answers, attachments: { 'Which color?': ['f'.repeat(32)] } }),
+    { code: 'bad_attachment' },
+  );
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', answers, attachments: { 'Which color?': [notes.uploadId] } });
+  const end = await r.turnEnd(90000);
+  assert.match(end.lastMessage, /Red/);
+  assert.match(end.lastMessage, /FIG/i);
+});
+
 T('plan_approve', { mode: 'plan' }, async r => {
   await r.type(PLAN('plan'));
   const request = await r.request('plan', 60000);

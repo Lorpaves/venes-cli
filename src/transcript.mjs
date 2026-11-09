@@ -294,6 +294,35 @@ export class TranscriptTail {
   }
 }
 
+// Each live session's transcript as it grows, read every so often. A session's is followed from when
+// the helper first hears of it, not from the next read, which took lines written in between for
+// history and skipped them.
+export function followTranscripts(store, { every }) {
+  const tails = new Map();
+  const tailOf = session => {
+    if (!session?.transcriptPath) return undefined;
+    if (!tails.has(session.id)) tails.set(session.id, new TranscriptTail(session.transcriptPath));
+    return tails.get(session.id);
+  };
+  const heard = event => tailOf(store.find(event.sessionId));
+  const read = () => {
+    // Idle sessions too: compaction and background tasks don't need a running turn.
+    for (const session of store.liveSessions()) {
+      for (const record of tailOf(session)?.poll() ?? []) store.handleTranscriptRecord(session.id, record);
+    }
+  };
+  store.on('event', heard);
+  const timer = setInterval(read, every);
+  timer.unref();
+  return {
+    read,
+    stop: () => {
+      clearInterval(timer);
+      store.off('event', heard);
+    },
+  };
+}
+
 function parseLine(line) {
   if (!line.trim()) return null;
   try { return JSON.parse(line); } catch { return null; }

@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { SessionStore } from '../../src/sessions.mjs';
 import {
-  TranscriptTail, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand, shellOutput, signalsFrom, unwrapPasted,
+  TranscriptTail, followTranscripts, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand, shellOutput, signalsFrom,
+  unwrapPasted,
 } from '../../src/transcript.mjs';
 
 const line = record => `${JSON.stringify(record)}\n`;
@@ -89,6 +91,45 @@ test('text that merely mentions the tag is left alone', () => {
 test('a missing transcript is not an error', () => {
   const tail = new TranscriptTail('/nonexistent/venes.jsonl');
   assert.deepEqual(tail.poll(), []);
+});
+
+// A line run with `!` as the shell runs it: what was typed, then what it printed.
+const shellRecords = (command, stdout) => line({ type: 'user', uuid: `in-${command}`, message: { content: `<bash-input>${command}</bash-input>` } })
+  + line({ type: 'user', uuid: `out-${command}`, parentUuid: `in-${command}`, message: { content: `<bash-stdout>${stdout}</bash-stdout><bash-stderr></bash-stderr>` } });
+
+function following(t, file) {
+  const store = new SessionStore();
+  const events = [];
+  store.on('event', event => events.push(event));
+  // Never on its own here: each test reads when it means to.
+  const transcripts = followTranscripts(store, { every: 60_000 });
+  t.after(() => transcripts.stop());
+  const hook = (session_id, hook_event_name, fields = {}) => store.handleHook({ session_id, cwd: '/w', transcript_path: file, hook_event_name, ...fields });
+  const said = () => events.filter(event => event.kind.startsWith('message.')).map(event => [event.kind, event.text ?? event.stdout]);
+  return { store, transcripts, hook, said };
+}
+
+test('what a session writes as soon as the helper hears of it comes through, before the next read', t => {
+  const { file, cleanup } = tempFile();
+  t.after(cleanup);
+  fs.rmSync(file);
+  const { transcripts, hook, said } = following(t, file);
+  hook('a', 'SessionStart', { source: 'startup' });
+  fs.appendFileSync(file, shellRecords('pwd', '/w'));
+  transcripts.read();
+  assert.deepEqual(said(), [['message.user', '!pwd'], ['message.output', '/w']]);
+});
+
+test('a resumed session is followed from its first hook, without what its transcript had already', t => {
+  const { file, cleanup } = tempFile(shellRecords('ls', 'old'));
+  t.after(cleanup);
+  const { store, transcripts, hook, said } = following(t, file);
+  store.reopen('a', { cwd: '/w' });
+  transcripts.read();
+  hook('a', 'SessionStart', { source: 'resume' });
+  fs.appendFileSync(file, shellRecords('pwd', '/w'));
+  transcripts.read();
+  assert.deepEqual(said(), [['message.user', '!pwd'], ['message.output', '/w']]);
 });
 
 test('history joins tool calls to results and hides internal records', () => {

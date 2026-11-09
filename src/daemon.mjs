@@ -20,7 +20,7 @@ import { RECENT_SESSIONS, checkedFolder, homeFolder, recentFolders, runningIn, s
 import { isTrusted, readClaudeConfig } from './trust.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
-import { TranscriptTail, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
+import { followTranscripts, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
 import {
   closePage, pressPageKey, readPage, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
@@ -407,20 +407,6 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   return { server, subscribers, heldTimer };
 }
 
-function startTranscriptPolling(store) {
-  const tails = new Map();
-  const timer = setInterval(() => {
-    // Idle sessions too: compaction and background tasks don't need a running turn.
-    for (const session of store.liveSessions()) {
-      if (!session.transcriptPath) continue;
-      if (!tails.has(session.id)) tails.set(session.id, new TranscriptTail(session.transcriptPath));
-      for (const record of tails.get(session.id).poll()) store.handleTranscriptRecord(session.id, record);
-    }
-  }, TRANSCRIPT_POLL_MS);
-  timer.unref();
-  return () => clearInterval(timer);
-}
-
 function lastWords(file) {
   try {
     const { items } = readHistory(file, { limit: LAST_WORDS_ITEMS });
@@ -483,7 +469,7 @@ export async function startDaemon(paths) {
   const rexAccount = cachedAccount();
   await rexAccount.refresh();
   const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current);
-  const stopPolling = startTranscriptPolling(store);
+  const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
   fs.writeFileSync(paths.pidFile, String(process.pid));
@@ -494,7 +480,7 @@ export async function startDaemon(paths) {
     stop() {
       const installing = library.stop();
       stopSaving();
-      stopPolling();
+      transcripts.stop();
       updater.stop();
       clearInterval(heldTimer);
       for (const socket of subscribers) socket.destroy();

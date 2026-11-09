@@ -68,3 +68,10 @@ test('`venes` on the PATH runs the launcher, and says what to do without one', t
   assert.equal(result.status, 1);
   assert.match(result.stderr, /brew reinstall venes/);
 });
+
+test('claude is found on the PATH Homebrew keeps, as Homebrew runs the script without it', t => {
+  const run = noting(folder(t), { launcher: false });
+  const brewPath = run.env.PATH.split(':')[0];
+  assert.equal(underBrew('uninstall', { ...run.env, PATH: '/usr/bin:/bin', HOMEBREW_PATH: brewPath }).status, 0);
+  assert.deepEqual(run.calls(), ['claude plugin uninstall venes@venes', 'claude plugin marketplace remove venes']);
+});

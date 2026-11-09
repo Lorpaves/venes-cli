@@ -15,13 +15,16 @@ find_node() {
 limit=4
 case "$1" in
   hold) limit=86400 ;; # the terminal dialog stays usable while this waits
-  session-start)
-    # The plugin's path changes with each version, so the launcher is refreshed
-    # here. Stdin is left alone: it holds the event that curl forwards below.
-    node=$(find_node)
-    if [ -n "$node" ]; then "$node" "$root/cli/venes.mjs" setup </dev/null >/dev/null 2>&1; fi
-    ;;
 esac
+
+# The plugin's path changes with each version, so the launcher is refreshed when a
+# session starts. A plugin picked up with /reload-plugins has none until then, so
+# any event makes one that's missing. Stdin is left alone: it holds the event that
+# curl forwards below.
+if [ "$1" = session-start ] || [ ! -x "$home/venes" ]; then
+  node=$(find_node)
+  if [ -n "$node" ]; then "$node" "$root/cli/venes.mjs" setup </dev/null >/dev/null 2>&1; fi
+fi
 
 /usr/bin/curl -s --fail --max-time "$limit" --unix-socket "$home/hook.sock" \
   -H 'Content-Type: application/json' \

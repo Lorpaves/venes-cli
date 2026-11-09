@@ -31,13 +31,36 @@ test('the launcher is written executable', () => {
   });
 });
 
+// Runs the hook with a `node` that only notes how it was run, so no helper starts and no setting
+// of this Mac's changes.
+function runHook(dir, mode, { launcher }) {
+  const home = path.join(dir, 'home');
+  const bin = path.join(dir, 'bin');
+  const calls = path.join(dir, 'calls');
+  fs.mkdirSync(home);
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\necho "$@" >> '${calls}'\n`, { mode: 0o755 });
+  if (launcher) fs.writeFileSync(path.join(home, 'venes'), '#!/bin/sh\n', { mode: 0o755 });
+  const result = spawnSync(hookScript, [mode], {
+    input: '{}', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, VENES_HOME: home, CLAUDE_PLUGIN_ROOT: path.resolve(root) }, encoding: 'utf8',
+  });
+  return { ...result, calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n') : [] };
+}
+
 test('the hook prints nothing and succeeds when the helper is down', () => {
   withTempDir(dir => {
-    const result = spawnSync(hookScript, ['fast'], { input: '{}', env: { ...process.env, VENES_HOME: dir }, encoding: 'utf8' });
+    const result = runHook(dir, 'fast', { launcher: true });
     assert.equal(result.status, 0);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
   });
+});
+
+test('a session start sets the helper up, and any event does while there\'s no launcher yet', () => {
+  const setup = `${path.join(root, 'cli/venes.mjs')} setup`;
+  withTempDir(dir => assert.deepEqual(runHook(dir, 'session-start', { launcher: true }).calls, [setup]));
+  withTempDir(dir => assert.deepEqual(runHook(dir, 'fast', { launcher: false }).calls, [setup], 'after /reload-plugins'));
+  withTempDir(dir => assert.deepEqual(runHook(dir, 'fast', { launcher: true }).calls, [], 'nothing to do'));
 });
 
 test('only PermissionRequest waits, and every hook runs the bundled script', () => {

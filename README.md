@@ -20,7 +20,7 @@ Or at the prompt of a Claude Code session:
 /plugin install venes --marketplace Lorpaves/venes-helper
 ```
 
-Then start a new session, or run `/reload-plugins` in an open one. The helper starts by itself with the next session.
+The install script starts the helper right away. Installed from a session, it starts with the next session, or with the next message after `/reload-plugins`. Sessions that were open before need a restart or `/reload-plugins` to be seen.
 
 ## Try it
 
@@ -39,7 +39,7 @@ Watch from a second terminal:
 ~/.venes/venes allow <request>
 ```
 
-Run `~/.venes/venes` for every command. Session ids accept a unique prefix. The launcher appears after your first session with the plugin.
+Run `~/.venes/venes` for every command. Session ids accept a unique prefix. The launcher appears once the helper has started.
 
 ## Pairing the app
 

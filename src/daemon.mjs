@@ -490,7 +490,9 @@ export async function startDaemon(paths) {
 
   return {
     store,
+    // Settles once an SDK install going on has ended too.
     stop() {
+      const installing = library.stop();
       stopSaving();
       stopPolling();
       updater.stop();
@@ -500,6 +502,7 @@ export async function startDaemon(paths) {
       hookServer.close();
       clientServer.close();
       fs.rmSync(paths.pidFile, { force: true });
+      return installing;
     },
   };
 }

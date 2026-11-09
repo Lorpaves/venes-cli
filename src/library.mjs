@@ -82,6 +82,8 @@ export class Library {
   #sdkDir;
   #installing;
   #capabilities = new Map();
+  // Ends an install of the SDK going on when the helper stops.
+  #stopping = new AbortController();
 
   constructor({ sdkDir }) { this.#sdkDir = sdkDir; }
 
@@ -95,7 +97,7 @@ export class Library {
     fs.mkdirSync(partial, { recursive: true });
     const args = ['install', '--prefix', partial, '--no-audit', '--no-fund', '--ignore-scripts', '--omit=optional', '--omit=peer', `${SDK_PACKAGE}@${SDK_VERSION}`];
     try {
-      await exec('npm', args, { timeout: INSTALL_TIMEOUT_MS });
+      await exec('npm', args, { timeout: INSTALL_TIMEOUT_MS, signal: this.#stopping.signal });
     } catch (error) {
       fs.rmSync(partial, { recursive: true, force: true });
       throw new HelperError('sdk_unavailable', `Couldn't install the Agent SDK: ${error.message}`);
@@ -104,6 +106,13 @@ export class Library {
       if (name !== path.basename(partial)) fs.rmSync(path.join(this.#sdkDir, name), { recursive: true, force: true });
     }
     fs.renameSync(partial, this.#installed);
+  }
+
+  // Ends an install going on, and waits for it, so that nothing writes to its folder once the helper
+  // has gone, as when Venes is uninstalled.
+  async stop() {
+    this.#stopping.abort();
+    await this.#installing?.catch(() => {});
   }
 
   async prepare() {

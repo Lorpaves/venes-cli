@@ -91,10 +91,16 @@ async function runningHelper() {
   try { return await client.request('ping'); } finally { client.close(); }
 }
 
+// Until the helper's process has gone, not only its socket, so nothing it started writes to
+// ~/.venes after.
 async function stopRunningHelper() {
-  process.kill(Number(fs.readFileSync(paths.pidFile, 'utf8')), 'SIGTERM');
+  const pid = Number(fs.readFileSync(paths.pidFile, 'utf8'));
+  process.kill(pid, 'SIGTERM');
+  const alive = () => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
   const deadline = Date.now() + STOP_TIMEOUT_MS;
-  while (Date.now() < deadline && await isRunning()) {
+  while (Date.now() < deadline && (await isRunning() || alive())) {
     await new Promise(resolve => { setTimeout(resolve, 50); });
   }
 }
@@ -138,7 +144,11 @@ const commands = {
   async daemon() {
     const daemon = await startDaemon(paths);
     for (const signal of ['SIGINT', 'SIGTERM']) {
-      process.on(signal, () => { daemon.stop(); process.exit(0); });
+      process.on(signal, () => {
+        // Leaves once an SDK install going on has ended, or soon whatever happens.
+        setTimeout(() => process.exit(0), STOP_TIMEOUT_MS - 1000).unref();
+        daemon.stop().finally(() => process.exit(0));
+      });
     }
     console.log(`venes helper running (pid ${process.pid})`);
   },

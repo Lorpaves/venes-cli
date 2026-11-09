@@ -286,3 +286,31 @@ test('what the session that started the helper left behind goes, and the user\'s
   dropParentSession(env);
   assert.deepEqual(env, { CLAUDE_CONFIG_DIR: '/c', CLAUDE_CODE_USE_BEDROCK: '1', PATH: '/bin' });
 });
+
+test('an SDK install going on ends with the helper, and writes nothing after', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-sdk-'));
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  // Takes its time, then writes into the folder it installs to, as npm would.
+  fs.writeFileSync(path.join(bin, 'npm'), [
+    '#!/bin/sh',
+    'prefix=""',
+    'while [ $# -gt 0 ]; do [ "$1" = --prefix ] && prefix="$2"; shift; done',
+    'sleep 1',
+    'mkdir -p "$prefix/node_modules" && touch "$prefix/node_modules/written"',
+    '',
+  ].join('\n'), { mode: 0o755 });
+  const { PATH } = process.env;
+  process.env.PATH = `${bin}:/usr/bin:/bin`;
+  t.after(() => { process.env.PATH = PATH; fs.rmSync(dir, { recursive: true, force: true }); });
+  const sdkDir = path.join(dir, 'sdk');
+  const library = new Library({ sdkDir });
+  const preparing = library.prepare();
+  await new Promise(resolve => { setTimeout(resolve, 200); });
+  const started = Date.now();
+  await library.stop();
+  assert.ok(Date.now() - started < 900, 'without waiting for the install to finish');
+  await assert.rejects(preparing, { code: 'sdk_unavailable' });
+  await new Promise(resolve => { setTimeout(resolve, 1500); });
+  assert.deepEqual(fs.readdirSync(sdkDir), [], 'nothing written after');
+});

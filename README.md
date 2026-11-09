@@ -92,22 +92,26 @@ The helper also leaves updates alone when `DISABLE_UPDATES`, `DISABLE_AUTOUPDATE
 
 ## Uninstall
 
-In this order, since each step uses something the next one removes:
-
 ```sh
-~/.venes/venes statusline off          # puts your own status line back
-~/.venes/venes stop
-claude plugin uninstall venes@venes     # or /plugin uninstall venes@venes in a session
-claude plugin marketplace remove venes
-sed -i '' -e '/ venes-phone$/d' -e '/ venes-pairing-[A-Za-z0-9_-]*$/d' ~/.ssh/authorized_keys
-rm -rf ~/.venes
+~/.venes/venes uninstall
 ```
 
-- **Phones let in over SSH.** The `sed` line takes their keys out of `~/.ssh/authorized_keys`. Each is marked `venes-phone` at the end, and a one-time key from a `pair` that never finished is marked `venes-pairing-…`. Nothing else in the file is touched. To see them first, run `grep venes- ~/.ssh/authorized_keys`. Skip this line if you never paired over SSH and the file doesn't exist.
-- **Open sessions.** Restart them, or run `/reload-plugins` in them, so they stop running the plugin's hooks.
-- **Your files.** Pictures, videos and files sent from the app stay in your Downloads folder.
-- **The app.** Forget the Mac in the app's settings. With `~/.venes` gone, this Mac sends the phone no more notifications.
-- **Your settings.** Rex's *Serve over Tailscale* and Remote Login are left as they are. Turn them off if nothing else needs them.
+It asks first, or doesn't with `--yes`. Then it:
+
+- takes the plugin and its marketplace out of Claude Code;
+- puts your status line back and stops the helper;
+- takes the keys phones were let in with out of `~/.ssh/authorized_keys`: only lines marked `venes-phone`, or `venes-pairing-…` from a pairing that never finished;
+- deletes `~/.venes`.
+
+Sessions that are open still run the plugin's hooks until they restart or run `/reload-plugins`, but those hooks don't set the helper up again.
+
+It leaves alone:
+
+- pictures, videos and files sent from the app, in your Downloads folder;
+- the Mac in the app, which you forget there; this Mac sends the phone no more notifications;
+- Rex's *Serve over Tailscale* and Remote Login, which are your own settings; turn them off if nothing else needs them.
+
+If `~/.venes/venes` isn't there, the helper never started, and `claude plugin uninstall venes@venes` is all there is to do.
 
 ## How it works
 

@@ -89,6 +89,16 @@ export function allowPhone(file, phoneKey) {
   }
 }
 
+// Takes out every key a phone was let in with, and any one-time key from a pairing that never
+// finished. Says how many went.
+export function removePhoneKeys(file) {
+  const lines = readLines(file);
+  const pairing = new RegExp(` ${PAIRING_COMMENT}-[A-Za-z0-9_-]+$`);
+  const kept = lines.filter(line => !line.endsWith(` ${PHONE_COMMENT}`) && !pairing.test(line));
+  if (kept.length !== lines.length) writeLines(file, kept);
+  return lines.length - kept.length;
+}
+
 export function makeNonce() {
   return randomBytes(9).toString('base64url');
 }

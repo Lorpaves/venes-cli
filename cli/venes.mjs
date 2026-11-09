@@ -2,11 +2,13 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
+import readlinePromises from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { writeLauncher } from '../src/setup.mjs';
 import { installStatusLine, removeStatusLine, runStatusLine, switchOnStatusLine } from '../src/status.mjs';
+import { MARKETPLACE, PLUGIN_ID, claudeConfigDir, isPluginInstalled, uninstall as uninstallVenes } from '../src/uninstall.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
@@ -38,6 +40,7 @@ Helper
   auto-update [on|off]          Show or change automatic updates
   pair [--rex|--ssh]            Show a QR code that pairs the Venes app, asking whether through Rex or tmux over SSH
   statusline [on|off]           Run as Claude Code's status line (set up by setup), or stop or start doing so
+  uninstall [--yes]             Take Venes off this Mac: the plugin, the helper, ~/.venes, and phones' SSH keys
 
 Control
   sessions                      List sessions
@@ -58,6 +61,8 @@ App transport
 `;
 
 const paths = helperPaths();
+// This copy of the plugin, which Claude Code may have uninstalled while sessions still run its hooks.
+const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 function isRunning() {
   return new Promise(resolve => {
@@ -116,6 +121,8 @@ const statusLineOptions = () => ({ settingsFile: paths.claudeSettings, stateFile
 const commands = {
   // Runs at every session start, and from the old helper when it finds a new version.
   async setup() {
+    // A session open when the plugin was uninstalled still runs its hooks, and mustn't put it back.
+    if (!isPluginInstalled({ configDir: claudeConfigDir(), pluginRoot: PLUGIN_ROOT })) return;
     const running = await runningHelper();
     // A session that's still on an older version must not take the helper back with it.
     if (isNewer(running?.version, VERSION)) return;
@@ -157,6 +164,38 @@ const commands = {
   },
   async status() {
     console.log((await isRunning()) ? 'running' : 'not running');
+  },
+  async uninstall(args) {
+    if (!args.includes('--yes') && !args.includes('-y')) {
+      if (!process.stdin.isTTY) throw new Error('Run it with --yes to uninstall without being asked.');
+      const prompt = readlinePromises.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await prompt.question(`This takes Venes off this Mac: its Claude Code plugin, the helper, ${paths.home}, and the SSH keys phones were let in with. Uninstall? [y/N] `);
+      prompt.close();
+      if (!/^y(es)?$/i.test(answer.trim())) { console.log('Nothing was changed.'); return; }
+    }
+    const keys = authorizedKeysFile();
+    const steps = await uninstallVenes({
+      paths, authorizedKeys: keys,
+      stopHelper: async () => { if (await isRunning()) await stopRunningHelper(); },
+    });
+    const done = {
+      plugin: 'Removed the plugin from Claude Code.',
+      marketplace: 'Removed its marketplace.',
+      statusLine: 'Put your status line back.',
+      helper: 'Stopped the helper.',
+      keys: count => `Took ${count} phone key${count === 1 ? '' : 's'} out of ${keys}.`,
+      folder: `Deleted ${paths.home}.`,
+    };
+    const failed = {
+      plugin: `Run \`claude plugin uninstall ${PLUGIN_ID}\` yourself, or a new session sets the helper up again.`,
+      marketplace: `Run \`claude plugin marketplace remove ${MARKETPLACE}\` yourself.`,
+    };
+    for (const { name, ok, detail } of steps) {
+      if (ok) console.log(typeof done[name] === 'function' ? done[name](detail) : done[name]);
+      else console.log(`${name}: ${detail}. ${failed[name] ?? ''}`.trim());
+    }
+    console.log('\nRestart sessions that are open, or run /reload-plugins in them. What the app sent stays in Downloads. Forget this Mac in the app.');
+    if (steps.some(s => !s.ok)) process.exitCode = 1;
   },
   async version() {
     const running = await runningHelper();

@@ -1,0 +1,9 @@
+#!/bin/sh
+# `venes` on the PATH, where Homebrew links it. The CLI itself is the launcher in ~/.venes, which
+# follows the plugin from one version to the next.
+launcher="${VENES_HOME:-$HOME/.venes}/venes"
+if [ ! -x "$launcher" ]; then
+  echo "venes: not set up yet. Start a Claude Code session, or run: brew reinstall venes" >&2
+  exit 1
+fi
+exec "$launcher" "$@"

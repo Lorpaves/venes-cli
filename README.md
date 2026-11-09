@@ -1,6 +1,6 @@
-# Venes helper
+# Venes CLI
 
-A Claude Code plugin that turns a session's hooks and transcript into one structured event stream, so you can follow and answer it from another device: messages, status, permission prompts, questions and plans.
+A Claude Code plugin, and the `venes` command, that turns a session's hooks and transcript into one structured event stream, so you can follow and answer it from another device: messages, status, permission prompts, questions and plans.
 
 It's the Mac side of Venes, an iOS app that is still in development. Until the app ships, you can use everything from the command line.
 
@@ -11,16 +11,18 @@ Venes is an independent project, not made by or affiliated with Anthropic.
 Requires Claude Code, Node.js 22 or later, and either [Rex](https://www.superlogical.com/rex) or tmux to send input to a session. Tested on macOS.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lorpaves/venes-helper/main/install.sh | sh
+brew install lorpaves/venes/venes
 ```
 
-Or at the prompt of a Claude Code session:
+That installs the plugin into Claude Code, starts its background helper, and puts `venes` on your PATH. Sessions that were open before need a restart or `/reload-plugins` to be seen. The plugin then keeps itself up to date through Claude Code, so `brew upgrade` leaves it alone.
 
-```
-/plugin install venes --marketplace Lorpaves/venes-helper
+Without Homebrew, run the install script, which does the same but leaves the command at `~/.venes/venes`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Lorpaves/venes-cli/main/install.sh | sh
 ```
 
-The install script starts the helper right away. Installed from a session, it starts with the next session, or with the next message after `/reload-plugins`. Sessions that were open before need a restart or `/reload-plugins` to be seen.
+Or at the prompt of a Claude Code session, `/plugin install venes --marketplace Lorpaves/venes-cli`. The helper then starts with the next session, or with the next message after `/reload-plugins`.
 
 ## Try it
 
@@ -33,20 +35,20 @@ tmux new -A -s cc      # then run claude inside it
 Watch from a second terminal:
 
 ```sh
-~/.venes/venes watch                  # live events
-~/.venes/venes sessions
-~/.venes/venes send <session> "hello"
-~/.venes/venes allow <request>
+venes watch                  # live events
+venes sessions
+venes send <session> "hello"
+venes allow <request>
 ```
 
-Run `~/.venes/venes` for every command. Session ids accept a unique prefix. The launcher appears once the helper has started.
+Run `venes` for every command. Session ids accept a unique prefix. Installed without Homebrew, the command is `~/.venes/venes`, which appears once the helper has started.
 
 ## Pairing the app
 
 Run this and scan the code in the app:
 
 ```sh
-~/.venes/venes pair
+venes pair
 ```
 
 The phone reaches this Mac in one of two ways, and `pair` asks which, starting on one that works now, Rex first. A way that's ready says it needs nothing downloaded:
@@ -83,9 +85,9 @@ Open sessions keep working through the restart. They go on using their old hooks
 An update is new code running with the helper's access, which can approve tools and type into sessions. To review new versions yourself, turn this off:
 
 ```sh
-~/.venes/venes auto-update off    # or on
-~/.venes/venes update             # check now, whatever the setting
-~/.venes/venes version
+venes auto-update off    # or on
+venes update             # check now, whatever the setting
+venes version
 ```
 
 The helper also leaves updates alone when `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, unless `FORCE_AUTOUPDATE_PLUGINS` is too. If you update the plugin another way, the next session to start moves the helper to the new version.
@@ -93,15 +95,17 @@ The helper also leaves updates alone when `DISABLE_UPDATES`, `DISABLE_AUTOUPDATE
 ## Uninstall
 
 ```sh
-~/.venes/venes uninstall
+brew uninstall venes
 ```
 
-It asks first, or doesn't with `--yes`. Then it:
+Installed without Homebrew, run `~/.venes/venes uninstall`, which is what Homebrew runs too. It asks first, or doesn't with `--yes`. Then it:
 
 - takes the plugin and its marketplace out of Claude Code;
 - puts your status line back and stops the helper;
 - takes the keys phones were let in with out of `~/.ssh/authorized_keys`: only lines marked `venes-phone`, or `venes-pairing-…` from a pairing that never finished;
 - deletes `~/.venes`.
+
+`brew reinstall`, or an upgrade with `--greedy`, only stops the helper before installing it again, and paired phones stay paired.
 
 Sessions that are open still run the plugin's hooks until they restart or run `/reload-plugins`, but those hooks don't set the helper up again.
 

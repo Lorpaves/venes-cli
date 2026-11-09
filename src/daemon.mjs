@@ -25,7 +25,9 @@ import { avatarSource } from './avatar.mjs';
 import {
   closePage, pressPageKey, readPage, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
 } from './terminal.mjs';
-import { MAX_ATTACHMENTS, answersWithAttachments, findUpload, pruneUploads, removeUploads, saveUpload } from './uploads.mjs';
+import {
+  MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
+} from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { sshAccess } from './ssh.mjs';
 import { pruneStatus, readStatus } from './status.mjs';
@@ -167,11 +169,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS) {
       throw new HelperError('bad_attachment', `A message can have up to ${MAX_ATTACHMENTS} attachments.`);
     }
-    return attachments.map(uploadId => {
+    const found = attachments.map(uploadId => {
       const upload = findUpload(uploads, sessionId, uploadId);
       if (!upload) throw new HelperError('bad_attachment', 'An attachment is gone. Attach it again.');
       return upload;
     });
+    // A message has them now, so they're no longer the composer's to take back.
+    for (const upload of found) markSent(uploads, sessionId, upload.uploadId);
+    return found;
   };
 
   // A question's answer can come with files, uploaded to the request's session as a message's are. They
@@ -319,6 +324,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     },
     respond: msg => { store.respond(msg.requestId, { ...msg, answers: attachedAnswers(msg) }); return {}; },
     upload: msg => saveUpload(uploads, msg, downloads),
+    // Taken back out of the composer before its message went.
+    discard: ({ sessionId, uploadId }) => discardUpload(uploads, sessionId, uploadId),
     // For a phone to send files over SSH, which takes its key.
     ssh: ({ publicKey }) => sshAccess(publicKey),
     // What the session's status line was last told, or null before Claude Code has run it.

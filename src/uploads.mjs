@@ -123,7 +123,9 @@ export function saveUpload(root, { sessionId, name, mediaType, data }, downloads
   const dir = path.join(folder, uploadId);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = keep(bytes, { downloads, dir, ...about });
-  fs.writeFileSync(path.join(dir, ABOUT), JSON.stringify({ ...about, path: file }), { mode: 0o600 });
+  // When it was written, so that a file taken back out of a message can be told from one changed since.
+  const { mtimeMs } = fs.statSync(file);
+  fs.writeFileSync(path.join(dir, ABOUT), JSON.stringify({ ...about, path: file, mtimeMs }), { mode: 0o600 });
   return { uploadId, ...about };
 }
 
@@ -143,7 +145,42 @@ function readAbout(dir) {
 export function findUpload(root, sessionId, uploadId) {
   if (typeof uploadId !== 'string' || !UPLOAD_ID.test(uploadId)) return undefined;
   const about = readAbout(path.join(sessionFolder(root, sessionId), uploadId));
-  return about && fs.existsSync(about.path) ? { uploadId, ...about } : undefined;
+  if (!about || !fs.existsSync(about.path)) return undefined;
+  const { mtimeMs, sent, ...shown } = about;
+  return { uploadId, ...shown };
+}
+
+// A message has the upload, so its file is the person's from now on, and taking it back out of the
+// composer no longer takes it away.
+export function markSent(root, sessionId, uploadId) {
+  if (typeof uploadId !== 'string' || !UPLOAD_ID.test(uploadId)) return;
+  const file = path.join(sessionFolder(root, sessionId), uploadId, ABOUT);
+  try {
+    const about = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (about.sent) return;
+    fs.writeFileSync(file, JSON.stringify({ ...about, sent: true }), { mode: 0o600 });
+  } catch { /* gone already */ }
+}
+
+// An upload taken out of the composer before its message went. Its file goes from Downloads too, as
+// long as it's still the one the helper put there: not sent, not moved and not changed since, which
+// one from before the helper noted when it wrote a file can't be told, so its file stays. What's known
+// of it goes either way, unless a message has it.
+export function discardUpload(root, sessionId, uploadId) {
+  if (typeof uploadId !== 'string' || !UPLOAD_ID.test(uploadId)) throw new HelperError('bad_upload', 'This isn\'t an upload.');
+  const dir = path.join(sessionFolder(root, sessionId), uploadId);
+  const about = readAbout(dir);
+  if (!about || about.sent) return { discarded: false };
+  let discarded = false;
+  try {
+    const now = fs.statSync(about.path);
+    if (now.isFile() && now.size === about.size && typeof about.mtimeMs === 'number' && now.mtimeMs === about.mtimeMs) {
+      fs.rmSync(about.path, { force: true });
+      discarded = true;
+    }
+  } catch { /* gone already */ }
+  fs.rmSync(dir, { recursive: true, force: true });
+  return { discarded };
 }
 
 // What's known of a session's uploads goes. Their files stay in Downloads, which is the person's.

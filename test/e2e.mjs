@@ -517,6 +517,14 @@ async function sendsAPictureAndAFile(r) {
   const file = await r.client.request('file', { sessionId: id, uploadId: notes.uploadId });
   assert.deepEqual([file.name, file.mediaType, Buffer.from(file.data, 'base64').toString()], ['my notes.txt', 'text/plain', 'The marker word is PLUM.\n']);
   await assert.rejects(r.client.request('file', { sessionId: id, uploadId: 'f'.repeat(32) }), { code: 'unknown_file' });
+  // Taken back out of the composer: its file goes from Downloads, unless a message has it.
+  assert.equal((await r.client.request('discard', { sessionId: id, uploadId: notes.uploadId })).discarded, false);
+  assert.ok(fs.existsSync(saved), 'a file a message has stays');
+  const left = await r.client.request('upload', { sessionId: id, name: 'left out.txt', mediaType: 'text/plain', data: base64('Never sent.\n') });
+  const leftAt = findUpload(paths.uploads, id, left.uploadId).path;
+  assert.equal((await r.client.request('discard', { sessionId: id, uploadId: left.uploadId })).discarded, true);
+  assert.equal(fs.existsSync(leftAt), false, 'one taken back out goes from Downloads');
+  await assert.rejects(r.client.request('discard', { sessionId: id, uploadId: '../x' }), { code: 'bad_upload' });
 }
 
 T('an_attached_picture_and_file_reach_claude', {}, sendsAPictureAndAFile);

@@ -7,7 +7,8 @@ import { SessionStore } from '../../src/sessions.mjs';
 import { sendMessage } from '../../src/terminal.mjs';
 import { readHistory } from '../../src/transcript.mjs';
 import {
-  MAX_UPLOAD_BYTES, answersWithAttachments, findUpload, pruneUploads, referenceTo, removeUploads, safeName, saveUpload, splitAttachments,
+  MAX_UPLOAD_BYTES, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, referenceTo, removeUploads, safeName, saveUpload,
+  splitAttachments,
 } from '../../src/uploads.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
@@ -136,6 +137,81 @@ test('what\'s known of a session\'s uploads goes with it, and old ones go when t
   assert.equal(fs.existsSync(path.join(root, SESSION_ID)), false);
   assert.deepEqual(fs.readdirSync(downloads).sort(), ['gone.txt', 'new.txt', 'old.txt'], 'Downloads is the person\'s');
   pruneUploads(path.join(root, 'nothing here'));
+});
+
+test('an upload taken back out of the composer goes from Downloads with what is known of it', t => {
+  const { root, downloads } = tempFolders(t);
+  const taken = saveUpload(root, { sessionId: SESSION_ID, name: 'taken.txt', mediaType: 'text/plain', data: base64('x') }, downloads);
+  const kept = saveUpload(root, { sessionId: SESSION_ID, name: 'kept.txt', mediaType: 'text/plain', data: base64('y') }, downloads);
+  assert.deepEqual(discardUpload(root, SESSION_ID, taken.uploadId), { discarded: true });
+  assert.deepEqual(fs.readdirSync(downloads), ['kept.txt'], 'only that one goes');
+  assert.equal(fs.existsSync(path.join(root, SESSION_ID, taken.uploadId)), false);
+  assert.equal(findUpload(root, SESSION_ID, taken.uploadId), undefined);
+  assert.deepEqual(discardUpload(root, SESSION_ID, taken.uploadId), { discarded: false }, 'again is nothing');
+  assert.ok(findUpload(root, SESSION_ID, kept.uploadId));
+});
+
+test('an upload a message has stays, file and all, and it shows as it did', t => {
+  const { root, downloads } = tempFolders(t);
+  const sent = saveUpload(root, { sessionId: SESSION_ID, name: 'sent.txt', mediaType: 'text/plain', data: base64('x') }, downloads);
+  markSent(root, SESSION_ID, sent.uploadId);
+  markSent(root, SESSION_ID, sent.uploadId);
+  assert.deepEqual(discardUpload(root, SESSION_ID, sent.uploadId), { discarded: false });
+  assert.equal(fs.readFileSync(path.join(downloads, 'sent.txt'), 'utf8'), 'x');
+  assert.deepEqual(findUpload(root, SESSION_ID, sent.uploadId), { ...sent, path: path.join(downloads, 'sent.txt') }, 'what the helper notes for itself isn\'t shown');
+  markSent(root, SESSION_ID, 'f'.repeat(32));
+  markSent(root, SESSION_ID, '../../etc');
+  assert.equal(fs.existsSync(path.join(root, SESSION_ID, 'f'.repeat(32))), false, 'one that isn\'t there stays not there');
+});
+
+test('a file changed, touched or moved since it came is the person\'s, so only what is known of it goes', t => {
+  const { root, downloads } = tempFolders(t);
+  const save = name => saveUpload(root, { sessionId: SESSION_ID, name, mediaType: 'text/plain', data: base64('x') }, downloads);
+  const changed = save('changed.txt');
+  fs.writeFileSync(path.join(downloads, 'changed.txt'), 'mine now');
+  const touched = save('touched.txt');
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(path.join(downloads, 'touched.txt'), later, later);
+  const moved = save('moved.txt');
+  fs.renameSync(path.join(downloads, 'moved.txt'), path.join(downloads, 'elsewhere.txt'));
+  const swapped = save('swapped.txt');
+  fs.rmSync(path.join(downloads, 'swapped.txt'));
+  fs.mkdirSync(path.join(downloads, 'swapped.txt'));
+  for (const { uploadId } of [changed, touched, moved, swapped]) {
+    assert.deepEqual(discardUpload(root, SESSION_ID, uploadId), { discarded: false });
+    assert.equal(fs.existsSync(path.join(root, SESSION_ID, uploadId)), false);
+  }
+  assert.deepEqual(fs.readdirSync(downloads).sort(), ['changed.txt', 'elsewhere.txt', 'swapped.txt', 'touched.txt']);
+  assert.equal(fs.readFileSync(path.join(downloads, 'changed.txt'), 'utf8'), 'mine now');
+});
+
+test('a file from before the helper noted when it wrote one stays, since it can\'t be told from one changed since', t => {
+  const { root, downloads } = tempFolders(t);
+  const before = saveUpload(root, { sessionId: SESSION_ID, name: 'before.txt', mediaType: 'text/plain', data: base64('x') }, downloads);
+  const about = path.join(root, SESSION_ID, before.uploadId, 'upload.json');
+  const { mtimeMs, ...older } = JSON.parse(fs.readFileSync(about, 'utf8'));
+  assert.equal(typeof mtimeMs, 'number');
+  fs.writeFileSync(about, JSON.stringify(older));
+  assert.deepEqual(discardUpload(root, SESSION_ID, before.uploadId), { discarded: false });
+  assert.deepEqual(fs.readdirSync(downloads), ['before.txt']);
+  assert.equal(fs.existsSync(path.join(root, SESSION_ID, before.uploadId)), false);
+});
+
+test('one kept out of the way, where Downloads wouldn\'t take it, goes with what is known of it', t => {
+  const { root, downloads } = tempFolders(t);
+  fs.chmodSync(downloads, 0o500);
+  const file = saveUpload(root, { sessionId: SESSION_ID, name: 'notes.txt', mediaType: 'text/plain', data: base64('hello') }, downloads);
+  fs.chmodSync(downloads, 0o700);
+  assert.deepEqual(discardUpload(root, SESSION_ID, file.uploadId), { discarded: true });
+  assert.equal(fs.existsSync(path.join(root, SESSION_ID, file.uploadId)), false);
+});
+
+test('only an upload\'s id can be discarded, in a session\'s', t => {
+  const { root } = tempFolders(t);
+  assert.throws(() => discardUpload(root, SESSION_ID, '../../etc'), { code: 'bad_upload' });
+  assert.throws(() => discardUpload(root, SESSION_ID, undefined), { code: 'bad_upload' });
+  assert.throws(() => discardUpload(root, '../x', 'f'.repeat(32)), { code: 'unknown_session' });
+  assert.deepEqual(discardUpload(root, SESSION_ID, 'f'.repeat(32)), { discarded: false });
 });
 
 test('what Venes typed ahead of a message comes off its text, and its files are listed', t => {

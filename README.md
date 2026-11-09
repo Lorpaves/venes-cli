@@ -155,6 +155,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
 | `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
 | `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
+| `discard` | `sessionId`, `uploadId` | `discarded`: an upload taken back out of the composer before its message went. Its file goes from Downloads too, unless a message has it or it was moved or changed since. See [Attachments](#attachments) |
 | `ssh` | `publicKey` | Lets the client's key in over SSH, for files: `user`, `port`, `hostKey`, `hosts`. See [Over SSH](#over-ssh) |
 | `statusLine` | `sessionId` | `status`: what Claude Code last told the session's status line, as the helper stands in for it, or `null` before it has. `model` and `effort` as Claude Code names them, `project` the folder it started in, `repo` as `owner/name`, `branch` checked out, `context` with its `percent` used, the input tokens `used` and the window's `size`, `fiveHour` and `sevenDay` with their `percent` used and `resetsAt` in Unix seconds, `cache` with its `percent` of input read from it, whether it's `warm` and when it `expiresAt`, `cost` in dollars, and `updatedAt`. Limits are there with a Claude plan, and an API has none, so its `cost` is what to show. A limit that has reset since is `0` with no `resetsAt`, and a session with no reply yet has the account's last limits. Each field is left out when Claude Code didn't say |
 | `send` | `sessionId`, `text`, `clientId`, `lane`, `attachments`, `pages` | Types into the session, or holds the message. Replies with `queued`. Slash commands work too. One that opens a page leaves it open for a client that says it shows `pages`, and the reply has `page: true`; for any other, the page is closed. A session that isn't running is resumed. See [The library](#the-library) and [Attachments](#attachments). |
@@ -276,6 +277,8 @@ During a turn, `tool.images` and `message.images` say the same. They come from t
 A message can come with pictures, videos and files: `upload` each one, then `send` their `uploadId`s as `attachments`, in the order they should go. `text` can then be empty. An upload is kept for its session, so `send` has to name the same `sessionId`.
 
 Uploads go in the Mac's Downloads folder, as anything else it's sent does, numbered the way Finder numbers a copy when the name is taken. They stay there when their session is deleted: what the helper forgets is which session they were for, then and after 30 days. A Mac that won't let the helper write in Downloads gets them in `~/.venes/uploads` instead.
+
+A file taken back out of the composer before its message went is no one's yet, so `discard` it: its file goes from Downloads too, and `discarded` says so. A file a message has, or one moved or changed since it came, stays, and so does one the helper got before 0.3.44, which it can't tell from one changed since.
 
 | `kind` | When | How it reaches Claude |
 |---|---|---|

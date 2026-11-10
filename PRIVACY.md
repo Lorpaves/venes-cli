@@ -28,9 +28,11 @@ The Macs you've paired, and the keys the app uses to reach them, are kept in you
 
 If you sign in to Tailscale in the app to reach your Mac on your tailnet, that connection is handled by Tailscale under its own privacy policy.
 
-## Camera, microphone and photos
+## Camera, microphone, dictation and photos
 
-The app uses the camera to scan the pairing code your Mac shows and to take the photos and videos you choose to send, the microphone for the sound of those videos, and your photo library to show recent photos you can attach. They stay on your device unless you send them to your Mac.
+The app uses the camera to scan the pairing code your Mac shows and to take the photos and videos you choose to send, the microphone for the sound of those videos and for dictation, and your photo library to show recent photos you can attach. They stay on your device unless you send them to your Mac.
+
+When you dictate a message, the app uses Apple's speech recognition to turn what you say into text. Apple may process the audio on its servers, under Apple's privacy policy. The app doesn't keep the audio, and only the text you send goes to your Mac.
 
 ## Tips
 
@@ -84,9 +86,11 @@ Venes CLI 运行在你的 Mac 上，在本机读取你的会话，并会从 GitH
 
 如果你在应用中登录 Tailscale，以便通过 tailnet 连接你的 Mac，该连接由 Tailscale 按其隐私政策处理。
 
-## 相机、麦克风和照片
+## 相机、麦克风、听写和照片
 
-应用使用相机扫描你的 Mac 显示的配对二维码，以及拍摄你选择发送的照片和视频；使用麦克风录制这些视频的声音；使用照片图库显示你可以附加的最近照片。除非你把它们发送到你的 Mac，否则它们只留在你的设备上。
+应用使用相机扫描你的 Mac 显示的配对二维码，以及拍摄你选择发送的照片和视频；使用麦克风录制这些视频的声音，以及用于听写；使用照片图库显示你可以附加的最近照片。除非你把它们发送到你的 Mac，否则它们只留在你的设备上。
+
+你听写消息时，应用使用 Apple 的语音识别把你说的话转成文字。Apple 可能在其服务器上处理这段音频，适用 Apple 的隐私政策。应用不保存音频，只有你发送的文字会传到你的 Mac。
 
 ## 打赏
 

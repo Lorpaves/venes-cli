@@ -268,7 +268,7 @@ A message that starts with `!` is a line for the shell, which runs in the termin
 
 ### Images
 
-Images stay out of pages and events, because a page can have dozens of them. `history` and `join` items with the role `user` or `tool` can have `images`, each `{id, mediaType, bytes}`, and `image` fetches one when given that `id` as `imageId`, with `unknown_image` if the transcript no longer has it. An image's `id` only means something to `image`, and calls made by a subagent have none.
+Images stay out of pages and events, because a page can have dozens of them. `history` and `join` items with the role `user` or `tool` can have `images`, each `{id, mediaType, bytes}` and its `width` and `height` in pixels as it shows, where its PNG, JPEG, GIF or WebP header tells, and `image` fetches one when given that `id` as `imageId`, with `unknown_image` if the transcript no longer has it. An image's `id` only means something to `image`, and calls made by a subagent have none.
 
 During a turn, `tool.images` and `message.images` say the same. They come from the transcript, so they can arrive after what they belong to. `tool.end.response` doesn't carry the image itself: its base64 is left out, and the rest stays.
 

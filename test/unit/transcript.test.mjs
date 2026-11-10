@@ -256,6 +256,24 @@ test('a page lists a message\'s images, and readImage fetches each one', () => {
   } finally { cleanup(); }
 });
 
+// The start of a PNG `width` by `height`: as much as its size is read from.
+const pngHeader = (width, height) => {
+  const head = Buffer.from('89504e470d0a1a0a0000000d49484452000000000000000008020000000000000000', 'hex');
+  head.writeUInt32BE(width, 16);
+  head.writeUInt32BE(height, 20);
+  return head.toString('base64');
+};
+
+test('a page says how big each picture is, where its header tells, for a tile to take its room', () => {
+  const { file, cleanup } = tempFile([sentWith('look', png(pngHeader(64, 40)), png('QUJD')), bash('t9'), shownByTool('t9', png(pngHeader(1170, 2532)))].join(''));
+  try {
+    const [sent, shown] = readHistory(file).items;
+    assert.deepEqual(sent.images.map(({ width, height }) => [width, height]), [[64, 40], [undefined, undefined]]);
+    assert.equal('width' in sent.images[1], false, 'one that can\'t be told says nothing');
+    assert.deepEqual((shown?.images ?? []).map(({ width, height }) => [width, height]), [[1170, 2532]]);
+  } finally { cleanup(); }
+});
+
 test('an image with nothing to show it under doesn\'t land on an earlier message', () => {
   const { file, cleanup } = tempFile([userText('earlier'), sentWith('<system-reminder>not for reading</system-reminder>', png('QUJD'))].join(''));
   try {

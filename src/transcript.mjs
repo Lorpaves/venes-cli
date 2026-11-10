@@ -3,6 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { imageSize } from './imagesize.mjs';
 import { splitAttachments } from './uploads.mjs';
 
 const INTERRUPTED = /^\[Request interrupted by user/;
@@ -130,9 +131,11 @@ function imagesIn(record) {
 }
 
 // Images are too big to send with a page, so a page says which there are and `readImage` fetches one.
+// Each says its size in pixels where that can be told, for a page to give it its room before then.
 function imageRefs(record) {
   return imagesIn(record).map(({ source, toolUseId }, index) => ({
     toolUseId, id: `${record[OFFSET]}:${index}`, mediaType: source.media_type, bytes: Math.floor(source.data.length * 3 / 4),
+    ...imageSize(source.data),
   }));
 }
 

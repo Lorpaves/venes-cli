@@ -513,6 +513,7 @@ async function sendsAPictureAndAFile(r) {
   const { items } = await r.client.request('history', { sessionId: id });
   const sent = items.findLast(item => item.role === 'user');
   assert.deepEqual([sent.text, sent.attachments, sent.images.length], [text, echo.attachments, 1]);
+  assert.deepEqual([sent.images[0].width, sent.images[0].height], [64, 64], 'a picture says how big it is');
   await assert.rejects(r.client.request('send', { sessionId: id, text: 'x', attachments: ['f'.repeat(32)] }), { code: 'bad_attachment' });
   const file = await r.client.request('file', { sessionId: id, uploadId: notes.uploadId });
   assert.deepEqual([file.name, file.mediaType, Buffer.from(file.data, 'base64').toString()], ['my notes.txt', 'text/plain', 'The marker word is PLUM.\n']);

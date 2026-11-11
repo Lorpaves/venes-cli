@@ -323,6 +323,8 @@ Pass `before` from one reply to get the page before it. It counts items from the
 
 The same prompt is open in the terminal at the same time, and the first answer wins. `request_closed` means the terminal got there first.
 
+Approving a `plan` leaves plan mode for the mode the session was last seen in before it started planning. Left to itself, Claude Code can switch to `acceptEdits`, which `Shift+Tab` passes through on the way to plan mode. For a session that was planning from its first hook, Claude Code picks the mode.
+
 `always` saves the rules in `permissionSuggestions`, usually to the project's `.claude/settings.local.json`. Show them before offering it. The list holds only rules: Claude Code also suggests switching the whole session to `acceptEdits`, which is more than "don't ask again for this", so those suggestions aren't passed on. If the list is empty, `always` is refused with `nothing_to_remember`.
 
 ### Events

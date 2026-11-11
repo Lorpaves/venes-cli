@@ -4,6 +4,9 @@
 //
 //   VENES_E2E_WS=/abs/workspace node test/e2e.mjs [case-prefix ...]
 //
+// VENES_E2E_CLAUDE_CONFIG_DIR runs the sessions with another Claude Code config, and so another
+// account, than this Mac's ~/.claude.
+//
 // Isolation: a dedicated tmux socket and VENES_HOME, and no user settings loaded.
 // Nothing is installed: the plugin exists only for these sessions.
 
@@ -29,6 +32,11 @@ if (!WS || !path.isAbsolute(WS)) throw new Error('VENES_E2E_WS must be an absolu
 // Unix socket paths are limited to 104 bytes on macOS, which rules out long temp dirs.
 const HOME = process.env.VENES_E2E_HOME || '/tmp/venes-e2e';
 const MODEL = process.env.VENES_E2E_MODEL || 'haiku';
+// The Claude Code config the sessions run with, and so the account, when not this Mac's own: the
+// helpers here read its transcripts too. Left out, it's ~/.claude.
+const CLAUDE_CONFIG = process.env.VENES_E2E_CLAUDE_CONFIG_DIR;
+if (CLAUDE_CONFIG) process.env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG;
+const configEnv = CLAUDE_CONFIG ? [`CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG}`] : [];
 const CLAUDE = execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim();
 const SOCK = 'venes-e2e';
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url));
@@ -162,6 +170,11 @@ class Run {
     for (const e of this.events) if (e.kind === 'request.opened') deny(e.request.id);
     this.client.on('message', m => { if (m.type === 'event' && m.event.kind === 'request.opened') deny(m.event.request.id); });
   }
+  // Every request opened from now on, allowed, whatever Claude reaches for to do the work.
+  allowEverything() {
+    const allow = requestId => this.client.request('respond', { requestId, decision: 'allow' }).catch(() => {});
+    this.client.on('message', m => { if (m.type === 'event' && m.event.kind === 'request.opened') allow(m.event.request.id); });
+  }
   async deliveredToClaude(text) {
     const end = await this.wait(e => e.kind === 'tool.end' && e.isError, 12000, 'rejected tool.end');
     assert.match(String(end.response), text);
@@ -175,7 +188,7 @@ function launch({ mode = 'default', sources = 'project', model = MODEL, settings
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
+    'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -186,7 +199,7 @@ function launchInRex({ mode = 'default', sources = 'project', model = MODEL, set
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8',
+    'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -200,8 +213,12 @@ async function ready(run) {
   while (Date.now() < end) {
     const p = run.pane();
     if (/Yes, I accept/.test(p)) { run.key('Down'); await delay(400); run.key('Enter'); await delay(1500); continue; }
-    if (!answered && /trust/i.test(p) && /Yes/.test(p)) { run.key('Enter'); answered = true; await delay(1500); continue; }
-    if (/shortcuts|mode on|\bmanual\b|plan mode|bypass permissions on/i.test(p)) { await delay(1200); return; }
+    if (!answered && /trust/i.test(p) && /Yes/.test(p)) {
+      // A config that hasn't trusted the workspace yet asks, with "No, exit" picked to start with.
+      if (/No, exit/.test(p) && !/❯\s*(\d\.\s*)?Yes/.test(p)) { run.key('Down'); await delay(400); }
+      run.key('Enter'); answered = true; await delay(1500); continue;
+    }
+    if (/shortcuts|mode on|\bmanual\b|plan mode|bypass permissions on|accept edits on/i.test(p)) { await delay(1200); return; }
     await delay(200);
   }
   throw new Error(`Claude did not start:\n${run.pane()}`);
@@ -351,6 +368,27 @@ T('plan_approve', { mode: 'plan' }, async r => {
   await r.turnEnd();
   assert.ok(exists('e2e-plan.txt'));
   assert.ok(r.events.some(e => e.kind === 'session.mode' && e.permissionMode === 'default'), 'mode change is reported');
+});
+
+// A session that worked in default and was cycled to plan mode with Shift+Tab, through acceptEdits, is
+// back in default once its plan is approved: Claude Code, left to pick, would keep acceptEdits.
+T('plan_approve_returns_to_its_mode', {}, async r => {
+  const seen = [];
+  r.client.on('message', m => { if (m.type === 'event' && m.event.kind === 'session.mode') seen.push(m.event.permissionMode); });
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  for (let i = 0; i < 5 && !/plan mode on/i.test(r.pane()); i += 1) { r.key('BTab'); await delay(700); }
+  assert.match(r.pane(), /plan mode on/i, 'Shift+Tab reaches plan mode');
+  await r.type(PLAN('planback'));
+  const request = await r.request('plan', 60000);
+  assert.match(request.input.plan, /e2e-planback/);
+  r.mark();
+  // acceptEdits lets a lone touch through, but not one Claude chains with more.
+  r.allowEverything();
+  await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+  await r.turnEnd(90000);
+  assert.ok(exists('e2e-planback.txt'));
+  assert.equal((await r.session()).permissionMode, 'default', `back in the mode it planned from; saw ${seen.join(' → ')}`);
 });
 
 T('plan_reject', { mode: 'plan' }, async r => {

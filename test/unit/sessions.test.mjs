@@ -89,6 +89,47 @@ test('approving a plan returns its input, because a bare allow is ignored', asyn
   assert.deepEqual((await held.decision).hookSpecificOutput.decision.updatedInput, plan.tool_input);
 });
 
+test('an approved plan goes back to the mode the session planned from', async () => {
+  const { store, hook } = setup();
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  for (const [before, after] of [['auto', 'auto'], ['acceptEdits', 'acceptEdits'], ['default', 'default'], ['bypassPermissions', 'bypassPermissions']]) {
+    hook('UserPromptSubmit', { permission_mode: before, prompt: 'go' });
+    hook('UserPromptSubmit', { permission_mode: 'plan', prompt: 'plan it' });
+    hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: `t-${before}` });
+    const held = hook('PermissionRequest', { ...plan, permission_mode: 'plan' });
+    store.respond(held.request.id, { decision: 'allow' });
+    const { decision } = (await held.decision).hookSpecificOutput;
+    assert.deepEqual(decision.updatedPermissions, [{ type: 'setMode', mode: after, destination: 'session' }], before);
+    assert.deepEqual(decision.updatedInput, plan.tool_input);
+    hook('PostToolUse', { ...plan, permission_mode: after, tool_use_id: `t-${before}`, tool_response: {} });
+  }
+});
+
+test('a session seen only in plan mode leaves the mode after its plan to Claude Code', async () => {
+  const store = new SessionStore();
+  const hook = (hook_event_name, fields = {}) => store.handleHook({ session_id: 'p', cwd: '/w', permission_mode: 'plan', hook_event_name, ...fields });
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('UserPromptSubmit', { prompt: 'plan it' });
+  hook('PreToolUse', { ...plan, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', plan);
+  store.respond(held.request.id, { decision: 'allow' });
+  const { decision } = (await held.decision).hookSpecificOutput;
+  assert.equal(decision.updatedPermissions, undefined);
+  assert.deepEqual(decision.updatedInput, plan.tool_input);
+});
+
+test('a denied plan sets no mode', async () => {
+  const { store, hook } = setup();
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('UserPromptSubmit', { permission_mode: 'plan', prompt: 'plan it' });
+  hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
+  const held = hook('PermissionRequest', { ...plan, permission_mode: 'plan' });
+  store.respond(held.request.id, { decision: 'deny', message: 'keep planning' });
+  const { decision } = (await held.decision).hookSpecificOutput;
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.updatedPermissions, undefined);
+});
+
 test('a question needs every answer', async () => {
   const { store, hook } = setup();
   const ask = { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Q1' }, { question: 'Q2' }] } };

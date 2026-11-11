@@ -50,8 +50,13 @@ function buildDecision(request, { decision, message, answers, always }) {
     return permissionDecision({ behavior: 'deny', message: message || 'Denied from Venes.' });
   }
   if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
-  // Questions and plans ignore a bare allow, so the input has to come back too.
-  if (request.kind === 'plan') return permissionDecision({ behavior: 'allow', updatedInput: request.input });
+  // Questions and plans ignore a bare allow, so the input has to come back too. An approved plan goes
+  // back to the mode the session was seen in before it planned: left out, Claude Code can pick
+  // acceptEdits, which a session cycled through on its way to plan mode. Not seen, it's left to Claude Code.
+  if (request.kind === 'plan') {
+    const back = request.modeBeforePlan ? { updatedPermissions: [{ type: 'setMode', mode: request.modeBeforePlan, destination: 'session' }] } : {};
+    return permissionDecision({ behavior: 'allow', updatedInput: request.input, ...back });
+  }
   if (request.kind === 'question') {
     const missing = (request.input.questions ?? []).filter(q => !answers?.[q.question]).map(q => q.question);
     if (missing.length) throw new HelperError('missing_answers', 'Every question needs an answer.', { missing });
@@ -418,6 +423,8 @@ export class SessionStore extends EventEmitter {
     s.cwd = ev.cwd ?? s.cwd;
     s.transcriptPath = ev.transcript_path ?? s.transcriptPath;
     if (ev.permission_mode && ev.permission_mode !== s.permissionMode) {
+      // The mode it planned from, which approving the plan goes back to.
+      if (ev.permission_mode === 'plan' && s.permissionMode && s.permissionMode !== 'plan') s.modeBeforePlan = s.permissionMode;
       s.permissionMode = ev.permission_mode;
       this.#emit(s, 'session.mode', { permissionMode: s.permissionMode });
     }
@@ -657,6 +664,7 @@ export class SessionStore extends EventEmitter {
       openedAt: Date.now(), finish,
     };
     if (request.kind === 'permission') request.permissionSuggestions = rememberableRules(ev.permission_suggestions);
+    if (request.kind === 'plan') request.modeBeforePlan = s.modeBeforePlan;
     this.#requests.set(request.id, request);
     this.#setStatus(s, 'waiting');
     this.#emit(s, 'request.opened', { request: this.#requestView(request) });

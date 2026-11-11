@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { makeOneTimeKey } from '../../src/pairing.mjs';
-import { pairingHost, readUpload, sshAccess, tailnetAddressOf } from '../../src/ssh.mjs';
+import { pairingHost, readUpload, screenAccess, sshAccess, tailnetAddressOf } from '../../src/ssh.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
 
@@ -47,6 +47,17 @@ test('with its Tailscale off a Mac is only reached by name, and with Remote Logi
   assert.equal(off.hosts.length, 1);
   assert.equal((await sshAccess(publicKey, { keys, sshOpen: async () => true, status: async () => undefined })).hosts.length, 1);
   assert.deepEqual((await sshAccess(publicKey, { keys, sshOpen: async () => false, status: async () => running })).hosts, []);
+});
+
+test('the screen is found by tailnet, with Remote Login off too, and says whether Screen Sharing answers', async () => {
+  const access = await screenAccess({ sharingOpen: async () => true, status: async () => running });
+  assert.deepEqual(access, { user: os.userInfo().username, port: 5900, on: true, hosts: ['100.96.228.46'] });
+  const off = await screenAccess({ sharingOpen: async () => false, status: async () => running });
+  assert.equal(off.on, false);
+  assert.deepEqual(off.hosts, ['100.96.228.46']);
+  // With the Mac's own Tailscale off, there's nowhere on the tailnet to go straight to.
+  assert.deepEqual((await screenAccess({ sharingOpen: async () => true, status: async () => ({ BackendState: 'Stopped' }) })).hosts, []);
+  assert.deepEqual((await screenAccess({ sharingOpen: async () => true, status: async () => undefined })).hosts, []);
 });
 
 test('only an Ed25519 key is let in', async t => {

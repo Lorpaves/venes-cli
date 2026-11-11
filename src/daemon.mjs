@@ -29,7 +29,7 @@ import {
   MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
 } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
-import { sshAccess } from './ssh.mjs';
+import { screenAccess, sshAccess } from './ssh.mjs';
 import { pruneStatus, readStatus } from './status.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
@@ -328,6 +328,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     discard: ({ sessionId, uploadId }) => discardUpload(uploads, sessionId, uploadId),
     // For a phone to send files over SSH, which takes its key.
     ssh: ({ publicKey }) => sshAccess(publicKey),
+    screen: () => screenAccess(),
     // What the session's status line was last told, or null before Claude Code has run it.
     statusLine: async ({ sessionId }) => {
       store.get(sessionId);

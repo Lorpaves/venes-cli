@@ -614,6 +614,14 @@ T('a_video_comes_through_receive_and_goes_in_by_its_path', {}, async r => {
   assert.deepEqual([big.code, big.reply.ok, big.reply.error?.code], [1, false, 'too_large']);
 });
 
+// A phone asks where this Mac's Screen Sharing is, to reach it straight over the tailnet: whatever this
+// Mac's Tailscale and Screen Sharing are doing, the reply says so in its own shape.
+T('the_screen_says_where_it_is', {}, async r => {
+  const access = await r.client.request('screen', {});
+  assert.deepEqual([access.user, access.port, typeof access.on, Array.isArray(access.hosts)], [os.userInfo().username, 5900, 'boolean', true]);
+  assert.ok(access.hosts.every(host => /^100\./.test(host)), `tailnet addresses only: ${access.hosts}`);
+});
+
 // A phone that paired through Rex lets its own key in, to send files over SSH. Here that key goes in
 // this run's authorized_keys, never this Mac's.
 T('a_phone_lets_its_key_in_for_ssh', {}, async r => {

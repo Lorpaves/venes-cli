@@ -8,6 +8,8 @@ import { allowPhone, authorizedKeysFile, isPortOpen, knownHostKey, localHostName
 import { MAX_UPLOAD_BYTES, tooLarge } from './uploads.mjs';
 
 const SSH_PORT = 22;
+// macOS's own Screen Sharing, a VNC server.
+const SCREEN_SHARING_PORT = 5900;
 const TAILSCALE_COMMANDS = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale'];
 const TAILSCALE_LIMIT_MS = 3000;
 // A phone that stops sending for this long has gone.
@@ -41,6 +43,14 @@ export async function tailscaleStatus() {
 // Where a pairing code over SSH sends the phone: this Mac's address on its tailnet while its
 // Tailscale is on, which reaches it from anywhere, or else its name on the local network.
 export const pairingHost = (status, localName) => tailnetAddressOf(status) ?? localName;
+
+// Where this Mac's own Screen Sharing is, for a phone to reach straight over the tailnet with no SSH,
+// so with Remote Login off too: this Mac's address there while its Tailscale is on, whether Screen
+// Sharing answers, and the account it signs in.
+export async function screenAccess({ sharingOpen = () => isPortOpen(SCREEN_SHARING_PORT), status = tailscaleStatus } = {}) {
+  const [on, current] = await Promise.all([sharingOpen(), status()]);
+  return { user: os.userInfo().username, port: SCREEN_SHARING_PORT, on, hosts: [tailnetAddressOf(current)].filter(Boolean) };
+}
 
 // Lets the phone's key in, and says where to log in with it: by tailnet first, which works from
 // anywhere, then by name on the local network. None while Remote Login is off.

@@ -625,6 +625,7 @@ T('the_screen_says_where_it_is', {}, async r => {
   for (const display of access.displays) {
     assert.ok(['x', 'y', 'width', 'height'].every(key => Number.isFinite(display[key])), JSON.stringify(display));
     assert.ok(display.x >= 0 && display.y >= 0 && display.width > 0 && display.height > 0, JSON.stringify(display));
+    assert.ok(Number.isInteger(display.id) && display.id > 0, `a CGDirectDisplayID: ${JSON.stringify(display)}`);
   }
 });
 

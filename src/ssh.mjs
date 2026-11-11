@@ -45,26 +45,29 @@ export async function tailscaleStatus() {
 export const pairingHost = (status, localName) => tailnetAddressOf(status) ?? localName;
 
 // Each of this Mac's displays as AppKit has it: [x, y, width, height] in points, from the bottom left
-// of the main display, through JavaScript for Automation.
+// of the main display, and its CGDirectDisplayID, through JavaScript for Automation.
 const DISPLAYS_SCRIPT = `ObjC.import('AppKit');
 const screens = $.NSScreen.screens, frames = [];
 for (let i = 0; i < screens.count; i++) {
-  const f = screens.objectAtIndex(i).frame;
-  frames.push([f.origin.x, f.origin.y, f.size.width, f.size.height]);
+  const screen = screens.objectAtIndex(i), f = screen.frame;
+  const number = screen.deviceDescription.objectForKey('NSScreenNumber');
+  frames.push([f.origin.x, f.origin.y, f.size.width, f.size.height, number.js]);
 }
 JSON.stringify(frames);`;
 const DISPLAYS_LIMIT_MS = 3000;
 
-// Where each display is in the one picture Screen Sharing sends of them all: from the top left of the
-// rectangle around them, in points, left to right.
+// Where each display is, from the top left of the rectangle around them all, in points, left to right,
+// and the CGDirectDisplayID that Screen Sharing's SetDisplay takes to send that display alone.
 export function displaysFrom(frames) {
   const valid = (Array.isArray(frames) ? frames : [])
-    .filter(f => Array.isArray(f) && f.length === 4 && f.every(Number.isFinite) && f[2] > 0 && f[3] > 0);
+    .filter(f => Array.isArray(f) && (f.length === 4 || f.length === 5) && f.slice(0, 4).every(Number.isFinite) && f[2] > 0 && f[3] > 0);
   if (!valid.length) return [];
   const left = Math.min(...valid.map(([x]) => x));
   const top = Math.max(...valid.map(([, y, , height]) => y + height));
   return valid
-    .map(([x, y, width, height]) => ({ x: x - left, y: top - (y + height), width, height }))
+    .map(([x, y, width, height, id]) => ({
+      x: x - left, y: top - (y + height), width, height, ...(Number.isInteger(id) && id > 0 ? { id } : {}),
+    }))
     .sort((a, b) => a.x - b.x || a.y - b.y);
 }
 

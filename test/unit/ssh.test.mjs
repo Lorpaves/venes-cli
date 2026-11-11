@@ -63,12 +63,14 @@ test('the screen is found by tailnet, with Remote Login off too, and says whethe
 
 test('displays are placed from the top left of all of them, left to right', () => {
   // A main display, a portrait one standing higher and lower to its right, and one more past that.
-  const frames = [[4000, 176, 1920, 1080], [0, 0, 2560, 1440], [2560, -1032, 1440, 2560]];
+  const frames = [[4000, 176, 1920, 1080, 5], [0, 0, 2560, 1440, 2], [2560, -1032, 1440, 2560, 3]];
   assert.deepEqual(displaysFrom(frames), [
-    { x: 0, y: 88, width: 2560, height: 1440 },
-    { x: 2560, y: 0, width: 1440, height: 2560 },
-    { x: 4000, y: 272, width: 1920, height: 1080 },
+    { x: 0, y: 88, width: 2560, height: 1440, id: 2 },
+    { x: 2560, y: 0, width: 1440, height: 2560, id: 3 },
+    { x: 4000, y: 272, width: 1920, height: 1080, id: 5 },
   ]);
+  // A display without a number of its own is still placed.
+  assert.deepEqual(displaysFrom([[0, 0, 1440, 900, 'x']]), [{ x: 0, y: 0, width: 1440, height: 900 }]);
   // One to the left of the main display moves the rest right.
   assert.deepEqual(displaysFrom([[0, 0, 1440, 900], [-1920, 0, 1920, 1080]]), [
     { x: 0, y: 0, width: 1920, height: 1080 },

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { makeOneTimeKey } from '../../src/pairing.mjs';
-import { pairingHost, readUpload, screenAccess, sshAccess, tailnetAddressOf } from '../../src/ssh.mjs';
+import { displaysFrom, pairingHost, readUpload, screenAccess, sshAccess, tailnetAddressOf } from '../../src/ssh.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
 
@@ -50,14 +50,33 @@ test('with its Tailscale off a Mac is only reached by name, and with Remote Logi
 });
 
 test('the screen is found by tailnet, with Remote Login off too, and says whether Screen Sharing answers', async () => {
-  const access = await screenAccess({ sharingOpen: async () => true, status: async () => running });
-  assert.deepEqual(access, { user: os.userInfo().username, port: 5900, on: true, hosts: ['100.96.228.46'] });
-  const off = await screenAccess({ sharingOpen: async () => false, status: async () => running });
+  const displays = async () => [{ x: 0, y: 0, width: 1440, height: 900 }];
+  const access = await screenAccess({ sharingOpen: async () => true, status: async () => running, displays });
+  assert.deepEqual(access, { user: os.userInfo().username, port: 5900, on: true, hosts: ['100.96.228.46'], displays: await displays() });
+  const off = await screenAccess({ sharingOpen: async () => false, status: async () => running, displays });
   assert.equal(off.on, false);
   assert.deepEqual(off.hosts, ['100.96.228.46']);
   // With the Mac's own Tailscale off, there's nowhere on the tailnet to go straight to.
-  assert.deepEqual((await screenAccess({ sharingOpen: async () => true, status: async () => ({ BackendState: 'Stopped' }) })).hosts, []);
-  assert.deepEqual((await screenAccess({ sharingOpen: async () => true, status: async () => undefined })).hosts, []);
+  assert.deepEqual((await screenAccess({ sharingOpen: async () => true, status: async () => ({ BackendState: 'Stopped' }), displays })).hosts, []);
+  assert.deepEqual((await screenAccess({ sharingOpen: async () => true, status: async () => undefined, displays })).hosts, []);
+});
+
+test('displays are placed from the top left of all of them, left to right', () => {
+  // A main display, a portrait one standing higher and lower to its right, and one more past that.
+  const frames = [[4000, 176, 1920, 1080], [0, 0, 2560, 1440], [2560, -1032, 1440, 2560]];
+  assert.deepEqual(displaysFrom(frames), [
+    { x: 0, y: 88, width: 2560, height: 1440 },
+    { x: 2560, y: 0, width: 1440, height: 2560 },
+    { x: 4000, y: 272, width: 1920, height: 1080 },
+  ]);
+  // One to the left of the main display moves the rest right.
+  assert.deepEqual(displaysFrom([[0, 0, 1440, 900], [-1920, 0, 1920, 1080]]), [
+    { x: 0, y: 0, width: 1920, height: 1080 },
+    { x: 1920, y: 180, width: 1440, height: 900 },
+  ]);
+  for (const bad of [undefined, 'x', [], [[0, 0, 0, 900]], [[0, 0, 'a', 900]], [[0, 0, 1440]]]) {
+    assert.deepEqual(displaysFrom(bad), []);
+  }
 });
 
 test('only an Ed25519 key is let in', async t => {

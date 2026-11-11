@@ -44,12 +44,47 @@ export async function tailscaleStatus() {
 // Tailscale is on, which reaches it from anywhere, or else its name on the local network.
 export const pairingHost = (status, localName) => tailnetAddressOf(status) ?? localName;
 
+// Each of this Mac's displays as AppKit has it: [x, y, width, height] in points, from the bottom left
+// of the main display, through JavaScript for Automation.
+const DISPLAYS_SCRIPT = `ObjC.import('AppKit');
+const screens = $.NSScreen.screens, frames = [];
+for (let i = 0; i < screens.count; i++) {
+  const f = screens.objectAtIndex(i).frame;
+  frames.push([f.origin.x, f.origin.y, f.size.width, f.size.height]);
+}
+JSON.stringify(frames);`;
+const DISPLAYS_LIMIT_MS = 3000;
+
+// Where each display is in the one picture Screen Sharing sends of them all: from the top left of the
+// rectangle around them, in points, left to right.
+export function displaysFrom(frames) {
+  const valid = (Array.isArray(frames) ? frames : [])
+    .filter(f => Array.isArray(f) && f.length === 4 && f.every(Number.isFinite) && f[2] > 0 && f[3] > 0);
+  if (!valid.length) return [];
+  const left = Math.min(...valid.map(([x]) => x));
+  const top = Math.max(...valid.map(([, y, , height]) => y + height));
+  return valid
+    .map(([x, y, width, height]) => ({ x: x - left, y: top - (y + height), width, height }))
+    .sort((a, b) => a.x - b.x || a.y - b.y);
+}
+
+// None where AppKit can't be asked, as with no one logged in at the Mac.
+export function displayLayout() {
+  return new Promise(resolve => {
+    execFile('osascript', ['-l', 'JavaScript', '-e', DISPLAYS_SCRIPT], { timeout: DISPLAYS_LIMIT_MS, encoding: 'utf8' }, (error, stdout) => {
+      try { resolve(error ? [] : displaysFrom(JSON.parse(stdout))); } catch { resolve([]); }
+    });
+  });
+}
+
 // Where this Mac's own Screen Sharing is, for a phone to reach straight over the tailnet with no SSH,
 // so with Remote Login off too: this Mac's address there while its Tailscale is on, whether Screen
-// Sharing answers, and the account it signs in.
-export async function screenAccess({ sharingOpen = () => isPortOpen(SCREEN_SHARING_PORT), status = tailscaleStatus } = {}) {
-  const [on, current] = await Promise.all([sharingOpen(), status()]);
-  return { user: os.userInfo().username, port: SCREEN_SHARING_PORT, on, hosts: [tailnetAddressOf(current)].filter(Boolean) };
+// Sharing answers, the account it signs in, and where its displays are in what it sends.
+export async function screenAccess({
+  sharingOpen = () => isPortOpen(SCREEN_SHARING_PORT), status = tailscaleStatus, displays = displayLayout,
+} = {}) {
+  const [on, current, layout] = await Promise.all([sharingOpen(), status(), displays()]);
+  return { user: os.userInfo().username, port: SCREEN_SHARING_PORT, on, hosts: [tailnetAddressOf(current)].filter(Boolean), displays: layout };
 }
 
 // Lets the phone's key in, and says where to log in with it: by tailnet first, which works from

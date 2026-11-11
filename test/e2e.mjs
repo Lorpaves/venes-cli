@@ -620,6 +620,12 @@ T('the_screen_says_where_it_is', {}, async r => {
   const access = await r.client.request('screen', {});
   assert.deepEqual([access.user, access.port, typeof access.on, Array.isArray(access.hosts)], [os.userInfo().username, 5900, 'boolean', true]);
   assert.ok(access.hosts.every(host => /^100\./.test(host)), `tailnet addresses only: ${access.hosts}`);
+  // Each display, from the top left of them all, as this Mac has at least one while someone's logged in.
+  assert.ok(access.displays.length >= 1, 'a display');
+  for (const display of access.displays) {
+    assert.ok(['x', 'y', 'width', 'height'].every(key => Number.isFinite(display[key])), JSON.stringify(display));
+    assert.ok(display.x >= 0 && display.y >= 0 && display.width > 0 && display.height > 0, JSON.stringify(display));
+  }
 });
 
 // A phone that paired through Rex lets its own key in, to send files over SSH. Here that key goes in

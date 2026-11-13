@@ -14,7 +14,7 @@ function tempDir(t) {
 test('sessions come back as they were saved', t => {
   const file = tempDir(t);
   const record = {
-    id: 'a', cwd: '/w', pane: '%1', tmuxSocket: '/s', transcriptPath: '/t', permissionMode: 'default', modes: ['bypassPermissions', 'default'], model: 'm', effort: 'high', startedAt: 1, lastEventAt: 2,
+    id: 'a', cwd: '/w', pane: '%1', tmuxSocket: '/s', transcriptPath: '/t', permissionMode: 'plan', modes: ['bypassPermissions', 'plan'], modeBeforePlan: 'bypassPermissions', model: 'm', effort: 'high', startedAt: 1, lastEventAt: 2,
   };
   writeRegistry(file, [record]);
   assert.deepEqual(readRegistry(file), [record]);

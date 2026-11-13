@@ -1,9 +1,10 @@
 // What has to outlive a restart for a session to stay listed and typed into, and for its plans to
-// offer the same ways on. There's no conversation text here: that stays in Claude Code's own transcript.
+// offer the same ways on and go back to the mode they were made in. There's no conversation text
+// here: that stays in Claude Code's own transcript.
 
 import fs from 'node:fs';
 
-const FIELDS = ['id', 'cwd', 'pane', 'tmuxSocket', 'rexSession', 'rexServer', 'transcriptPath', 'permissionMode', 'modes', 'model', 'effort', 'startedAt', 'lastEventAt'];
+const FIELDS = ['id', 'cwd', 'pane', 'tmuxSocket', 'rexSession', 'rexServer', 'transcriptPath', 'permissionMode', 'modes', 'modeBeforePlan', 'model', 'effort', 'startedAt', 'lastEventAt'];
 
 export function readRegistry(file) {
   try {

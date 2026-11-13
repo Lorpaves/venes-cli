@@ -232,6 +232,20 @@ test('a restored session still offers the modes it was in', () => {
   assert.deepEqual(offered({ permissionMode: 'auto' }), ['auto', 'default']);
 });
 
+// The helper restarts on each update, which can come while a session is planning.
+test('a session restored while it plans still goes back to the mode it planned from', async () => {
+  const store = new SessionStore();
+  store.restore([{ id: 'r', cwd: '/w', pane: '%1', permissionMode: 'plan', modes: ['bypassPermissions', 'plan'], modeBeforePlan: 'bypassPermissions' }]);
+  const hook = (hook_event_name, fields = {}) => store.handleHook({ session_id: 'r', cwd: '/w', permission_mode: 'plan', hook_event_name, ...fields });
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('UserPromptSubmit', { prompt: 'submit it again' });
+  hook('PreToolUse', { ...plan, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', plan);
+  store.respond(held.request.id, { decision: 'allow' });
+  const { decision } = (await held.decision).hookSpecificOutput;
+  assert.deepEqual(decision.updatedPermissions, [{ type: 'setMode', mode: 'bypassPermissions', destination: 'session' }]);
+});
+
 test('a question needs every answer', async () => {
   const { store, hook } = setup();
   const ask = { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Q1' }, { question: 'Q2' }] } };

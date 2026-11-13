@@ -13,6 +13,14 @@ export { HelperError };
 
 const EVENT_LOG_SIZE = 5000;
 const REQUEST_KIND = { AskUserQuestion: 'question', ExitPlanMode: 'plan' };
+// The ways on from a plan, as Claude Code's terminal words them (yyt in 2.1.318), by the mode each
+// switches to. The clear-context and Ultraplan rows aren't here: a hook can't do either.
+const PLAN_OPTION_LABELS = {
+  bypassPermissions: 'Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session',
+  auto: 'Yes, and use auto mode',
+  acceptEdits: 'Yes, auto-accept edits',
+  default: 'Yes, manually approve edits',
+};
 const MAX_FINISHED_TASKS = 100;
 // Slash commands that Claude Code runs itself never echo, so old entries have to fall off.
 const MAX_ECHOES = 32;
@@ -45,17 +53,31 @@ function permissionDecision(decision) {
   return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };
 }
 
-function buildDecision(request, { decision, message, answers, always }) {
+// The terminal offers bypassing permissions where that's on offer, else auto mode where that is, else
+// accepting edits, then asking for each edit. Claude Code doesn't tell a hook which modes it offers, but
+// one the session has been in is on offer, so a session never seen in bypass or auto mode is offered
+// what a session without them would be.
+function planOptions(modes) {
+  const first = modes.includes('bypassPermissions') ? 'bypassPermissions' : modes.includes('auto') ? 'auto' : 'acceptEdits';
+  return [first, 'default'].map(id => ({ id, label: PLAN_OPTION_LABELS[id] }));
+}
+
+function buildDecision(request, { decision, message, answers, always, option }) {
   if (decision === 'deny') {
     return permissionDecision({ behavior: 'deny', message: message || 'Denied from Venes.' });
   }
   if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
-  // Questions and plans ignore a bare allow, so the input has to come back too. An approved plan goes
-  // back to the mode the session was seen in before it planned: left out, Claude Code can pick
-  // acceptEdits, which a session cycled through on its way to plan mode. Not seen, it's left to Claude Code.
+  // Questions and plans ignore a bare allow, so the input has to come back too. A plan approved with
+  // one of its options switches to that option's mode. Approved without one, it goes back to the mode
+  // the session was seen in before it planned: left out, Claude Code can pick acceptEdits, which a
+  // session cycled through on its way to plan mode. Not seen, it's left to Claude Code.
   if (request.kind === 'plan') {
-    const back = request.modeBeforePlan ? { updatedPermissions: [{ type: 'setMode', mode: request.modeBeforePlan, destination: 'session' }] } : {};
-    return permissionDecision({ behavior: 'allow', updatedInput: request.input, ...back });
+    if (option != null && !request.options.some(o => o.id === option)) {
+      throw new HelperError('bad_option', `This plan doesn't offer ${option}.`);
+    }
+    const mode = option ?? request.modeBeforePlan;
+    const setMode = mode ? { updatedPermissions: [{ type: 'setMode', mode, destination: 'session' }] } : {};
+    return permissionDecision({ behavior: 'allow', updatedInput: request.input, ...setMode });
   }
   if (request.kind === 'question') {
     const missing = (request.input.questions ?? []).filter(q => !answers?.[q.question]).map(q => q.question);
@@ -95,7 +117,7 @@ function withoutImageData(response) {
 
 function blankSession(id) {
   return {
-    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0,
+    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0, modes: [],
   };
 }
 
@@ -144,7 +166,9 @@ export class SessionStore extends EventEmitter {
   // something, so an idle one would otherwise stay gone.
   restore(records) {
     for (const record of records) {
-      if (!this.#sessions.has(record.id)) this.#sessions.set(record.id, { ...blankSession(record.id), ...record });
+      // Saved before the helper kept the modes a session was in, the one it was last in is still one.
+      const modes = Array.isArray(record.modes) ? record.modes : [record.permissionMode].filter(Boolean);
+      if (!this.#sessions.has(record.id)) this.#sessions.set(record.id, { ...blankSession(record.id), ...record, modes });
     }
   }
 
@@ -428,6 +452,8 @@ export class SessionStore extends EventEmitter {
       s.permissionMode = ev.permission_mode;
       this.#emit(s, 'session.mode', { permissionMode: s.permissionMode });
     }
+    // Every mode it has been in, which says what a plan can offer. A subagent can run in a mode of its own.
+    if (ev.permission_mode && !ev.agent_id && !s.modes.includes(ev.permission_mode)) s.modes.push(ev.permission_mode);
     // A subagent can run at a level of its own, which says nothing about the session.
     if (ev.effort?.level && !ev.agent_id && ev.effort.level !== s.effort) {
       s.effort = ev.effort.level;
@@ -664,7 +690,10 @@ export class SessionStore extends EventEmitter {
       openedAt: Date.now(), finish,
     };
     if (request.kind === 'permission') request.permissionSuggestions = rememberableRules(ev.permission_suggestions);
-    if (request.kind === 'plan') request.modeBeforePlan = s.modeBeforePlan;
+    if (request.kind === 'plan') {
+      request.modeBeforePlan = s.modeBeforePlan;
+      request.options = planOptions(s.modes);
+    }
     this.#requests.set(request.id, request);
     this.#setStatus(s, 'waiting');
     this.#emit(s, 'request.opened', { request: this.#requestView(request) });

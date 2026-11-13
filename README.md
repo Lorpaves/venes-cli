@@ -152,7 +152,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
 | `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
-| `respond` | `requestId`, `decision`, `message`, `answers`, `always` | Answers a request |
+| `respond` | `requestId`, `decision`, `message`, `answers`, `always`, `option` | Answers a request |
 | `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
 | `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
 | `discard` | `sessionId`, `uploadId` | `discarded`: an upload taken back out of the composer before its message went. Its file goes from Downloads too, unless a message has it or it was moved or changed since. See [Attachments](#attachments) |
@@ -326,11 +326,13 @@ Pass `before` from one reply to get the page before it. It counts items from the
 |---|---|---|
 | `permission` | `toolName`, `input`, `permissionSuggestions` | `allow`, with `always: true` to not be asked again |
 | `question` | `input.questions` | `allow` with `answers`, mapping each question's text to the chosen label (join multi-select labels with commas) |
-| `plan` | `input.plan` | `allow` |
+| `plan` | `input.plan`, `options` | `allow`, with `option` set to the `id` of the one picked |
 
 The same prompt is open in the terminal at the same time, and the first answer wins. `request_closed` means the terminal got there first.
 
-Approving a `plan` leaves plan mode for the mode the session was last seen in before it started planning. Left to itself, Claude Code can switch to `acceptEdits`, which `Shift+Tab` passes through on the way to plan mode. For a session that was planning from its first hook, Claude Code picks the mode.
+A `plan`'s `options` are the ways on that Claude Code's terminal offers under a plan, in its order and its words: each an `id`, the mode the session switches to, and a `label`. The first is `bypassPermissions` if the session has been seen bypassing permissions, else `auto` if it has been seen in auto mode, else `acceptEdits`. Then comes `default`, asking for each edit. Claude Code doesn't tell a hook which modes it offers, so a mode the session hasn't been in isn't offered. The terminal's rows that clear the context or go to Ultraplan aren't there, because a hook can't do either. To keep planning, deny with what to change as the `message`.
+
+Approving a `plan` with an `option` switches to that mode. Approving it without one leaves plan mode for the mode the session was last seen in before it started planning. Left to itself, Claude Code can switch to `acceptEdits`, which `Shift+Tab` passes through on the way to plan mode. For a session that was planning from its first hook, Claude Code picks the mode.
 
 `always` saves the rules in `permissionSuggestions`, usually to the project's `.claude/settings.local.json`. Show them before offering it. The list holds only rules: Claude Code also suggests switching the whole session to `acceptEdits`, which is more than "don't ask again for this", so those suggestions aren't passed on. If the list is empty, `always` is refused with `nothing_to_remember`.
 
@@ -412,6 +414,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
 | `nothing_to_remember` | `always` was sent for a request with no rule to save |
+| `bad_option` | `option` isn't one of that plan's `options` |
 | `unknown_task` | The helper hasn't seen that background task |
 
 ## Behaviour worth knowing

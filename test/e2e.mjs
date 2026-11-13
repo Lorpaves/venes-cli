@@ -391,6 +391,20 @@ T('plan_approve_returns_to_its_mode', {}, async r => {
   assert.equal((await r.session()).permissionMode, 'default', `back in the mode it planned from; saw ${seen.join(' → ')}`);
 });
 
+// A plan offers the terminal's ways on, and picking one switches to its mode. Left to pick, Claude Code
+// puts a session that started in plan mode in default, as plan_approve shows.
+T('plan_approve_with_option', { mode: 'plan' }, async r => {
+  await r.type(PLAN('planoption'));
+  const request = await r.request('plan', 60000);
+  assert.deepEqual(request.options.map(o => o.id), ['acceptEdits', 'default']);
+  r.mark();
+  r.allowEverything();
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', option: 'acceptEdits' });
+  await r.turnEnd(90000);
+  assert.ok(exists('e2e-planoption.txt'));
+  assert.equal((await r.session()).permissionMode, 'acceptEdits');
+});
+
 T('plan_reject', { mode: 'plan' }, async r => {
   await r.type(PLAN('planno'));
   const request = await r.request('plan', 60000);

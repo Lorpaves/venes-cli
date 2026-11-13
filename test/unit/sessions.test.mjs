@@ -130,6 +130,75 @@ test('a denied plan sets no mode', async () => {
   assert.equal(decision.updatedPermissions, undefined);
 });
 
+test('a plan offers the ways on the terminal does, by the modes the session has been in', () => {
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  const offered = modes => {
+    const store = new SessionStore();
+    const hook = (hook_event_name, fields = {}) => store.handleHook({ session_id: 'o', cwd: '/w', hook_event_name, ...fields });
+    for (const mode of modes) hook('UserPromptSubmit', { permission_mode: mode, prompt: 'go' });
+    hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
+    return hook('PermissionRequest', { ...plan, permission_mode: 'plan' }).request.options;
+  };
+  const acceptEdits = { id: 'acceptEdits', label: 'Yes, auto-accept edits' };
+  const manual = { id: 'default', label: 'Yes, manually approve edits' };
+  assert.deepEqual(offered(['plan']), [acceptEdits, manual]);
+  assert.deepEqual(offered(['default', 'acceptEdits', 'plan']), [acceptEdits, manual]);
+  assert.deepEqual(offered(['auto', 'plan']), [{ id: 'auto', label: 'Yes, and use auto mode' }, manual]);
+  const bypass = { id: 'bypassPermissions', label: 'Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session' };
+  assert.deepEqual(offered(['bypassPermissions', 'plan']), [bypass, manual]);
+  assert.deepEqual(offered(['auto', 'bypassPermissions', 'plan']), [bypass, manual]);
+});
+
+test('a mode only a subagent ran in is not offered after a plan', () => {
+  const { hook } = setup();
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('UserPromptSubmit', { prompt: 'go' });
+  hook('PreToolUse', { ...bash, permission_mode: 'bypassPermissions', agent_id: 'sub', tool_use_id: 'b1' });
+  hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
+  const held = hook('PermissionRequest', { ...plan, permission_mode: 'plan' });
+  assert.deepEqual(held.request.options.map(o => o.id), ['acceptEdits', 'default']);
+});
+
+test('a plan approved with one of its options switches to that mode', async () => {
+  const { store, hook } = setup();
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('UserPromptSubmit', { prompt: 'go' });
+  hook('UserPromptSubmit', { permission_mode: 'plan', prompt: 'plan it' });
+  hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
+  const held = hook('PermissionRequest', { ...plan, permission_mode: 'plan' });
+  store.respond(held.request.id, { decision: 'allow', option: 'acceptEdits' });
+  const { decision } = (await held.decision).hookSpecificOutput;
+  assert.deepEqual(decision.updatedPermissions, [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
+  assert.deepEqual(decision.updatedInput, plan.tool_input);
+});
+
+test('a plan refuses an option it does not offer, and stays open', async () => {
+  const { store, hook } = setup();
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('UserPromptSubmit', { permission_mode: 'plan', prompt: 'plan it' });
+  hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
+  const held = hook('PermissionRequest', { ...plan, permission_mode: 'plan' });
+  assert.throws(() => store.respond(held.request.id, { decision: 'allow', option: 'bypassPermissions' }), { code: 'bad_option' });
+  store.respond(held.request.id, { decision: 'allow', option: 'default' });
+  const { decision } = (await held.decision).hookSpecificOutput;
+  assert.deepEqual(decision.updatedPermissions, [{ type: 'setMode', mode: 'default', destination: 'session' }]);
+});
+
+test('a restored session still offers the modes it was in', () => {
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  const offered = record => {
+    const store = new SessionStore();
+    store.restore([{ id: 'r', cwd: '/w', pane: '%1', ...record }]);
+    const hook = (hook_event_name, fields = {}) => store.handleHook({ session_id: 'r', cwd: '/w', hook_event_name, ...fields });
+    hook('UserPromptSubmit', { permission_mode: 'plan', prompt: 'plan it' });
+    hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
+    return hook('PermissionRequest', { ...plan, permission_mode: 'plan' }).request.options.map(o => o.id);
+  };
+  assert.deepEqual(offered({ permissionMode: 'default', modes: ['bypassPermissions', 'default'] }), ['bypassPermissions', 'default']);
+  // Saved by a helper that didn't keep them, it was at least in its last mode.
+  assert.deepEqual(offered({ permissionMode: 'auto' }), ['auto', 'default']);
+});
+
 test('a question needs every answer', async () => {
   const { store, hook } = setup();
   const ask = { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Q1' }, { question: 'Q2' }] } };

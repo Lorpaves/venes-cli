@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { choicesOf, chooseRow, isAbout, readPrompt } from '../../src/prompt.mjs';
+import { choicesOf, chooseRow, isAbout, knownTexts, readPrompt } from '../../src/prompt.mjs';
 
 const RULE = '─'.repeat(60);
 const DASHES = '╌'.repeat(60);
@@ -57,6 +57,35 @@ test('a prompt\'s rows are read in order, with notes and keys left off and wrapp
   assert.deepEqual(readPrompt(EDIT).rows.map(row => row.label), [
     'Yes', 'Yes, allow all edits in notes/ during this session and everything under it', 'No',
   ]);
+});
+
+// A command with no prefix to go by is offered whole, and a path in it is too long for a line.
+const LONG = 'SP="/private/tmp/claude-501/-private-tmp-claude-501--Users-lorpaves-Documents-Apps-Venes-f8e54056-dd57-4134-ac92-e9589a6edfd2-scratchpad-plan-test" && mkdir -p "$SP"';
+const PREFIX = BASH.replace(
+  '   2. Yes, and switch to auto mode · auto mode handles these prompts for you',
+  [
+    '   2. Yes, and don’t ask again for: SP="/private/tmp/claude-501/-private-tmp-claude-501--Users-lorpaves-Documents-Apps-Venes-f8e54056-dd57-41',
+    '      34-ac92-e9589a6edfd2-scratchpad-plan-test" && mkdir -p "$SP"',
+  ].join('\n'),
+);
+
+test('a break in a word the request itself says is joined without a space', () => {
+  const [, row] = readPrompt(PREFIX, knownTexts({ command: LONG, description: 'Make the folder' })).rows;
+  assert.equal(row.label, `Yes, and don’t ask again for: ${LONG}`);
+});
+
+test('any other break is read as a space', () => {
+  assert.equal(readPrompt(EDIT, knownTexts({ file_path: '/w/notes/todo.md', content: 'everythingunder, and everything under' })).rows[1].label,
+    'Yes, allow all edits in notes/ during this session and everything under it', 'the request says it both ways');
+  assert.match(readPrompt(PREFIX).rows[1].label, /dd57-41 34-ac92/, 'with nothing to go by');
+  assert.deepEqual(knownTexts({ command: 'ls', timeout: 5, nested: { a: 'b' }, empty: '' }), ['ls']);
+});
+
+test('a row is found to press whichever way a break was read', async () => {
+  const t = terminal([PREFIX, '❯ \n']);
+  const label = readPrompt(PREFIX, knownTexts({ command: LONG })).rows[1].label;
+  await chooseRow({}, { number: 2, label }, t);
+  assert.deepEqual(t.pressed, ['2']);
 });
 
 test('what a prompt is about is what it draws under its edge, not the conversation above', () => {

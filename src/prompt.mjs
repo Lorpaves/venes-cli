@@ -19,18 +19,44 @@ const NOTE = /\s+·\s.*$/;
 const KEY_HINT = /\s*\((?:shift\+tab|tab|esc|enter|ctrl\+\w+|alt\+\w+|meta\+\w+)\)$/i;
 // The box a Bash command is drawn in.
 const FRAME = /[│╌─\s]/g;
+// Shorter than this, the two sides of a break could be found together in a command by chance.
+const SHORTEST_JOIN = 6;
 const PRESS_LIMIT_MS = 3000;
 const PRESS_CHECK_MS = 50;
 // A plain row is chosen as its number is pressed. One that's still there and marked after this is an
 // input, which Enter chooses.
 const INPUT_SETTLE_MS = 500;
 
+// What a request says in its own words, like its command and paths, which its rows can quote.
+export function knownTexts(input) {
+  return Object.values(input ?? {}).filter(value => typeof value === 'string' && value);
+}
+
+// A row too long for its line goes on to the next: at a space where there is one, and anywhere in a
+// word too long for a line, such as a path. The terminal draws both alike, so a break inside
+// something the request itself says is joined without a space, and any other with one.
+function joinLines(lines, known) {
+  let text = lines[0].trim();
+  for (const line of lines.slice(1)) {
+    const next = line.trim();
+    const tail = text.match(/\S*$/)[0];
+    const head = next.match(/^\S*/)[0];
+    const whole = `${tail}${head}`;
+    const unbroken = tail && head && whole.length >= SHORTEST_JOIN
+      && known.some(text => text.includes(whole)) && !known.some(text => text.includes(`${tail} ${head}`));
+    text += unbroken ? next : ` ${next}`;
+  }
+  return text;
+}
+
 const labelOf = text => text.replace(NOTE, '').replace(KEY_HINT, '').replace(/\s+/g, ' ').trim();
+// Rows compared, as a break could be read either way.
+const sameLabel = (a, b) => a.replace(/\s+/g, '') === b.replace(/\s+/g, '');
 
 // The prompt open at the bottom of the screen, or undefined when there's none: its `question`, what
 // it's `about` as drawn above that, and its `rows`, each with its `number`, `label`, and whether it's
-// `marked`. Rows that wrap are joined.
-export function readPrompt(screen) {
+// `marked`. `known` are the request's own words, which tell a break in a word from one at a space.
+export function readPrompt(screen, known = []) {
   const lines = screen.trimEnd().split('\n').slice(-SEARCH_LINES);
   let end = lines.length - 1;
   const skipBlank = () => { while (end >= 0 && !lines[end].trim()) end -= 1; };
@@ -46,9 +72,9 @@ export function readPrompt(screen) {
   for (const line of lines.slice(start + 1, end + 1)) {
     const match = line.match(ROW);
     if (match && Number(match[2]) === rows.length + 1) {
-      rows.push({ number: Number(match[2]), text: match[3], marked: Boolean(match[1]) });
+      rows.push({ number: Number(match[2]), lines: [match[3]], marked: Boolean(match[1]) });
     } else if (rows.length) {
-      rows.at(-1).text += ` ${line.trim()}`;
+      rows.at(-1).lines.push(line);
     } else {
       return undefined;
     }
@@ -58,7 +84,7 @@ export function readPrompt(screen) {
   return {
     question: lines[start].trim(),
     about: lines.slice(edge + 1, start).join('\n').trimEnd(),
-    rows: rows.map(({ number, text, marked }) => ({ number, label: labelOf(text), marked })),
+    rows: rows.map(({ number, lines: rowLines, marked }) => ({ number, label: labelOf(joinLines(rowLines, known)), marked })),
   };
 }
 
@@ -88,9 +114,9 @@ export function isAbout(prompt, input = {}) {
 }
 
 const isSamePrompt = (a, b) => Boolean(a && b) && a.question === b.question && a.about === b.about
-  && a.rows.length === b.rows.length && a.rows.every((row, i) => row.label === b.rows[i].label);
+  && a.rows.length === b.rows.length && a.rows.every((row, i) => sameLabel(row.label, b.rows[i].label));
 
-const promptChanged = () => new HelperError('prompt_changed', 'The terminal isn\'t showing that choice any more.');
+const promptChanged = () => new HelperError('prompt_changed', 'The prompt changed in the terminal. Choose again.');
 
 // Presses the row with this number and label on the prompt the terminal shows, and waits for the
 // prompt to go.
@@ -98,7 +124,7 @@ export async function chooseRow(session, { number, label }, {
   read = readScreen, press = pressKey, limit = PRESS_LIMIT_MS, inputSettle = INPUT_SETTLE_MS,
 } = {}) {
   const before = readPrompt(await read(session));
-  if (!before?.rows.some(row => row.number === number && row.label === label)) throw promptChanged();
+  if (!before?.rows.some(row => row.number === number && sameLabel(row.label, label))) throw promptChanged();
   await press(session, String(number));
   const pressedAt = Date.now();
   let entered = false;

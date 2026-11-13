@@ -85,7 +85,7 @@ function buildDecision(request, { decision, message, answers, always, option }) 
   if (decision === 'deny') return permissionDecision(denial(request, message));
   if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
   if (request.kind === 'permission' && option != null) {
-    throw new HelperError('bad_option', 'A permission prompt\'s row is chosen in the terminal.');
+    throw new HelperError('bad_option', 'That choice is made in the terminal, which this request can\'t reach. Choose again.');
   }
   // Questions and plans ignore a bare allow, so the input has to come back too. A plan approved with
   // one of its options switches to that option's mode. Approved without one, it goes back to the mode
@@ -93,7 +93,7 @@ function buildDecision(request, { decision, message, answers, always, option }) 
   // session cycled through on its way to plan mode. Not seen, it's left to Claude Code.
   if (request.kind === 'plan') {
     if (option != null && !request.options.some(o => o.id === option)) {
-      throw new HelperError('bad_option', `This plan doesn't offer ${option}.`);
+      throw new HelperError('bad_option', 'That choice isn\'t offered for this plan. Choose again.');
     }
     const mode = option ?? request.modeBeforePlan;
     const setMode = mode ? { updatedPermissions: [{ type: 'setMode', mode, destination: 'session' }] } : {};
@@ -474,7 +474,7 @@ export class SessionStore extends EventEmitter {
     const request = this.#requests.get(requestId);
     if (!request) throw new HelperError('request_closed', 'This request has already been answered or closed.');
     const offered = request.options?.find(o => o.id === option);
-    if (!offered) throw new HelperError('bad_option', `This request doesn't offer ${option}.`);
+    if (!offered) throw new HelperError('bad_option', 'That choice isn\'t offered any more. Choose again.');
     request.choosing = true;
     return { number: Number(offered.id), label: offered.label };
   }

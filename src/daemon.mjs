@@ -25,7 +25,7 @@ import { avatarSource } from './avatar.mjs';
 import {
   closePage, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
 } from './terminal.mjs';
-import { choicesOf, chooseRow, isAbout, readPrompt } from './prompt.mjs';
+import { choicesOf, chooseRow, isAbout, knownTexts, readPrompt } from './prompt.mjs';
 import {
   MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
 } from './uploads.mjs';
@@ -52,6 +52,9 @@ const REGISTRY_SAVE_MS = 2000;
 // Claude Code draws a permission prompt as it asks the hook, so the screen is read for a moment.
 const PROMPT_READ_LIMIT_MS = 2000;
 const PROMPT_READ_CHECK_MS = 100;
+// It can change a row after, as when it settles what not to ask about again, so it's watched a while.
+const PROMPT_WATCH_MS = 15000;
+const PROMPT_WATCH_CHECK_MS = 500;
 // Enough of the end of a transcript to find what was last said.
 const LAST_WORDS_ITEMS = 40;
 // Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux, Rex's
@@ -107,22 +110,42 @@ function createHookServer(store) {
 
 // The rows a permission prompt shows in its terminal past Yes and before No, for a client to offer.
 // Only a request on its own can be told apart on the screen, and a prompt is taken once it reads
-// the same twice, so that one still being drawn, or the last one going, isn't.
+// the same twice, so that one still being drawn, or the last one going, isn't. A row that changes
+// after is offered again.
 async function offerPromptRows(store, request) {
   const session = store.find(request.sessionId);
   if (!session?.pane) return;
+  const known = knownTexts(request.input);
+  const isAlone = () => store.requestOf(request.id) && store.pendingFor(session).length === 1;
+  const read = async () => readPrompt(await readScreen(session), known);
   const end = Date.now() + PROMPT_READ_LIMIT_MS;
   let last;
-  while (Date.now() < end) {
-    if (!store.requestOf(request.id) || store.pendingFor(session).length !== 1) return;
-    const prompt = readPrompt(await readScreen(session));
-    if (prompt && JSON.stringify(prompt) === JSON.stringify(last)) {
-      if (isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
-      return;
-    }
+  for (;;) {
+    if (!isAlone() || Date.now() >= end) return;
+    const prompt = await read();
+    if (prompt && JSON.stringify(prompt) === JSON.stringify(last)) break;
     last = prompt;
     await pause(PROMPT_READ_CHECK_MS);
   }
+  if (!isAbout(last, request.input)) return;
+  store.offerRows(request.id, choicesOf(last));
+  const watchEnd = Date.now() + PROMPT_WATCH_MS;
+  while (Date.now() < watchEnd) {
+    await pause(PROMPT_WATCH_CHECK_MS);
+    if (!isAlone()) return;
+    const prompt = await read();
+    // Gone, or another prompt in its place, which is the next request's to read.
+    if (!prompt || prompt.question !== last.question || prompt.about !== last.about) return;
+    store.offerRows(request.id, choicesOf(prompt));
+  }
+}
+
+// What the prompt shows now, for a client whose row had changed.
+async function reofferPromptRows(store, request) {
+  const session = store.find(request.sessionId);
+  if (!session?.pane || store.pendingFor(session).length !== 1) return;
+  const prompt = readPrompt(await readScreen(session), knownTexts(request.input));
+  if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
 function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined) {
@@ -359,6 +382,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
           await typing(session.id, () => chooseRow(session, row));
         } catch (error) {
           store.notChosen(msg.requestId);
+          if (error.code === 'prompt_changed') reofferPromptRows(store, request).catch(() => {});
           throw error;
         }
         store.chosen(msg.requestId);

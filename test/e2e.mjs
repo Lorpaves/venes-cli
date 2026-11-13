@@ -296,6 +296,23 @@ T('a_prompt_offers_its_rows_and_a_row_is_pressed_there', {}, async r => {
   if (/edits/i.test(row.label)) assert.equal((await r.session()).permissionMode, 'acceptEdits', row.label);
 });
 
+// A row that quotes the whole command, with a path too long for a line: the break inside the path
+// isn't read as a space. Claude Code offers a command whole when it finds no prefix in it, as for one
+// that starts with a quoted path.
+T('a_prompt_row_quoting_a_long_path_reads_it_whole', {}, async r => {
+  const folder = `wrap-${'0123456789abcdef-'.repeat(7)}end`;
+  await r.type(`Use the Bash tool to run exactly this command: "${WS}/${folder}/bin/python" -m pytest -q 2>&1 | tail -5; ls -a -- then reply with only the word DONE.`);
+  const request = await r.request('permission');
+  const { request: updated } = await r.wait(e => e.kind === 'request.updated' && e.request.id === request.id, 5000, 'request.updated')
+    .catch(() => ({ request: { options: [] } }));
+  const quoting = updated.options.find(o => o.label.includes('wrap-'));
+  console.log(`      rows: ${updated.options.map(o => o.label.slice(0, 70)).join(' | ') || 'none'}`);
+  await r.client.request('respond', { requestId: request.id, decision: 'deny', message: 'Not needed. Just reply.' });
+  await r.turnEnd();
+  if (!quoting) return;
+  assert.ok(quoting.label.includes(folder), quoting.label);
+});
+
 T('in_rex_a_prompt_row_is_pressed_there', { rex: true }, async r => {
   await r.type('Use the Write tool to create e2e-rexrows.txt containing the word rows, then reply with only the word DONE.');
   const request = await r.request('permission');

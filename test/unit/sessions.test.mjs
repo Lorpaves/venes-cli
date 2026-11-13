@@ -112,6 +112,69 @@ test('a subagent is told no the way the terminal tells one, and its turn goes on
   });
 });
 
+// The rows a permission prompt shows past Yes and before No, read off the terminal by the daemon.
+test('a permission prompt\'s rows are offered once read, and a change brings them again', () => {
+  const { store, hook, events } = setup();
+  hook('PreToolUse', { ...bash, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', bash);
+  const auto = [{ number: 2, label: 'Yes, and switch to auto mode' }];
+  store.offerRows(held.request.id, auto);
+  store.offerRows(held.request.id, auto);
+  const updates = events.filter(e => e.kind === 'request.updated');
+  assert.equal(updates.length, 1, 'the same rows again change nothing');
+  assert.deepEqual(updates[0].request.options, [{ id: '2', label: 'Yes, and switch to auto mode' }]);
+  assert.deepEqual(store.requestOf(held.request.id).options, [{ id: '2', label: 'Yes, and switch to auto mode' }]);
+  store.offerRows(held.request.id, []);
+  assert.equal(events.filter(e => e.kind === 'request.updated').length, 2);
+  store.respond(held.request.id, { decision: 'allow' });
+  store.offerRows(held.request.id, auto);
+  assert.equal(events.filter(e => e.kind === 'request.updated').length, 2, 'a closed request has none');
+});
+
+test('only a permission prompt has rows read for it', () => {
+  const { store, hook, events } = setup();
+  const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p' } };
+  hook('PreToolUse', { ...plan, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', plan);
+  store.offerRows(held.request.id, [{ number: 2, label: 'Yes, and use auto mode' }]);
+  assert.ok(!events.some(e => e.kind === 'request.updated'));
+});
+
+test('a row picked on a client is pressed in the terminal, which answers Claude Code', async () => {
+  const { store, hook, events } = setup();
+  hook('PreToolUse', { ...bash, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', bash);
+  store.offerRows(held.request.id, [{ number: 2, label: 'Yes, and switch to auto mode' }]);
+  assert.throws(() => store.choose(held.request.id, '3'), { code: 'bad_option' });
+  assert.throws(() => store.respond(held.request.id, { decision: 'allow', option: '2' }), { code: 'bad_option' }, 'the hook can\'t do what the row does');
+  assert.deepEqual(store.choose(held.request.id, '2'), { number: 2, label: 'Yes, and switch to auto mode' });
+  store.chosen(held.request.id);
+  assert.equal(await held.decision, undefined, 'the hook has nothing to say');
+  assert.deepEqual((({ decision, by }) => ({ decision, by }))(closed(events)), { decision: 'allow', by: 'client' });
+  assert.equal(store.requestOf(held.request.id), undefined);
+});
+
+test('a row being pressed that the terminal is seen to take still counts as the client\'s', () => {
+  const { store, hook, events } = setup();
+  hook('PreToolUse', { ...bash, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', bash);
+  store.offerRows(held.request.id, [{ number: 2, label: 'Yes, and switch to auto mode' }]);
+  store.choose(held.request.id, '2');
+  hook('PostToolUse', { ...bash, tool_use_id: 't1', tool_response: {} });
+  assert.equal(closed(events).by, 'client');
+});
+
+test('a row that couldn\'t be pressed leaves the request as it was', () => {
+  const { store, hook, events } = setup();
+  hook('PreToolUse', { ...bash, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', bash);
+  store.offerRows(held.request.id, [{ number: 2, label: 'Yes, and switch to auto mode' }]);
+  store.choose(held.request.id, '2');
+  store.notChosen(held.request.id);
+  hook('PostToolUse', { ...bash, tool_use_id: 't1', tool_response: {} });
+  assert.equal(closed(events).by, 'terminal');
+});
+
 test('approving a plan returns its input, because a bare allow is ignored', async () => {
   const { store, hook } = setup();
   const plan = { tool_name: 'ExitPlanMode', tool_input: { plan: '# p', planFilePath: '/p.md' } };

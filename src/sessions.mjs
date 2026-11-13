@@ -84,6 +84,9 @@ function denial(request, message) {
 function buildDecision(request, { decision, message, answers, always, option }) {
   if (decision === 'deny') return permissionDecision(denial(request, message));
   if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
+  if (request.kind === 'permission' && option != null) {
+    throw new HelperError('bad_option', 'A permission prompt\'s row is chosen in the terminal.');
+  }
   // Questions and plans ignore a bare allow, so the input has to come back too. A plan approved with
   // one of its options switches to that option's mode. Approved without one, it goes back to the mode
   // the session was seen in before it planned: left out, Claude Code can pick acceptEdits, which a
@@ -172,6 +175,11 @@ export class SessionStore extends EventEmitter {
   sessions() { return [...this.#sessions.values()].map(s => this.#sessionView(s)); }
 
   requests() { return [...this.#requests.values()].map(r => this.#requestView(r)); }
+
+  requestOf(requestId) {
+    const request = this.#requests.get(requestId);
+    return request && this.#requestView(request);
+  }
 
   liveSessions() { return [...this.#sessions.values()].filter(s => s.status !== 'ended'); }
 
@@ -447,6 +455,39 @@ export class SessionStore extends EventEmitter {
     if (!request) throw new HelperError('request_closed', 'This request has already been answered or closed.');
     const output = buildDecision(request, answer);
     this.#closeRequest(request, { decision: answer.decision, by: 'client', output });
+  }
+
+  // The rows a permission prompt shows in the terminal past Yes and before No, once they're read off
+  // the screen, for a client to offer as `options`.
+  offerRows(requestId, rows) {
+    const request = this.#requests.get(requestId);
+    if (request?.kind !== 'permission') return;
+    const options = rows.map(({ number, label }) => ({ id: String(number), label }));
+    if (JSON.stringify(options) === JSON.stringify(request.options ?? [])) return;
+    request.options = options;
+    this.#emit(this.#sessions.get(request.sessionId), 'request.updated', { request: this.#requestView(request) });
+  }
+
+  // The row of a permission prompt that a client picked, to press in the terminal. Until it's
+  // pressed, or found gone, the request counts as being answered from the client.
+  choose(requestId, option) {
+    const request = this.#requests.get(requestId);
+    if (!request) throw new HelperError('request_closed', 'This request has already been answered or closed.');
+    const offered = request.options?.find(o => o.id === option);
+    if (!offered) throw new HelperError('bad_option', `This request doesn't offer ${option}.`);
+    request.choosing = true;
+    return { number: Number(offered.id), label: offered.label };
+  }
+
+  // Pressed, so Claude Code has its answer from the terminal and the hook needs none.
+  chosen(requestId) {
+    const request = this.#requests.get(requestId);
+    if (request) this.#closeRequest(request, { decision: 'allow', by: 'client' });
+  }
+
+  notChosen(requestId) {
+    const request = this.#requests.get(requestId);
+    if (request) request.choosing = false;
   }
 
   #touch(ev, tmux) {
@@ -768,7 +809,8 @@ export class SessionStore extends EventEmitter {
   #closeRequest(request, { decision, by, output }) {
     this.#requests.delete(request.id);
     const s = this.#sessions.get(request.sessionId);
-    this.#emit(s, 'request.closed', { requestId: request.id, decision, by });
+    // A row picked on a client gets pressed in the terminal, which can be seen to answer first.
+    this.#emit(s, 'request.closed', { requestId: request.id, decision, by: request.choosing && by === 'terminal' ? 'client' : by });
     if (s.status === 'waiting' && this.pendingFor(s).length === 0) this.#setStatus(s, 'running');
     request.finish(output);
   }
@@ -797,7 +839,7 @@ export class SessionStore extends EventEmitter {
     };
   }
 
-  #requestView({ finish, ...request }) {
+  #requestView({ finish, choosing, ...request }) {
     return request;
   }
 }

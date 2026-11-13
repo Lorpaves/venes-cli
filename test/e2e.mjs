@@ -279,6 +279,55 @@ T('deny_with_nothing_said_stops_the_turn', {}, async r => {
   assert.ok(!exists('e2e-stop.txt'));
 });
 
+// A permission prompt's rows past Yes and before No are read off the terminal, and one picked on a
+// client is pressed there, so Claude Code does what that row does.
+T('a_prompt_offers_its_rows_and_a_row_is_pressed_there', {}, async r => {
+  await r.type('Use the Write tool to create e2e-rows.txt containing the word rows, then reply with only the word DONE.');
+  const request = await r.request('permission');
+  const { request: updated } = await r.wait(e => e.kind === 'request.updated' && e.request.id === request.id, 5000, 'request.updated');
+  console.log(`      rows: ${updated.options.map(o => o.label).join(' | ')}`);
+  assert.ok(updated.options.length > 0, 'a write offers more than Yes and No');
+  const [row] = updated.options;
+  await assert.rejects(r.client.request('respond', { requestId: request.id, decision: 'allow', option: '9' }), { code: 'bad_option' });
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', option: row.id });
+  assert.deepEqual((({ decision, by }) => [decision, by])(await r.closed(request.id)), ['allow', 'client']);
+  await r.turnEnd(60000);
+  assert.ok(exists('e2e-rows.txt'));
+  if (/edits/i.test(row.label)) assert.equal((await r.session()).permissionMode, 'acceptEdits', row.label);
+});
+
+T('in_rex_a_prompt_row_is_pressed_there', { rex: true }, async r => {
+  await r.type('Use the Write tool to create e2e-rexrows.txt containing the word rows, then reply with only the word DONE.');
+  const request = await r.request('permission');
+  const { request: updated } = await r.wait(e => e.kind === 'request.updated' && e.request.id === request.id, 5000, 'request.updated');
+  const [row] = updated.options;
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', option: row.id });
+  assert.deepEqual((({ decision, by }) => [decision, by])(await r.closed(request.id)), ['allow', 'client']);
+  await r.turnEnd(60000);
+  assert.ok(exists('e2e-rexrows.txt'));
+});
+
+// The row that switches to auto mode, where the account has it: Claude Code switches as its own
+// prompt would, and nothing more is asked.
+T('a_prompt_row_switches_to_auto_mode', {}, async r => {
+  await r.type(TOUCH('auto'));
+  const request = await r.request('permission');
+  const { request: updated } = await r.wait(e => e.kind === 'request.updated' && e.request.id === request.id, 5000, 'request.updated')
+    .catch(() => ({ request: { options: [] } }));
+  const auto = updated.options.find(o => /auto mode/i.test(o.label));
+  if (!auto) {
+    console.log(`      this account's prompt has no auto mode row: ${updated.options.map(o => o.label).join(' | ') || 'none'}`);
+    await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+    await r.turnEnd();
+    return;
+  }
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', option: auto.id });
+  await r.closed(request.id);
+  await r.turnEnd(60000);
+  assert.ok(exists('e2e-auto.txt'));
+  assert.equal((await r.session()).permissionMode, 'auto');
+});
+
 T('terminal_approves_first', {}, async r => {
   await r.type(TOUCH('term'));
   const request = await r.request('permission');
@@ -401,6 +450,24 @@ T('plan_approve_returns_to_its_mode', {}, async r => {
   await r.turnEnd(90000);
   assert.ok(exists('e2e-planback.txt'));
   assert.equal((await r.session()).permissionMode, 'default', `back in the mode it planned from; saw ${seen.join(' → ')}`);
+});
+
+// The same from bypassing permissions, which a hook can only switch back to in a session launched in it.
+T('plan_approve_returns_to_bypass', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  for (let i = 0; i < 6 && !/plan mode on/i.test(r.pane()); i += 1) { r.key('BTab'); await delay(700); }
+  assert.match(r.pane(), /plan mode on/i, 'Shift+Tab reaches plan mode');
+  await r.type(PLAN('planbypass'));
+  const request = await r.request('plan', 60000);
+  assert.equal(request.modeBeforePlan, 'bypassPermissions');
+  assert.equal(request.options[0].id, 'bypassPermissions');
+  r.mark();
+  await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+  await r.turnEnd(90000);
+  assert.ok(exists('e2e-planbypass.txt'));
+  assert.equal((await r.session()).permissionMode, 'bypassPermissions');
+  assert.match(r.pane(), /bypass permissions on/i);
 });
 
 // A plan offers the terminal's ways on, and picking one switches to its mode. Left to pick, Claude Code

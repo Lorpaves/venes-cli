@@ -324,11 +324,13 @@ Pass `before` from one reply to get the page before it. It counts items from the
 
 | `request.kind` | What to show | To approve |
 |---|---|---|
-| `permission` | `toolName`, `input`, `permissionSuggestions` | `allow`, with `always: true` to not be asked again |
+| `permission` | `toolName`, `input`, `permissionSuggestions`, `options` | `allow`, with `always: true` to not be asked again, or with `option` set to the `id` of one of its `options` |
 | `question` | `input.questions` | `allow` with `answers`, mapping each question's text to the chosen label (join multi-select labels with commas) |
 | `plan` | `input.plan`, `options` | `allow`, with `option` set to the `id` of the one picked |
 
 The same prompt is open in the terminal at the same time, and the first answer wins. `request_closed` means the terminal got there first.
+
+A `permission`'s `options` are the rows its prompt shows in the terminal between Yes and No, such as switching to auto mode, in the terminal's words: each an `id` and a `label`. They depend on the tool, the mode and the account, and Claude Code doesn't tell a hook them, so they're read off the screen once the prompt shows there, and a `request.updated` brings them. A request on its own in a session in Rex or tmux gets them. Picking one presses that row in the terminal, so Claude Code does what it does for that row there. `prompt_changed` means the terminal no longer shows it. Without `options`, `always: true` is the way not to be asked again.
 
 A `plan`'s `options` are the ways on that Claude Code's terminal offers under a plan, in its order and its words: each an `id`, the mode the session switches to, and a `label`. The first is `bypassPermissions` if the session has been seen bypassing permissions, else `auto` if it has been seen in auto mode, else `acceptEdits`. Then comes `default`, asking for each edit. Claude Code doesn't tell a hook which modes it offers, so a mode the session hasn't been in isn't offered. The terminal's rows that clear the context or go to Ultraplan aren't there, because a hook can't do either. To keep planning, deny with what to change as the `message`.
 
@@ -360,6 +362,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `tool.images` | `toolUseId`, `images` |
 | `message.images` | `images`, for the latest `message.user` |
 | `request.opened` | `request` |
+| `request.updated` | `request`, as it is now: so far, a `permission` with the `options` its prompt shows |
 | `request.closed` | `requestId`, `decision`, `by` (`client`, `terminal`, `turn_end`, `session_end`) |
 | `turn.end` | `lastMessage`, `backgroundTasks` (a count), `tasks` (those running) |
 | `turn.interrupted`, `turn.error` | `error`, `details` |
@@ -414,7 +417,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `not_running` | There's nothing to interrupt |
 | `missing_answers` | `details.missing` lists the unanswered questions |
 | `nothing_to_remember` | `always` was sent for a request with no rule to save |
-| `bad_option` | `option` isn't one of that plan's `options` |
+| `bad_option` | `option` isn't one of that request's `options` |
+| `prompt_changed` | The terminal no longer shows the row `option` picked, so nothing was pressed |
 | `unknown_task` | The helper hasn't seen that background task |
 
 ## Behaviour worth knowing

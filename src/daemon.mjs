@@ -23,8 +23,9 @@ import { readRegistry, writeRegistry } from './registry.mjs';
 import { followTranscripts, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
 import {
-  closePage, pressPageKey, readPage, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
+  closePage, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
 } from './terminal.mjs';
+import { choicesOf, chooseRow, isAbout, readPrompt } from './prompt.mjs';
 import {
   MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
 } from './uploads.mjs';
@@ -48,6 +49,9 @@ const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
 const HELD_CHECK_MS = 300;
 const REGISTRY_SAVE_MS = 2000;
+// Claude Code draws a permission prompt as it asks the hook, so the screen is read for a moment.
+const PROMPT_READ_LIMIT_MS = 2000;
+const PROMPT_READ_CHECK_MS = 100;
 // Enough of the end of a transcript to find what was last said.
 const LAST_WORDS_ITEMS = 40;
 // Started over SSH, the helper inherits a minimal PATH that misses Homebrew's tmux, Rex's
@@ -101,6 +105,26 @@ function createHookServer(store) {
   });
 }
 
+// The rows a permission prompt shows in its terminal past Yes and before No, for a client to offer.
+// Only a request on its own can be told apart on the screen, and a prompt is taken once it reads
+// the same twice, so that one still being drawn, or the last one going, isn't.
+async function offerPromptRows(store, request) {
+  const session = store.find(request.sessionId);
+  if (!session?.pane) return;
+  const end = Date.now() + PROMPT_READ_LIMIT_MS;
+  let last;
+  while (Date.now() < end) {
+    if (!store.requestOf(request.id) || store.pendingFor(session).length !== 1) return;
+    const prompt = readPrompt(await readScreen(session));
+    if (prompt && JSON.stringify(prompt) === JSON.stringify(last)) {
+      if (isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
+      return;
+    }
+    last = prompt;
+    await pause(PROMPT_READ_CHECK_MS);
+  }
+}
+
 function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
@@ -148,6 +172,9 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   heldTimer.unref();
 
   store.on('event', event => {
+    if (event.kind === 'request.opened' && event.request.kind === 'permission') {
+      offerPromptRows(store, event.request).catch(error => console.error(`prompt rows: ${error.message}`));
+    }
     for (const socket of subscribers) write(socket, { type: 'event', event });
     const title = async () => {
       const info = await library.info(event.sessionId).catch(() => undefined);
@@ -322,7 +349,24 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         requests: store.requests().filter(r => r.sessionId === session.id),
       };
     },
-    respond: msg => { store.respond(msg.requestId, { ...msg, answers: attachedAnswers(msg) }); return {}; },
+    respond: async msg => {
+      const request = store.requestOf(msg.requestId);
+      // A permission prompt's own rows are pressed in the terminal, which then answers Claude Code.
+      if (request?.kind === 'permission' && msg.option != null) {
+        const row = store.choose(msg.requestId, msg.option);
+        try {
+          const session = sessionWithPane(request.sessionId);
+          await typing(session.id, () => chooseRow(session, row));
+        } catch (error) {
+          store.notChosen(msg.requestId);
+          throw error;
+        }
+        store.chosen(msg.requestId);
+        return {};
+      }
+      store.respond(msg.requestId, { ...msg, answers: attachedAnswers(msg) });
+      return {};
+    },
     upload: msg => saveUpload(uploads, msg, downloads),
     // Taken back out of the composer before its message went.
     discard: ({ sessionId, uploadId }) => discardUpload(uploads, sessionId, uploadId),

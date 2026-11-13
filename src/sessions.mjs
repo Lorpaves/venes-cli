@@ -62,10 +62,27 @@ function planOptions(modes) {
   return [first, 'default'].map(id => ({ id, label: PLAN_OPTION_LABELS[id] }));
 }
 
-function buildDecision(request, { decision, message, answers, always, option }) {
-  if (decision === 'deny') {
-    return permissionDecision({ behavior: 'deny', message: message || 'Denied from Venes.' });
+// What Claude Code's terminal tells Claude when someone says no, in its words. Given what to do
+// instead, Claude carries on from that. Given nothing, the terminal stops the turn too, as Esc does,
+// so Claude doesn't take the no for a failure to try again. A subagent is told the way the terminal
+// tells one, and its turn isn't stopped.
+const REJECTED = 'The user doesn\'t want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).';
+const SUBAGENT_DENIED = 'Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).';
+
+function denial(request, message) {
+  const said = typeof message === 'string' ? message.trim() : '';
+  if (request.agentId) {
+    return {
+      behavior: 'deny',
+      message: said ? `${SUBAGENT_DENIED} The user said:\n${said}` : `${SUBAGENT_DENIED} Try a different approach or report the limitation to complete your task.`,
+    };
   }
+  if (said) return { behavior: 'deny', message: `${REJECTED} To tell you how to proceed, the user said:\n${said}` };
+  return { behavior: 'deny', message: `${REJECTED} STOP what you are doing and wait for the user to tell you how to proceed.`, interrupt: true };
+}
+
+function buildDecision(request, { decision, message, answers, always, option }) {
+  if (decision === 'deny') return permissionDecision(denial(request, message));
   if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
   // Questions and plans ignore a bare allow, so the input has to come back too. A plan approved with
   // one of its options switches to that option's mode. Approved without one, it goes back to the mode

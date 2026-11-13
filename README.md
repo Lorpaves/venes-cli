@@ -320,7 +320,7 @@ Pass `before` from one reply to get the page before it. It counts items from the
 
 ### Answering requests
 
-`decision` is `allow` or `deny`. `message` is optional on a deny and tells Claude why.
+`decision` is `allow` or `deny`. A deny reaches Claude in the words Claude Code's terminal uses. With a `message`, that's what to do instead, and Claude carries on from it. Without one, Claude is told to stop and wait, and the turn stops, as it does for Esc in the terminal. A subagent is told the way the terminal tells one, and its turn goes on.
 
 | `request.kind` | What to show | To approve |
 |---|---|---|

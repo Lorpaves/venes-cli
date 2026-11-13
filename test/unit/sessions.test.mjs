@@ -70,13 +70,46 @@ test('a permission request pairs with its PreToolUse and waits', async () => {
   assert.equal(store.get('a').status, 'running');
 });
 
-test('deny carries the message back to Claude', async () => {
+// Claude Code's own words, from its terminal.
+const REJECTED = 'The user doesn\'t want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).';
+const SUBAGENT_DENIED = 'Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).';
+
+test('deny tells Claude what to do instead, as the terminal does, and the turn goes on', async () => {
   const { store, hook } = setup();
   hook('PreToolUse', { ...bash, tool_use_id: 't1' });
   const held = hook('PermissionRequest', bash);
-  store.respond(held.request.id, { decision: 'deny', message: 'no' });
+  store.respond(held.request.id, { decision: 'deny', message: ' use ls instead \n' });
   const { decision } = (await held.decision).hookSpecificOutput;
-  assert.deepEqual(decision, { behavior: 'deny', message: 'no' });
+  assert.deepEqual(decision, { behavior: 'deny', message: `${REJECTED} To tell you how to proceed, the user said:\nuse ls instead` });
+});
+
+test('deny with nothing said stops the turn, as Esc does in the terminal', async () => {
+  for (const message of [undefined, '', '  ']) {
+    const { store, hook } = setup();
+    hook('PreToolUse', { ...bash, tool_use_id: 't1' });
+    const held = hook('PermissionRequest', bash);
+    store.respond(held.request.id, { decision: 'deny', message });
+    const { decision } = (await held.decision).hookSpecificOutput;
+    assert.deepEqual(decision, {
+      behavior: 'deny', message: `${REJECTED} STOP what you are doing and wait for the user to tell you how to proceed.`, interrupt: true,
+    }, JSON.stringify(message));
+  }
+});
+
+test('a subagent is told no the way the terminal tells one, and its turn goes on', async () => {
+  const { store, hook } = setup();
+  const told = async message => {
+    const toolUseId = `t-${message}`;
+    hook('PreToolUse', { ...bash, tool_use_id: toolUseId, agent_id: 'sub' });
+    const held = hook('PermissionRequest', { ...bash, agent_id: 'sub' });
+    store.respond(held.request.id, { decision: 'deny', message });
+    hook('PostToolUseFailure', { ...bash, tool_use_id: toolUseId, agent_id: 'sub', error: 'denied' });
+    return (await held.decision).hookSpecificOutput.decision;
+  };
+  assert.deepEqual(await told('not that file'), { behavior: 'deny', message: `${SUBAGENT_DENIED} The user said:\nnot that file` });
+  assert.deepEqual(await told(undefined), {
+    behavior: 'deny', message: `${SUBAGENT_DENIED} Try a different approach or report the limitation to complete your task.`,
+  });
 });
 
 test('approving a plan returns its input, because a bare allow is ignored', async () => {
@@ -124,10 +157,10 @@ test('a denied plan sets no mode', async () => {
   hook('UserPromptSubmit', { permission_mode: 'plan', prompt: 'plan it' });
   hook('PreToolUse', { ...plan, permission_mode: 'plan', tool_use_id: 't1' });
   const held = hook('PermissionRequest', { ...plan, permission_mode: 'plan' });
-  store.respond(held.request.id, { decision: 'deny', message: 'keep planning' });
+  store.respond(held.request.id, { decision: 'deny', message: 'split step 2' });
   const { decision } = (await held.decision).hookSpecificOutput;
-  assert.equal(decision.behavior, 'deny');
-  assert.equal(decision.updatedPermissions, undefined);
+  // What the terminal's "No, keep planning" tells Claude, so it plans again rather than retrying.
+  assert.deepEqual(decision, { behavior: 'deny', message: `${REJECTED} To tell you how to proceed, the user said:\nsplit step 2` });
 });
 
 test('a plan offers the ways on the terminal does, by the modes the session has been in', () => {

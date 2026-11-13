@@ -262,9 +262,21 @@ T('deny_from_client', {}, async r => {
   const request = await r.request('permission');
   r.denyEverything('Denied from the phone.');
   assert.deepEqual((({ decision, by }) => [decision, by])(await r.closed(request.id)), ['deny', 'client']);
-  await r.deliveredToClaude(/Denied from the phone/);
+  // In the terminal's words, which say it's the user's answer and not a failure to retry.
+  await r.deliveredToClaude(/To tell you how to proceed, the user said:\s*Denied from the phone/);
   await r.turnEnd();
   assert.ok(!exists('e2e-deny.txt'));
+});
+
+// As Esc does in the terminal.
+T('deny_with_nothing_said_stops_the_turn', {}, async r => {
+  await r.type(TOUCH('stop'));
+  const request = await r.request('permission');
+  await r.client.request('respond', { requestId: request.id, decision: 'deny' });
+  assert.deepEqual((({ decision, by }) => [decision, by])(await r.closed(request.id)), ['deny', 'client']);
+  await r.kind('turn.interrupted', 8000);
+  assert.equal((await r.session()).status, 'idle');
+  assert.ok(!exists('e2e-stop.txt'));
 });
 
 T('terminal_approves_first', {}, async r => {
@@ -409,7 +421,7 @@ T('plan_reject', { mode: 'plan' }, async r => {
   await r.type(PLAN('planno'));
   const request = await r.request('plan', 60000);
   r.denyEverything('Rejected from the phone.');
-  await r.deliveredToClaude(/Rejected from the phone/);
+  await r.deliveredToClaude(/To tell you how to proceed, the user said:\s*Rejected from the phone/);
   await r.turnEnd(60000);
   assert.ok(!exists('e2e-planno.txt'));
 });

@@ -55,6 +55,8 @@ const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
 const HELD_CHECK_MS = 300;
 const REGISTRY_SAVE_MS = 2000;
+// How long a status waits for the account's per-model limits the first time they're read.
+const MODEL_LIMITS_WAIT_MS = 2500;
 // Claude Code draws a permission prompt as it asks the hook, so the screen is read for a moment.
 const PROMPT_READ_LIMIT_MS = 2000;
 const PROMPT_READ_CHECK_MS = 100;
@@ -481,7 +483,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       // Codex has no status line, and says what one would itself.
       if (await isCodex(sessionId)) return codex.status({ sessionId });
       store.get(sessionId);
-      return { status: (await readStatus(statusDir, sessionId)) ?? null };
+      const status = await readStatus(statusDir, sessionId);
+      // A week's limit that's for one model, as Fable's is, isn't in what a status line is told. It's
+      // asked for apart, for an account that has limits, and a first read that's slow comes with a later status.
+      if (status?.fiveHour || status?.sevenDay) {
+        const late = new Promise(resolve => { setTimeout(resolve, MODEL_LIMITS_WAIT_MS, []).unref(); });
+        const modelLimits = await Promise.race([library.modelLimits(), late]);
+        if (modelLimits.length) status.modelLimits = modelLimits;
+      }
+      return { status: status ?? null };
     },
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {

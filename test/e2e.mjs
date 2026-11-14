@@ -835,6 +835,8 @@ async function readsTheStatus(r) {
   assert.ok(typeof status.updatedAt === 'number');
   // A plan's limits, or an API's cost, and one of the two.
   assert.ok(status.fiveHour || status.sevenDay || typeof status.cost === 'number', JSON.stringify(status));
+  // A week's limit for one model is there for an account that has one, and says whose it is.
+  for (const limit of status.modelLimits ?? []) assert.ok(typeof limit.name === 'string' && limit.name && typeof limit.percent === 'number', JSON.stringify(limit));
   // Setup stood in for the status line in this run's settings, and in nobody else's.
   assert.equal(JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')).statusLine.command, STAND_IN.statusLine.command);
 }

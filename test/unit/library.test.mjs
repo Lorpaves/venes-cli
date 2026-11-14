@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dropParentSession } from '../../src/daemon.mjs';
-import { Library, joinedStatus, libraryPage, readCapabilities, readRunning } from '../../src/library.mjs';
+import { Library, joinedStatus, libraryPage, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -200,6 +200,13 @@ export function query({ options }) {
   if (process.env.FAKE_SDK_FAILS) throw Object.assign(new Error('no'), { code: 'nope' });
   return {
     initializationResult: async () => ({ commands: [{ name: 'model' }], models: [{ value: 'opus', supportedEffortLevels: ['low'] }], account: {} }),
+    // What /usage is told, as the test set it, on an SDK that has the call for it.
+    ...(process.env.FAKE_SDK_USAGE && {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async opts => {
+        fs.appendFileSync(process.env.FAKE_SDK_LOG, JSON.stringify({ asked: opts }) + '\\n');
+        return JSON.parse(process.env.FAKE_SDK_USAGE);
+      },
+    }),
     close() { fs.appendFileSync(process.env.FAKE_SDK_LOG, '"closed"\\n'); },
   };
 }`;
@@ -219,10 +226,11 @@ function fakeSdk(t, { hasClaude = true } = {}) {
     process.env.PATH = PATH;
     delete process.env.FAKE_SDK_LOG;
     delete process.env.FAKE_SDK_FAILS;
+    delete process.env.FAKE_SDK_USAGE;
     fs.rmSync(dir, { recursive: true });
   });
   const lines = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []);
-  return { library: new Library({ sdkDir: path.join(dir, 'sdk') }), dir, entry, bin, opened: () => lines().filter(line => line !== 'closed'), lines };
+  return { library: new Library({ sdkDir: path.join(dir, 'sdk') }), dir, entry, bin, opened: () => lines().filter(line => line !== 'closed' && !line.asked), lines };
 }
 
 test('capabilities come from a session that runs no hooks and leaves nothing behind', async t => {
@@ -274,6 +282,57 @@ test('a failure isn\'t kept, so the next page tries again', async t => {
   delete process.env.FAKE_SDK_FAILS;
   assert.equal((await library.capabilities(dir, 1)).models.length, 1);
   assert.equal(opened().length, 2);
+});
+
+test('a week\'s limits for one model are read from what /usage is told', () => {
+  const now = Date.parse('2026-11-14T12:00:00Z');
+  const limits = {
+    five_hour: { utilization: 24, resets_at: '2026-11-14T18:19:59.992712+00:00' }, seven_day: { utilization: 55, resets_at: '2026-11-19T06:59:59+00:00' },
+    model_scoped: [
+      { display_name: 'Fable', utilization: 67.26, resets_at: '2026-11-19T06:59:59.992916+00:00' },
+      { display_name: 'Opus', utilization: 12, resets_at: null }, { display_name: 'Old', utilization: 90, resets_at: '2026-11-14T11:59:59Z' },
+      { display_name: 'Unknown', utilization: null, resets_at: '2026-11-19T06:59:59Z' }, { display_name: '', utilization: 5 }, { utilization: 5 }, null, 'Fable',
+    ],
+  };
+  assert.deepEqual(readModelLimits(limits, now), [
+    { name: 'Fable', percent: 67.3, resetsAt: Math.floor(Date.parse('2026-11-19T06:59:59.992916+00:00') / 1000) }, { name: 'Opus', percent: 12 },
+    { name: 'Old', percent: 0 },
+  ]);
+  for (const none of [undefined, null, {}, { model_scoped: [] }, { model_scoped: 'Fable' }, { model_scoped: null }, 'limits']) assert.deepEqual(readModelLimits(none, now), []);
+});
+
+test('the account\'s per-model limits come from a session that runs no hooks, once for a while', async t => {
+  const { library, bin, opened, lines } = fakeSdk(t);
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits_available: true, rate_limits: { model_scoped: [{ display_name: 'Fable', utilization: 67, resets_at: null }] } });
+  assert.deepEqual(await library.modelLimits(0), [{ name: 'Fable', percent: 67 }]);
+  const [options] = opened();
+  assert.deepEqual([options.cwd, options.pathToClaudeCodeExecutable, options.persistSession, options.settings.disableAllHooks, options.strictMcpConfig], [os.homedir(), path.join(bin, 'claude'), false, true, true]);
+  // Only the limits are asked for, without the look through this Mac's transcripts that /usage also makes.
+  assert.deepEqual(lines().find(line => line.asked), { asked: { skipBehaviors: true } });
+  assert.equal(lines().at(-1), 'closed');
+  await Promise.all([library.modelLimits(1), library.modelLimits(179_999)]);
+  assert.equal(opened().length, 1);
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits_available: false, rate_limits: null });
+  assert.deepEqual(await library.modelLimits(180_000), []);
+  assert.equal(opened().length, 2);
+});
+
+test('with an SDK that has no such call, or that fails, there are none, and it isn\'t asked again at once', async t => {
+  const { library, opened } = fakeSdk(t);
+  assert.deepEqual(await library.modelLimits(0), []);
+  process.env.FAKE_SDK_FAILS = '1';
+  assert.deepEqual(await library.modelLimits(200_000), []);
+  delete process.env.FAKE_SDK_FAILS;
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits: { model_scoped: [{ display_name: 'Fable', utilization: 1 }] } });
+  assert.deepEqual(await library.modelLimits(200_001), []);
+  assert.equal(opened().length, 2);
+  assert.deepEqual(await library.modelLimits(400_000), [{ name: 'Fable', percent: 1 }]);
+});
+
+test('with no Claude Code on this Mac there are no limits to read', async t => {
+  const { library, opened } = fakeSdk(t, { hasClaude: false });
+  assert.deepEqual(await library.modelLimits(0), []);
+  assert.equal(opened().length, 0);
 });
 
 test('with no Claude Code to ask, it says so', async t => {

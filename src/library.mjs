@@ -22,6 +22,8 @@ const READ_BUFFER_BYTES = 64 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 50;
 // Long enough to open many pages, and short enough that a new skill soon shows up.
 const CAPABILITIES_LIFETIME_MS = 5 * 60_000;
+// Each read of the account's usage starts Claude Code, and a week's limit moves slowly.
+const USAGE_LIFETIME_MS = 3 * 60_000;
 const WORKER = fileURLToPath(new URL('library-worker.mjs', import.meta.url));
 
 const STATUS = { busy: 'running', waiting: 'waiting', idle: 'idle' };
@@ -67,6 +69,20 @@ export function readCapabilities({ commands = [], models = [] }) {
   };
 }
 
+const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+
+// A week's limits that are each for one model, from what /usage is told: the name the server gives the
+// model, such as Fable, its share in tenths, and when it resets. An account with no such limit has
+// none, and one that has reset since starts again from nothing.
+export function readModelLimits(limits, now = Date.now()) {
+  const scoped = Array.isArray(limits?.model_scoped) ? limits.model_scoped : [];
+  return scoped.filter(entry => typeof entry?.display_name === 'string' && entry.display_name && isNumber(entry.utilization)).map(entry => {
+    const at = typeof entry.resets_at === 'string' ? Date.parse(entry.resets_at) : NaN;
+    if (Number.isFinite(at) && at <= now) return { name: entry.display_name, percent: 0 };
+    return { name: entry.display_name, percent: Math.round(entry.utilization * 10) / 10, ...(Number.isFinite(at) && { resetsAt: Math.floor(at / 1000) }) };
+  });
+}
+
 function findOnPath(name) {
   for (const dir of process.env.PATH.split(':')) {
     const file = path.join(dir, name);
@@ -82,6 +98,7 @@ export class Library {
   #sdkDir;
   #installing;
   #capabilities = new Map();
+  #usage;
   // Ends an install of the SDK going on when the helper stops.
   #stopping = new AbortController();
 
@@ -182,6 +199,22 @@ export class Library {
     const reply = this.#readCapabilities(cwd);
     this.#capabilities.set(cwd, { at: now, reply });
     reply.catch(() => this.#capabilities.delete(cwd));
+    return reply;
+  }
+
+  async #readModelLimits() {
+    const claude = findOnPath('claude');
+    if (!claude) return [];
+    return readModelLimits((await this.#read({ op: 'usage', sdk: await this.prepare(), claude })).limits);
+  }
+
+  // The week's limits that are for one model, which an account has or hasn't. Read once for a few
+  // minutes, with sheets opening together sharing the read. One that can't be read is none, kept as
+  // long, so that a status asked for every few seconds doesn't start Claude Code each time.
+  modelLimits(now = Date.now()) {
+    if (this.#usage && now - this.#usage.at < USAGE_LIFETIME_MS) return this.#usage.reply;
+    const reply = this.#readModelLimits().catch(() => []);
+    this.#usage = { at: now, reply };
     return reply;
   }
 }

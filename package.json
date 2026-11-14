@@ -1,6 +1,6 @@
 {
   "name": "venes-cli",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Claude Code plugin that turns hooks and transcripts into a structured event stream for the Venes app.",
   "private": true,
   "type": "module",

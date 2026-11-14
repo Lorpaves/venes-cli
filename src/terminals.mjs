@@ -55,6 +55,21 @@ const SIZE_RANGE = { columns: [20, 400], rows: [5, 200] };
 export const HIDDEN_TEXT = '••••••';
 const META = 'session.json';
 const HISTORY = 'history.jsonl';
+// A terminal the reader opened in Rex themselves is mirrored: its screen is its one output, under no
+// line, which this names.
+export const SCREEN_LINE = 'screen';
+// How long after Rex says its terminals changed they're looked at, so that a burst is one look.
+const MIRROR_SETTLE_MS = 300;
+// And how often anyway, in case a change was missed while the connection to Rex was down.
+const MIRROR_SYNC_MS = 30_000;
+// A program in front that's one of these is a shell at its prompt, and anything else is running.
+const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh', 'nu', 'xonsh', 'pwsh', 'elvish', 'login']);
+// What the helper starts in Rex itself, which is no terminal of the reader's own.
+const OWN_LABEL = /^venes-/;
+const CLAUDE = 'claude';
+
+// A mirrored terminal's session id: its block's own, without what says it's a block.
+export const mirrorId = pane => pane.replace(/^block:/, '');
 
 const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
@@ -140,6 +155,10 @@ export class Terminals {
   #tickMs;
   #liveCheckMs;
   #git;
+  #mirrors;
+  #syncing;
+  #settling;
+  #syncedAt = 0;
   #timer;
   #ticking = false;
   #terminals = new Map();
@@ -147,7 +166,7 @@ export class Terminals {
   constructor({
     store, root, shellDir, backends = { rex, tmux }, env = process.env,
     useRex = () => (env.VENES_TERMINAL ? env.VENES_TERMINAL === 'rex' : rex.isInstalled()), tickMs = TICK_MS,
-    liveCheckMs = LIVE_CHECK_MS, git = gitState,
+    liveCheckMs = LIVE_CHECK_MS, git = gitState, mirrors = true,
   }) {
     this.#store = store;
     this.#root = root;
@@ -158,6 +177,7 @@ export class Terminals {
     this.#tickMs = tickMs;
     this.#liveCheckMs = liveCheckMs;
     this.#git = git;
+    this.#mirrors = mirrors;
   }
 
   has(id) { return typeof id === 'string' && this.#terminals.has(id); }
@@ -183,11 +203,95 @@ export class Terminals {
     }
     this.#timer ??= setInterval(() => { this.#tick(); }, this.#tickMs);
     this.#timer.unref?.();
+    this.#watchMirrors();
   }
 
   stop() {
     clearInterval(this.#timer);
     this.#timer = undefined;
+    clearTimeout(this.#settling);
+    for (const backend of Object.values(this.#backends)) {
+      backend.watchTerminals?.(undefined);
+      backend.closeLink?.()?.catch(() => {});
+    }
+  }
+
+  // The terminals the reader has open in Rex are sessions too, for as long as they're open: Rex says
+  // when they change, and they're looked at then. Settles once they've been looked at the first time.
+  #watchMirrors() {
+    const backend = this.#backends.rex;
+    if (!this.#mirrors || !backend?.listTerminals || !this.#useRex()) return Promise.resolve();
+    backend.watchTerminals?.(() => this.#mirrorsChanged());
+    return this.syncMirrors();
+  }
+
+  #mirrorsChanged() {
+    if (this.#settling || !this.#timer) return;
+    this.#settling = setTimeout(() => {
+      this.#settling = undefined;
+      this.syncMirrors();
+    }, MIRROR_SETTLE_MS);
+    this.#settling.unref?.();
+  }
+
+  // Makes the mirrored sessions what Rex's open terminals are now: a new one for each terminal in a
+  // window that's the reader's own, and none any more for one that has closed. A terminal Claude Code
+  // runs in is that session's, and one the helper started is already a session of another kind.
+  syncMirrors() {
+    this.#syncing = (this.#syncing ?? Promise.resolve()).then(async () => {
+      this.#syncedAt = Date.now();
+      let listed;
+      try {
+        listed = await this.#backends.rex.listTerminals();
+      } catch {
+        return; // Rex isn't there to ask, and what's known stays until it is
+      }
+      const taken = new Set([
+        ...[...this.#terminals.values()].filter(t => !t.mirror && !t.ended).map(t => t.target?.pane),
+        ...this.#store.sessions().filter(session => !session.terminal && session.status !== 'ended').map(session => session.pane),
+      ]);
+      const open = new Map(listed
+        .filter(found => !taken.has(found.pane) && found.program !== CLAUDE && !OWN_LABEL.test(found.label ?? ''))
+        .map(found => [mirrorId(found.pane), found]));
+      for (const t of [...this.#terminals.values()].filter(t => t.mirror && !open.has(t.id))) this.#dropMirror(t);
+      for (const [id, found] of open) {
+        const known = this.#terminals.get(id);
+        if (known) this.#updateMirror(known, found);
+        else this.#addMirror(id, found);
+      }
+    }).catch(error => console.error(`mirrors: ${error.message}`));
+    return this.#syncing;
+  }
+
+  #addMirror(id, { pane, rexSession, label, program, cwd }) {
+    const now = Date.now();
+    const t = {
+      id, mirror: true, name: label, cwd, folder: cwd, startedAt: now, lastActiveAt: now, backend: 'rex', target: { pane, rexSession },
+      status: SHELLS.has(program) ? 'idle' : 'running', size: { ...DEFAULT_SIZE }, pending: [], fullScreen: false, checkedAt: now,
+    };
+    this.#terminals.set(id, t);
+    this.#adopt(t);
+    this.#store.report(id, 'session.discovered', { cwd, terminal: true, mirror: true });
+    this.#store.report(id, 'session.attached', { pane });
+  }
+
+  // Where it is, and whether a program is in front, as Rex now has them.
+  #updateMirror(t, { program, cwd }) {
+    if (cwd && cwd !== t.folder) {
+      t.cwd = cwd;
+      t.folder = cwd;
+      this.#store.report(t.id, 'session.cwd', { cwd }, { fields: { cwd } });
+    }
+    const status = SHELLS.has(program) ? 'idle' : 'running';
+    if (status !== t.status) this.#setStatus(t, status);
+  }
+
+  // It has closed in Rex, or isn't the reader's own any more, so it's no session.
+  #dropMirror(t) {
+    t.ended = true;
+    this.#terminals.delete(t.id);
+    this.#store.report(t.id, 'session.ended', { reason: 'exited' });
+    this.#store.forget(t.id);
   }
 
   // A shell in `cwd`, ready for its first command: the reply waits for its first prompt.
@@ -225,6 +329,12 @@ export class Terminals {
     return this.#exclusive(t, async () => {
       await this.#ready(t);
       await this.#fit(t, { columns, rows });
+      // A mirrored terminal is typed into, and what comes of it is on its screen.
+      if (t.mirror) {
+        await this.#type(t, text);
+        t.changedAt = Date.now();
+        return { queued: false, ...((await this.#isFullScreen(t)) && { page: true }) };
+      }
       if (t.running) {
         const reply = await this.#input(t, { text, clientId });
         return { ...reply, ...((await this.#isFullScreen(t)) && { page: true }) };
@@ -243,9 +353,10 @@ export class Terminals {
     const target = checkedFolder(folder);
     return this.#exclusive(t, async () => {
       await this.#ready(t);
-      if (t.running) throw new HelperError('terminal_busy', 'A command is running. Wait for it to end, or stop it.');
+      if (this.#isBusy(t)) throw new HelperError('terminal_busy', 'A command is running. Wait for it to end, or stop it.');
       await this.#type(t, `cd ${shellQuoted(target)}`);
-      await this.#followSoon(t);
+      if (t.mirror) t.changedAt = Date.now();
+      else await this.#followSoon(t);
       return {};
     });
   }
@@ -255,13 +366,48 @@ export class Terminals {
     const t = this.#get(id);
     const cwd = this.#cwdOf(t);
     const git = await this.#git(cwd);
-    return { status: { cwd, home: this.#env.HOME || os.homedir(), running: Boolean(t.running), ...(git && { git }) } };
+    return { status: { cwd, home: this.#env.HOME || os.homedir(), running: this.#isBusy(t), ...(git && { git }) } };
+  }
+
+  // A client has this terminal's page open, with this much room: the terminal is that size from now on,
+  // whoever else has it open, until the client leaves. With several looking, it's the last one's.
+  view(id, { columns, rows } = {}, viewer) {
+    const t = this.#get(id);
+    return this.#exclusive(t, async () => {
+      t.viewers ??= new Map();
+      t.viewers.delete(viewer);
+      t.viewers.set(viewer, sizeOf({ columns, rows }, t.size));
+      // Someone's looking now, so a mirrored terminal is read at once, and often for a while.
+      t.changedAt = Date.now();
+      if (!t.ended) await this.#fit(t, { columns, rows });
+      return { columns: t.columns ?? t.size.columns, rows: t.size.rows };
+    });
+  }
+
+  // The client has gone from the page. With no one left looking, the terminal is whoever else's has it.
+  leave(id, viewer) {
+    const t = this.has(id) ? this.#terminals.get(id) : undefined;
+    if (!t?.viewers?.delete(viewer)) return {};
+    return this.#exclusive(t, async () => {
+      if (t.ended) return {};
+      const [last] = [...t.viewers.values()].slice(-1);
+      if (last) await this.#fit(t, last);
+      else await this.#backend(t).giveBack?.(t.target)?.catch(() => {});
+      return {};
+    });
+  }
+
+  // A client's connection has closed, and with it every page it had open.
+  leaveAll(viewer) {
+    for (const t of this.#terminals.values()) {
+      if (t.viewers?.has(viewer)) Promise.resolve(this.leave(t.id, viewer)).catch(() => {});
+    }
   }
 
   // Ctrl-C, as at the terminal.
   async interrupt(id) {
     const t = this.#get(id);
-    if (t.ended || !t.running) throw new HelperError('not_running', 'Nothing to interrupt.');
+    if (t.ended || !this.#isBusy(t)) throw new HelperError('not_running', 'Nothing to interrupt.');
     await this.#backend(t).pressKey(t.target, 'C-c');
     return {};
   }
@@ -271,6 +417,16 @@ export class Terminals {
   // event after `seq` follows on the wire.
   join(id, { limit } = {}) {
     const t = this.#get(id);
+    // A mirrored terminal is read now, as no one may have been looking, and answered once it has been.
+    if (t.mirror) {
+      return this.#exclusive(t, async () => {
+        await this.#readMirror(t).catch(() => {});
+        return {
+          ...historyPage(this.#items(t), { limit }), turn: [], queued: [], seq: this.#store.seq, requests: [],
+          sessions: this.#store.sessions().filter(session => session.id === id),
+        };
+      });
+    }
     const page = historyPage(this.#items(t), { limit });
     return {
       ...page, turn: [], queued: [], seq: this.#store.seq, requests: [],
@@ -323,7 +479,8 @@ export class Terminals {
       t.ended = true;
     });
     this.#terminals.delete(id);
-    fs.rmSync(this.#dir(t), { recursive: true, force: true });
+    // A mirrored terminal keeps nothing here: closing it in Rex is all there is to it.
+    if (!t.mirror) fs.rmSync(this.#dir(t), { recursive: true, force: true });
     this.#store.forget(id);
     return {};
   }
@@ -331,6 +488,8 @@ export class Terminals {
   // Its shell at hand, and what it's doing known: one closed at the Mac since it was last looked at
   // has ended, like any other, and one that has ended is started again.
   async #ready(t) {
+    // A mirrored terminal is there for as long as Rex has it, and has no shell of the helper's to start.
+    if (t.mirror) return;
     if (!t.ended && Date.now() - t.checkedAt >= LIVE_FRESH_MS && !(await this.#isOpen(t))) this.#end(t);
     if (t.ended) await this.#relaunch(t);
     else await this.#follow(t);
@@ -356,13 +515,18 @@ export class Terminals {
   #adopt(t) {
     this.#store.adopt({
       id: t.id, kind: TERMINAL_KIND, status: t.status, cwd: this.#cwdOf(t), pane: t.ended ? undefined : t.target?.pane,
-      startedAt: t.startedAt, lastEventAt: t.lastActiveAt, lastPrompt: t.lastCommand,
+      startedAt: t.startedAt, lastEventAt: t.lastActiveAt, lastPrompt: t.lastCommand, ...(t.mirror && { mirror: true }),
     });
   }
 
-  #cwdOf(t) { return readText(path.join(this.#dir(t), 'cwd')) || t.cwd; }
+  // Where its shell is: as its hooks last wrote, or for a mirrored terminal, as Rex last said.
+  #cwdOf(t) { return t.mirror ? t.cwd : readText(path.join(this.#dir(t), 'cwd')) || t.cwd; }
+
+  // Something is running in it, which a line typed now would go to.
+  #isBusy(t) { return t.mirror ? t.status === 'running' : Boolean(t.running); }
 
   #save(t) {
+    if (t.mirror) return;
     const { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running } = t;
     const kept = running && { ...running, tail: undefined };
     const meta = { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, columns: t.columns, running: kept };
@@ -415,7 +579,10 @@ export class Terminals {
     t.size = wanted;
     let real = await backend.size(t.target).catch(() => undefined);
     if (!real || real.columns !== wanted.columns || real.rows !== wanted.rows) {
-      await backend.resize(t.target, wanted).catch(() => {});
+      // For a client with its page open, the terminal is taken from whoever has it. Otherwise it's only
+      // asked, which someone with it open at the Mac overrules.
+      const taken = t.viewers?.size && backend.takeSize ? await backend.takeSize(t.target, wanted).then(() => true, () => false) : false;
+      if (!taken) await backend.resize(t.target, wanted).catch(() => {});
       real = await backend.size(t.target).catch(() => real);
     }
     t.columns = real?.columns ?? wanted.columns;
@@ -458,8 +625,14 @@ export class Terminals {
     this.#ticking = true;
     try {
       // Each by itself, so that one that's slow, as a shell starting again is, doesn't hold up the rest.
+      if (this.#mirrors && Date.now() - this.#syncedAt >= MIRROR_SYNC_MS && this.#backends.rex?.listTerminals && this.#useRex()) this.syncMirrors();
       await Promise.all([...this.#terminals.values()].filter(t => !t.ended).map(t => this.#exclusive(t, async () => {
         if (t.ended) return;
+        // A mirrored terminal is read while someone has its page open, and Rex says when it closes.
+        if (t.mirror) {
+          if (t.viewers?.size && Date.now() - (t.readAt ?? 0) >= this.#readEvery({ changedAt: t.changedAt, at: t.startedAt })) await this.#readMirror(t);
+          return;
+        }
         if (Date.now() - t.checkedAt >= this.#liveCheckMs && !(await this.#isOpen(t))) {
           this.#end(t);
           return;
@@ -597,6 +770,30 @@ export class Terminals {
     return changed;
   }
 
+  // A mirrored terminal's screen, with what's above it, is its one output: sent again whole when it has
+  // changed, as a running command's is. What a program with the screen to itself shows is a page's.
+  async #readMirror(t) {
+    t.readAt = Date.now();
+    const full = await this.#isFullScreen(t);
+    if (full !== t.fullScreen) {
+      t.fullScreen = full;
+      t.changedAt = Date.now();
+      this.#store.report(t.id, 'terminal.screen', { fullScreen: full });
+    }
+    if (full) return;
+    const { text, cut } = await this.#backend(t).readOutput(t.target);
+    const lines = vtLines(text);
+    const shown = partFrom(cut ? lines.slice(1) : lines, 0);
+    if (shown === (t.shown ?? '')) return;
+    t.shown = shown;
+    t.changedAt = Date.now();
+    t.lastActiveAt = t.changedAt;
+    this.#store.report(
+      t.id, 'message.output', { stdout: shown, stderr: '', replies: false, clientId: SCREEN_LINE, running: t.status === 'running', ...this.#width(t) },
+      { supersedes: event => event.kind === 'message.output' },
+    );
+  }
+
   // How wide the terminal was when its output was read, which is where its lines broke.
   #width(t) {
     return t.columns ? { columns: t.columns } : {};
@@ -706,6 +903,10 @@ export class Terminals {
 
   // What it did, with a running command's output and the lines sent to it as far as they've got.
   #items(t) {
+    if (t.mirror) {
+      const item = { role: 'output', stdout: t.shown, stderr: '', replies: false, at: t.readAt, clientId: SCREEN_LINE, running: t.status === 'running', ...this.#width(t) };
+      return t.shown ? [item] : [];
+    }
     const items = (readText(path.join(this.#dir(t), HISTORY)) ?? '').split('\n').filter(Boolean).flatMap(line => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });

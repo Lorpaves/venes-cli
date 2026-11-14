@@ -7,7 +7,10 @@ import { capped, outputBody, plain, styleBefore, vtLines, withoutPrompt } from '
 import { SessionStore } from '../../src/sessions.mjs';
 import { ZSH_FILES, installShellFiles, shellCommand } from '../../src/shell.mjs';
 import { parseStatus } from '../../src/gitstate.mjs';
-import { HIDDEN_TEXT, Terminals, historyPage, parseState, partFrom, partStarts, partTexts, shellQuoted, sizeOf, tailOf } from '../../src/terminals.mjs';
+import { changesTerminals } from '../../src/rex.mjs';
+import {
+  HIDDEN_TEXT, SCREEN_LINE, Terminals, historyPage, mirrorId, parseState, partFrom, partStarts, partTexts, shellQuoted, sizeOf, tailOf,
+} from '../../src/terminals.mjs';
 
 const ESC = '\u001b';
 
@@ -172,6 +175,17 @@ function setUp(t, { prompt = '~ % ' } = {}) {
       if (!shell.owned) shell.size = { ...size };
     },
     size: async () => ({ ...shell.size }),
+    // Taking it makes it the helper's, whoever had it, until it's given back to them.
+    takeSize: async (_, size) => {
+      calls.push(['take', size]);
+      shell.before ??= { ...shell.size };
+      shell.size = { ...size };
+    },
+    giveBack: async () => {
+      calls.push(['give']);
+      if (shell.before) shell.size = shell.before;
+      shell.before = undefined;
+    },
     paste: async (_, text) => { calls.push(['paste', text]); shell.pasted = text; },
     // With `prompt`, the shell runs what was pasted the moment Enter comes, as a real one does.
     pressKey: async (_, key) => {
@@ -268,6 +282,41 @@ test('a terminal someone has open at the Mac stays its window\'s size, and its o
   shell.prompt(0);
   await until(() => of('message.output').some(event => event.clientId === 'c2' && event.running === false), 'the second');
   assert.equal(of('message.output').at(-1).columns, 47);
+});
+
+test('a terminal is the size of the page a client has open, whoever else has it, until the client leaves', async t => {
+  const { terminals, shell, of, calls } = setUp(t);
+  const { sessionId } = await terminals.start({ cwd: os.tmpdir() });
+  shell.owned = true;
+  shell.size = { columns: 156, rows: 70 };
+  const phone = {};
+  const pad = {};
+  assert.deepEqual(await terminals.view(sessionId, { columns: 47, rows: 30 }, phone), { columns: 47, rows: 30 });
+  assert.deepEqual(calls.at(-1), ['take', { columns: 47, rows: 30 }]);
+  // It's the page's already, so a line sent takes nothing again.
+  shell.runsAtOnce = true;
+  const takes = () => calls.filter(([name]) => name === 'take').length;
+  await terminals.send(sessionId, { text: 'ls', clientId: 'c1', columns: 47, rows: 30 });
+  assert.equal(takes(), 1);
+  shell.screen += 'a\r\n~ % ';
+  shell.prompt(0);
+  await until(() => of('message.output').some(event => event.running === false), 'the end');
+  assert.equal(of('message.output').at(-1).columns, 47);
+  // Someone at the Mac makes it theirs again, and the next line sent takes it back.
+  shell.size = { columns: 156, rows: 70 };
+  await terminals.send(sessionId, { text: 'ls', clientId: 'c2', columns: 47, rows: 30 });
+  assert.equal(takes(), 2);
+  // With two looking, it's the last one's, and the other's again when that one goes.
+  await terminals.view(sessionId, { columns: 90, rows: 40 }, pad);
+  assert.deepEqual(shell.size, { columns: 90, rows: 40 });
+  await terminals.leave(sessionId, pad);
+  assert.deepEqual(shell.size, { columns: 47, rows: 30 });
+  assert.ok(!calls.some(([name]) => name === 'give'));
+  // With no one looking, it goes back to whoever had it.
+  terminals.leaveAll(phone);
+  await until(() => calls.some(([name]) => name === 'give'), 'it to be given back');
+  assert.deepEqual(shell.size, { columns: 156, rows: 70 });
+  assert.deepEqual(await terminals.leave(sessionId, phone), {}, 'leaving twice is nothing');
 });
 
 test('a command is said as soon as the shell runs it, before the send that typed it is answered', async t => {
@@ -433,4 +482,138 @@ test('terminal sessions come back after a restart, and go for good when deleted'
   assert.equal(store.find(sessionId), undefined);
   assert.equal(of('session.deleted').length, 1);
   assert.equal(again.has(sessionId), false);
+});
+
+// Rex with terminals of the reader's own open in it, which the test opens, changes and closes.
+function setUpRex(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-mirrors-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = new SessionStore({ agentParent: () => undefined });
+  const events = [];
+  store.on('event', event => events.push(event));
+  const calls = [];
+  const rex = { open: [], screens: new Map(), sizes: new Map(), fullScreen: false, changed: undefined };
+  const backend = {
+    listTerminals: async () => rex.open.map(terminal => ({ ...terminal })),
+    watchTerminals: listener => { rex.changed = listener; },
+    closeLink: async () => {},
+    paste: async (target, text) => { calls.push(['paste', target.pane, text]); },
+    pressKey: async (target, key) => { calls.push(['key', target.pane, key]); },
+    readOutput: async target => ({ text: rex.screens.get(target.pane) ?? '', cut: false }),
+    readStyledScreen: async target => rex.screens.get(target.pane) ?? '',
+    isFullScreen: async () => rex.fullScreen,
+    hidesInput: async () => false,
+    size: async target => rex.sizes.get(target.pane) ?? { columns: 156, rows: 70 },
+    resize: async () => {},
+    takeSize: async (target, size) => { calls.push(['take', target.pane, size]); rex.sizes.set(target.pane, { ...size }); },
+    giveBack: async target => { calls.push(['give', target.pane]); rex.sizes.delete(target.pane); },
+    closeSession: async (_, target) => { calls.push(['close', target.pane]); rex.open = rex.open.filter(terminal => terminal.pane !== target.pane); },
+    isSessionOpen: async () => true,
+  };
+  const terminals = new Terminals({
+    store, root, shellDir: path.join(root, 'shell'), backends: { rex: backend, tmux: backend }, useRex: () => true,
+    env: { HOME: '/Users/me', PATH: '/bin' }, tickMs: 5, liveCheckMs: 50, git: async () => undefined,
+  });
+  t.after(() => terminals.stop());
+  const of = kind => events.filter(event => event.kind === kind);
+  const shell = (pane, cwd, more = {}) => ({ pane: `block:${pane}`, rexSession: 'session:1', label: 'shell', program: 'zsh', cwd, ...more });
+  return { store, events, calls, rex, terminals, of, shell };
+}
+
+test('what Rex says of its terminals is a change when one opens, closes, or does something else', () => {
+  const inSession = event => ({ type: 'session_event', payload: { session_id: 'session:1', event } });
+  assert.equal(changesTerminals({ type: 'session_created', payload: {} }), true);
+  assert.equal(changesTerminals(inSession({ type: 'block_created', payload: { block_id: 'block:1' } })), true);
+  assert.equal(changesTerminals(inSession({ type: 'block_closed', payload: { block_id: 'block:1' } })), true);
+  assert.equal(changesTerminals(inSession({ type: 'block_event', payload: { block_id: 'block:1', name: 'process_changed' } })), true);
+  assert.equal(changesTerminals(inSession({ type: 'block_event', payload: { block_id: 'block:1', name: 'bell' } })), false);
+  assert.equal(changesTerminals(inSession({ type: 'block_owner_changed', payload: {} })), false);
+  assert.equal(changesTerminals({ type: 'keymap_changed' }), false);
+});
+
+test('the terminals open in Rex are sessions, for as long as they are open and the reader\'s own', async t => {
+  const { terminals, rex, store, of, shell } = setUpRex(t);
+  rex.open = [
+    shell('a', '/Users/me/app'), shell('b', '/Users/me/notes', { program: 'vim' }),
+    shell('c', '/Users/me/app', { program: 'claude' }), shell('d', '/tmp', { label: 'venes-new-1f2e3d4c' }),
+  ];
+  store.handleHook({ hook_event_name: 'SessionStart', session_id: '11111111-2222-4333-8444-555555555555', source: 'startup', cwd: '/w' }, { pane: 'block:e', rexSession: 'session:1' });
+  rex.open.push(shell('e', '/w'));
+  await terminals.restore();
+  await until(() => store.sessions().some(session => session.mirror), 'the first look at Rex');
+  const mirrors = store.sessions().filter(session => session.mirror);
+  assert.deepEqual(mirrors.map(session => [session.id, session.terminal, session.status, session.cwd, session.pane]), [
+    ['a', true, 'idle', '/Users/me/app', 'block:a'], ['b', true, 'running', '/Users/me/notes', 'block:b'],
+  ], 'not the one Claude Code is in, the helper\'s own, or one a session already has');
+  assert.deepEqual(of('session.discovered').filter(event => event.mirror).map(event => [event.sessionId, event.cwd, event.terminal]), [
+    ['a', '/Users/me/app', true], ['b', '/Users/me/notes', true],
+  ]);
+  assert.equal(mirrorId('block:01a1d870-007a-7426-9f6c-760ff00593dd'), '01a1d870-007a-7426-9f6c-760ff00593dd');
+
+  // One moves, one's program ends, one closes, and one opens.
+  rex.open = [shell('a', '/Users/me/other'), shell('f', '/tmp')];
+  rex.changed();
+  rex.changed();
+  await until(() => of('session.deleted').length, 'the closed one to go');
+  assert.deepEqual(of('session.cwd').map(event => [event.sessionId, event.cwd]), [['a', '/Users/me/other']]);
+  assert.deepEqual(of('session.deleted').map(event => event.sessionId), ['b']);
+  assert.deepEqual(store.sessions().filter(session => session.mirror).map(session => session.id), ['a', 'f']);
+  assert.equal(terminals.has('b'), false);
+
+  // Claude Code started in one: it's that session's from then on.
+  rex.open = [shell('a', '/Users/me/other', { program: 'claude' }), shell('f', '/tmp', { program: 'make' })];
+  rex.changed();
+  await until(() => of('session.deleted').length === 2, 'it to go');
+  assert.deepEqual(store.sessions().filter(session => session.mirror).map(session => [session.id, session.status]), [['f', 'running']]);
+});
+
+test('a mirrored terminal\'s page is its screen, read while someone has it open, and typed into', async t => {
+  const { terminals, rex, calls, of, shell } = setUpRex(t);
+  rex.open = [shell('a', '/Users/me/app')];
+  rex.screens.set('block:a', '~/app ❯ ls\r\nbin  src\r\n~/app ❯ ');
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  await new Promise(resolve => { setTimeout(resolve, 40); });
+  assert.equal(of('message.output').length, 0, 'not read with no one looking');
+
+  const opened = await terminals.join('a', { limit: 60 });
+  assert.deepEqual(opened.items.map(item => [item.role, item.stdout, item.clientId, item.running]), [['output', '~/app ❯ ls\nbin  src\n~/app ❯', SCREEN_LINE, false]]);
+  assert.deepEqual([opened.hasMore, opened.sessions[0].mirror, opened.turn, opened.queued], [false, true, [], []]);
+
+  const phone = {};
+  assert.equal((await terminals.view('a', { columns: 47, rows: 30 }, phone)).columns, 47);
+  assert.deepEqual(calls.at(-1), ['take', 'block:a', { columns: 47, rows: 30 }]);
+  assert.deepEqual(await terminals.send('a', { text: 'make', clientId: 'c1' }), { queued: false });
+  assert.deepEqual(calls.slice(-2), [['paste', 'block:a', 'make'], ['key', 'block:a', 'Enter']]);
+  assert.equal(of('message.user').length, 0, 'a line shows only as the terminal shows it');
+  rex.screens.set('block:a', '~/app ❯ make\r\ncc main.c\r\n');
+  await until(() => of('message.output').some(event => /cc main/.test(event.stdout)), 'the screen');
+  const shown = of('message.output').at(-1);
+  assert.deepEqual([shown.stdout, shown.clientId, shown.columns, shown.replies], ['~/app ❯ make\ncc main.c', SCREEN_LINE, 47, false]);
+
+  // What's running takes Ctrl-C, and a folder can't be changed under it.
+  rex.open = [shell('a', '/Users/me/app', { program: 'make' })];
+  rex.changed();
+  await until(() => of('session.status').at(-1)?.status === 'running', 'it to run');
+  await assert.rejects(terminals.cd('a', { path: os.tmpdir() }), { code: 'terminal_busy' });
+  await terminals.interrupt('a');
+  assert.deepEqual(calls.at(-1), ['key', 'block:a', 'C-c']);
+  rex.open = [shell('a', '/Users/me/app')];
+  rex.changed();
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'it to end');
+  await assert.rejects(terminals.interrupt('a'), { code: 'not_running' });
+  assert.deepEqual((await terminals.status('a')).status, { cwd: '/Users/me/app', home: '/Users/me', running: false });
+
+  // No one looking: it's given back, and read no more.
+  await terminals.leave('a', phone);
+  assert.deepEqual(calls.at(-1), ['give', 'block:a']);
+  const before = of('message.output').length;
+  rex.screens.set('block:a', 'something else');
+  await new Promise(resolve => { setTimeout(resolve, 40); });
+  assert.equal(of('message.output').length, before);
+
+  // Deleting it closes it in Rex.
+  await terminals.remove('a');
+  assert.deepEqual(calls.at(-1), ['close', 'block:a']);
+  assert.equal(of('session.deleted').length, 1);
 });

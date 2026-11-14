@@ -192,7 +192,9 @@ function launch({ mode = 'default', sources = 'project', model = MODEL, settings
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    // A helper that this session's own hook starts keeps to tmux too, and so never asks this Mac's Rex
+    // what terminals it has open.
+    'VENES_TERMINAL=tmux', 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -203,7 +205,7 @@ function launchInRex({ mode = 'default', sources = 'project', model = MODEL, set
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    'VENES_TERMINAL=rex', 'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -2094,13 +2096,139 @@ async function movesBetweenFolders(r) {
   }
 }
 
+// How wide the terminal says it is, by asking a program in it.
+async function widthIn(r, sessionId, clientId, client = r.client) {
+  await client.request('send', { sessionId, text: 'tput cols', clientId });
+  const said = await finished(r, clientId);
+  return [said.stdout, said.columns];
+}
+
+async function isThePagesSize(r) {
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 100, rows: 30 });
+  assert.deepEqual(await widthIn(r, sessionId, 'c1'), ['100', 100]);
+  const view = await r.client.request('terminalView', { sessionId, columns: 52, rows: 20 });
+  assert.deepEqual([view.columns, view.rows], [52, 20]);
+  assert.deepEqual(await widthIn(r, sessionId, 'c2'), ['52', 52]);
+  await r.client.request('terminalLeave', { sessionId });
+  await assert.rejects(r.client.request('terminalView', { sessionId: '00000000-0000-4000-8000-000000000000', columns: 52, rows: 20 }), { code: 'unknown_session' });
+  await r.client.request('delete', { sessionId });
+}
+
+// In Rex, a terminal in a window is the size of whoever owns it, which is Rex's app for every terminal
+// it shows. `app` stands in for it here.
+async function isThePagesSizeWhoeverHasItOpen(r) {
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
+  const { sessions } = await r.client.request('sessions');
+  const block = { session_id: fs.readFileSync(paths.rexSession, 'utf8').trim(), block_id: sessions.find(s => s.id === sessionId).pane };
+  const app = await RexControl.connect(REX_URL);
+  const sizeNow = async () => {
+    const { columns, rows, owner } = await app.request('com.superlogical.terminal.size', { ...block, args: {} });
+    return [columns, rows, owner === appClient ? 'app' : owner ? 'other' : 'none'];
+  };
+  await app.request('session.attach', { session_id: block.session_id });
+  const [{ owner: appClient }] = (await app.request('session.own_block', { session_id: block.session_id, block_ids: [block.block_id], mode: 'take' })).blocks;
+  await app.request('com.superlogical.terminal.resize', { ...block, args: { columns: 156, rows: 70 } });
+  try {
+    // A client that only sends is asked for its size, and the app's stays.
+    await r.client.request('send', { sessionId, text: 'tput cols', clientId: 'c1', columns: 47, rows: 30 });
+    const wide = await finished(r, 'c1');
+    assert.deepEqual([wide.stdout, wide.columns], ['156', 156], 'which its output says');
+
+    // One with the page open has it.
+    const view = await r.client.request('terminalView', { sessionId, columns: 47, rows: 30 });
+    assert.equal(view.columns, 47);
+    assert.deepEqual(await sizeNow(), [47, 30, 'other']);
+    assert.deepEqual(await widthIn(r, sessionId, 'c2'), ['47', 47]);
+
+    // The app takes it back, as when someone clicks in its window, and the next line sent has it again.
+    await app.request('session.own_block', { session_id: block.session_id, block_ids: [block.block_id], mode: 'take' });
+    assert.deepEqual(await sizeNow(), [156, 70, 'app']);
+    await r.client.request('send', { sessionId, text: 'tput cols', clientId: 'c3', columns: 47, rows: 30 });
+    assert.deepEqual([(await finished(r, 'c3')).stdout], ['47']);
+
+    // Leaving gives it back.
+    await r.client.request('terminalLeave', { sessionId });
+    assert.deepEqual(await sizeNow(), [156, 70, 'app']);
+
+    // And so does a client that just goes.
+    const other = await connect();
+    await other.request('terminalView', { sessionId, columns: 60, rows: 24 });
+    assert.deepEqual(await sizeNow(), [60, 24, 'other']);
+    other.close();
+    for (let tries = 0; tries < 50 && (await sizeNow())[0] !== 156; tries++) await delay(100);
+    assert.deepEqual(await sizeNow(), [156, 70, 'app']);
+  } finally {
+    app.close();
+    await r.client.request('delete', { sessionId }).catch(() => {});
+  }
+}
+
+// A terminal the reader opened in Rex themselves, with none of the helper's hooks in its shell.
+async function mirrorsATerminalOpenInRex(r) {
+  const made = JSON.parse(rex('new', 'run', '--json', '--cwd', WS, '--shell=none', '--', '/bin/zsh', '-f'));
+  const pane = made.initial_windows[0].block_ids[0];
+  const id = pane.replace(/^block:/, '');
+  const typeAtTheMac = text => rex('send', '-s', made.session_id, '-b', pane, text);
+  const status = wanted => r.wait(e => e.kind === 'session.status' && e.sessionId === id && e.status === wanted, 10000, `${wanted}`);
+  try {
+    const found = await r.wait(e => e.kind === 'session.discovered' && e.sessionId === id, 10000, 'the mirror');
+    assert.deepEqual([found.terminal, found.mirror, found.cwd], [true, true, fs.realpathSync(WS)]);
+    const { sessions } = await r.client.request('sessions');
+    const session = sessions.find(s => s.id === id);
+    assert.deepEqual([session.terminal, session.mirror, session.status, session.pane], [true, true, 'idle', pane]);
+
+    // Its page is its screen, with what was typed at the Mac, read when it's opened.
+    typeAtTheMac('echo typed-at-the-mac\n');
+    await delay(600);
+    const opened = await r.client.request('join', { sessionId: id, limit: 60 });
+    assert.equal(opened.items.length, 1);
+    assert.match(plainOf(opened.items[0].stdout), /echo typed-at-the-mac\ntyped-at-the-mac/);
+    assert.deepEqual([opened.items[0].role, opened.hasMore, opened.sessions[0].mirror], ['output', false, true]);
+
+    // With its page open it's the page's size, and a line sent shows as the terminal shows it.
+    assert.equal((await r.client.request('terminalView', { sessionId: id, columns: 47, rows: 30 })).columns, 47);
+    await r.client.request('send', { sessionId: id, text: 'echo from-the-phone; tput cols' });
+    const shown = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && /from-the-phone\n47/.test(plainOf(e.stdout)), 10000, 'its screen');
+    assert.deepEqual([shown.clientId, shown.columns, shown.replies], ['screen', 47, false]);
+    assert.ok(!r.events.some(e => e.kind === 'message.user' && e.sessionId === id), 'with no line of its own');
+
+    // It says where its shell goes, and what git says there is asked the same way.
+    await r.client.request('terminalCd', { sessionId: id, path: '/tmp' });
+    const moved = await r.wait(e => e.kind === 'session.cwd' && e.sessionId === id, 10000, 'session.cwd');
+    assert.match(moved.cwd, /^\/(private\/)?tmp$/);
+    assert.equal((await r.client.request('terminalStatus', { sessionId: id })).status.cwd, moved.cwd);
+
+    // A program in front is running, and takes Ctrl-C.
+    await r.client.request('send', { sessionId: id, text: 'sleep 30' });
+    await status('running');
+    await assert.rejects(r.client.request('terminalCd', { sessionId: id, path: WS }), { code: 'terminal_busy' });
+    r.mark();
+    await r.client.request('interrupt', { sessionId: id });
+    await status('idle');
+
+    // Claude Code isn't mirrored, and neither is what the helper starts.
+    assert.ok(sessions.every(s => !s.mirror || s.id === id));
+
+    // Closed in Rex, it's gone.
+    rex('kill', made.session_id);
+    await r.wait(e => e.kind === 'session.deleted' && e.sessionId === id, 10000, 'session.deleted');
+    await assert.rejects(r.client.request('join', { sessionId: id }), { code: 'unknown_session' });
+  } finally {
+    try { rex('kill', made.session_id); } catch { /* already gone */ }
+  }
+}
+
 T('terminal_runs_commands_one_by_one', { noClaude: true }, runsCommandsOneByOne);
+T('terminal_is_the_size_of_the_page_that_has_it_open', { noClaude: true }, isThePagesSize);
 T('terminal_moves_between_folders', { noClaude: true }, movesBetweenFolders);
 T('terminal_takes_a_line_and_ctrl_c', { noClaude: true }, takesALineAndCtrlC);
 T('terminal_shows_a_full_screen_program', { noClaude: true }, showsAFullScreenProgram);
 T('terminal_comes_back_after_a_restart', { noClaude: true }, comesBackAfterARestart);
 if (hasRex) {
   T('in_rex_terminal_runs_commands_one_by_one', { noClaude: true, rex: true }, runsCommandsOneByOne);
+  T('in_rex_terminal_is_the_size_of_the_page_that_has_it_open', { noClaude: true, rex: true }, isThePagesSize);
+  T('in_rex_terminal_is_the_page_s_size_whoever_has_it_open', { noClaude: true, rex: true }, isThePagesSizeWhoeverHasItOpen);
+  T('in_rex_a_terminal_open_in_rex_is_mirrored', { noClaude: true, rex: true }, mirrorsATerminalOpenInRex);
   T('in_rex_terminal_moves_between_folders', { noClaude: true, rex: true }, movesBetweenFolders);
   T('in_rex_terminal_takes_a_line_and_ctrl_c', { noClaude: true, rex: true }, takesALineAndCtrlC);
   T('in_rex_terminal_shows_a_full_screen_program', { noClaude: true, rex: true }, showsAFullScreenProgram);

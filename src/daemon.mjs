@@ -346,6 +346,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       if (!terminal(sessionId)) throw new HelperError('unknown_session', `No terminal session ${sessionId}`);
       return terminals.status(sessionId);
     },
+    // A client has a terminal session's page open, with this much room, or has left it.
+    terminalView: ({ sessionId, columns, rows }, socket) => {
+      if (!terminal(sessionId)) throw new HelperError('unknown_session', `No terminal session ${sessionId}`);
+      return terminals.view(sessionId, { columns, rows }, socket);
+    },
+    terminalLeave: ({ sessionId }, socket) => terminals?.leave(sessionId, socket) ?? {},
     terminalCd: ({ sessionId, path: folder }) => {
       if (!terminal(sessionId)) throw new HelperError('unknown_session', `No terminal session ${sessionId}`);
       return terminals.cd(sessionId, { path: folder });
@@ -509,6 +515,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     socket.on('close', () => {
       subscribers.delete(socket);
       clients.delete(socket);
+      terminals?.leaveAll(socket);
     });
     write(socket, { type: 'hello', protocol: PROTOCOL_VERSION, version: VERSION });
     const lines = readline.createInterface({ input: socket });

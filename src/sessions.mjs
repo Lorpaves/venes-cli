@@ -857,7 +857,7 @@ export class SessionStore extends EventEmitter {
       model: s.model, effort: s.effort, lastPrompt: s.lastPrompt, lastMessage: s.lastMessage,
       permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
-      startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id), ...(s.kind === 'terminal' && { terminal: true }),
+      startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id), ...(s.kind === 'terminal' && { terminal: true }), ...(s.mirror && { mirror: true }),
     };
   }
 

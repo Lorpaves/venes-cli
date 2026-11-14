@@ -7,7 +7,9 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { helperPaths } from './paths.mjs';
+import { RexLink } from './rexlink.mjs';
 import { HelperError } from './sessions.mjs';
+import { VERSION } from './version.mjs';
 
 const exec = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 5000;
@@ -48,15 +50,29 @@ async function callBlock(session, method, args) {
   return JSON.parse(await rex(session, ['--autostart=false', 'block', 'call', ...blockTarget(session), method, JSON.stringify(args)]));
 }
 
+// The same, for a terminal session, which is read several times a second while it's followed: over the
+// helper's own connection when it's open, with no command to start each time, and by the command otherwise.
+async function callTerminal(session, method, args) {
+  const open = session.rexServer ? undefined : await linking?.catch(() => undefined);
+  if (open?.isOpen) {
+    try {
+      return await open.call(session, method, args);
+    } catch (error) {
+      if (error.code) throw error; // Rex's own answer, which the command would get too
+    }
+  }
+  return callBlock(session, method, args);
+}
+
 // The end of what the terminal holds, up to `bytes` of it, and whether there was more before that.
-async function readFormatted(session, format, { bytes = SCREEN_BYTES, unwrap = false } = {}) {
-  const start = await callBlock(session, 'format', { format, trim: true, unwrap, max_bytes: bytes });
+async function readFormatted(session, format, { bytes = SCREEN_BYTES, unwrap = false, call = callBlock } = {}) {
+  const start = await call(session, 'format', { format, trim: true, unwrap, max_bytes: bytes });
   if (start.id === undefined) return { content: start.content, cut: false };
   const first = Math.max(0, start.total - bytes);
   let offset = first;
   let screen = '';
   for (let reads = 0; reads < SCREEN_READS && offset < start.total; reads++) {
-    const { data = '', eof } = await callBlock(session, 'blob_read', { id: start.id, offset, max_bytes: start.total - offset });
+    const { data = '', eof } = await call(session, 'blob_read', { id: start.id, offset, max_bytes: start.total - offset });
     screen += data;
     offset += Buffer.byteLength(data);
     if (eof || !data) break;
@@ -71,19 +87,19 @@ export const readStyledScreen = async session => (await readFormatted(session, '
 // Everything a terminal session's shell has printed since its screen was last cleared, coloured, with
 // the lines the terminal wrapped joined again. `cut` when the start didn't fit.
 export async function readOutput(session) {
-  const { content, cut } = await readFormatted(session, 'vt', { bytes: OUTPUT_READ_BYTES, unwrap: true });
+  const { content, cut } = await readFormatted(session, 'vt', { bytes: OUTPUT_READ_BYTES, unwrap: true, call: callTerminal });
   return { text: content, cut };
 }
 
 // Whether a program has the screen to itself, as an editor or a pager does.
 export async function isFullScreen(session) {
-  return (await callBlock(session, 'modes', {})).screen === 'alternate';
+  return (await callTerminal(session, 'modes', {})).screen === 'alternate';
 }
 
 // A program reading a line without showing it, as a password prompt does. A shell or a program that
 // edits its own line reads keys one at a time, and shows them itself.
 export async function hidesInput(session) {
-  const mode = await callBlock(session, 'input_mode', {});
+  const mode = await callTerminal(session, 'input_mode', {});
   return mode.canonical === true && mode.echo === false;
 }
 
@@ -95,8 +111,111 @@ export async function resize(session, { columns, rows }) {
 
 // The size the terminal really has, whoever asked for what.
 export async function size(session) {
-  const { columns, rows } = await callBlock(session, 'size', {});
+  const { columns, rows } = await callTerminal(session, 'size', {});
   return { columns, rows };
+}
+
+// Where this Mac's Rex server listens, as its own command says, when nothing has told the helper.
+async function serverEndpoint() {
+  if (process.env.REX_SERVER) return process.env.REX_SERVER;
+  const status = await rex({}, ['--autostart=false', 'server', 'status']);
+  const endpoint = /^endpoint:\s*(\S+)/m.exec(status)?.[1];
+  if (!endpoint) throw new Error('Rex didn\'t say where its server is.');
+  return endpoint;
+}
+
+// The helper's own connection to Rex, which stays open: made when it's first wanted, and again after it
+// drops. `attached` is the sessions it has joined, which Rex asks for before it lets a client claim a
+// terminal there. It hears of everything on the server, so that `watchTerminals` can say when the
+// terminals open in Rex have changed.
+let linking;
+let terminalsChanged;
+
+// What makes the list of terminals, or what one of them is doing, different.
+const SESSION_CHANGES = new Set(['block_created', 'block_closed', 'session_view_changed', 'window_created', 'window_closed']);
+const BLOCK_CHANGES = new Set(['process_changed', 'pwd_changed']);
+
+export function changesTerminals(event) {
+  if (event?.type === 'session_created' || event?.type === 'session_destroyed') return true;
+  if (event?.type !== 'session_event') return false;
+  const inner = event.payload?.event;
+  if (inner?.type === 'block_event') return BLOCK_CHANGES.has(inner.payload?.name);
+  return SESSION_CHANGES.has(inner?.type);
+}
+
+export async function link({ connect = RexLink.connect } = {}) {
+  const current = await linking?.catch(() => undefined);
+  if (current?.isOpen) return current;
+  linking = (async () => {
+    const made = await connect(await serverEndpoint(), { name: 'venes', version: VERSION });
+    made.attached = new Set();
+    made.on('event', event => { if (changesTerminals(event)) terminalsChanged?.(); });
+    // A connection that drops takes what it knew with it, so the terminals are looked at again.
+    made.on('close', () => terminalsChanged?.());
+    await made.request('session.attach_all', { event_scope: 'all' });
+    return made;
+  })();
+  return linking;
+}
+
+// `listener` is told whenever the terminals open in Rex may have changed: one opened or closed, moved
+// in or out of a window, or its program or folder changed.
+export function watchTerminals(listener) {
+  terminalsChanged = listener;
+}
+
+const TERMINAL_CREATOR = 'com.superlogical.terminal';
+
+// Every terminal in a window of Rex's, on this Mac's server: its block and session, its label, the
+// program in front, and the folder that program is in.
+export async function listTerminals() {
+  const open = await link();
+  const { sessions } = await open.request('session.list');
+  const found = [];
+  for (const { session_id: rexSession } of sessions ?? []) {
+    const { blocks } = await open.request('session.list_blocks', { session_id: rexSession }).catch(() => ({ blocks: [] }));
+    for (const block of blocks ?? []) {
+      if (block.creator_name !== TERMINAL_CREATOR || block.placement !== 'placed') continue;
+      const target = { pane: block.block_id, rexSession };
+      const running = await open.call(target, 'process', {}).catch(() => undefined);
+      if (!running) continue;
+      const front = running.foreground ?? running.child;
+      found.push({ ...target, label: block.label, program: front?.name, cwd: front?.cwd });
+    }
+  }
+  return found;
+}
+
+// Closes it, as when the helper stops: Rex gives back what it had claimed.
+export async function closeLink() {
+  const current = await linking?.catch(() => undefined);
+  linking = undefined;
+  current?.close();
+}
+
+async function joined(target) {
+  const open = await link();
+  if (!open.attached.has(target.rexSession)) {
+    await open.request('session.attach', { session_id: target.rexSession });
+    open.attached.add(target.rexSession);
+  }
+  return open;
+}
+
+// Makes the terminal this size whoever else has it open: Rex has a terminal follow the client that owns
+// it, and its app owns every terminal in a window it shows. The helper's connection takes it, and has
+// it until `giveBack`, or until the helper goes.
+export async function takeSize(target, { columns, rows }) {
+  const open = await joined(target);
+  await open.request('session.own_block', { session_id: target.rexSession, block_ids: [target.pane], mode: 'take' });
+  await open.call(target, 'resize', { columns, rows });
+}
+
+// Lets it go, to whoever had it before, which is then the size they want it.
+export async function giveBack(target) {
+  const open = await linking?.catch(() => undefined);
+  if (!open?.isOpen || !open.attached.has(target.rexSession)) return;
+  await open.request('session.disown_block', { session_id: target.rexSession, block_ids: [target.pane] });
 }
 
 export async function closeSession(_, target) {

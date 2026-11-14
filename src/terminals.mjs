@@ -399,6 +399,12 @@ export class Terminals {
       const open = new Map(listed
         .filter(found => !taken.has(found.pane) && found.program !== CLAUDE && !OWN_LABEL.test(found.label ?? ''))
         .map(found => [mirrorId(found.pane), found]));
+      // A terminal the helper started is in Rex too, where the program a command started can say it's
+      // at rest.
+      for (const t of [...this.#terminals.values()].filter(t => !t.mirror && !t.ended && t.running)) {
+        const found = listed.find(terminal => terminal.pane === t.target?.pane);
+        if (found) this.#setAtRest(t, Boolean(frontOf(found.program)) && found.working === false);
+      }
       for (const t of [...this.#terminals.values()].filter(t => t.mirror && !open.has(t.id))) this.#dropMirror(t);
       // One that closed while the helper was away has nothing to keep either.
       for (const id of this.#strays) {
@@ -414,7 +420,7 @@ export class Terminals {
     return this.#syncing;
   }
 
-  #addMirror(id, { pane, rexSession, label, program, cwd }) {
+  #addMirror(id, { pane, rexSession, label, program, cwd, working }) {
     const now = Date.now();
     const front = frontOf(program);
     const t = {
@@ -426,11 +432,13 @@ export class Terminals {
     this.#adopt(t);
     this.#store.report(id, 'session.discovered', { cwd, terminal: true, mirror: true, ...(front && { program: front }) });
     this.#store.report(id, 'session.attached', { pane });
+    // A program that's waiting for its next line was running before anyone looked, and isn't at work.
+    if (front && working === false) this.#setAtRest(t, true);
   }
 
   // Where its shell is, and what's in front of it, as Rex now has them. The folder is the shell's own,
   // and not that of a program it's running, which may work somewhere else.
-  #updateMirror(t, { program, cwd }) {
+  #updateMirror(t, { program, cwd, working }) {
     const front = frontOf(program);
     if (cwd && cwd !== t.folder && !front) {
       t.cwd = cwd;
@@ -439,8 +447,19 @@ export class Terminals {
     }
     t.front = front;
     this.#sayFront(t);
+    const isAtRest = Boolean(front) && working === false;
     const status = t.running || front ? 'running' : 'idle';
-    if (status !== t.status) this.#setStatus(t, status);
+    if (status === t.status && isAtRest === Boolean(t.isAtRest)) return;
+    t.isAtRest = isAtRest;
+    this.#setStatus(t, status);
+  }
+
+  // The program in front of a terminal session says it's at rest, or at work again: waiting for the
+  // reader's next line isn't running anything, though the program is still there.
+  #setAtRest(t, isAtRest) {
+    if (Boolean(t.isAtRest) === isAtRest) return;
+    t.isAtRest = isAtRest;
+    if (t.status === 'running') this.#setStatus(t, 'running');
   }
 
   // The program in front is what a list has to say of a mirrored terminal that was sent no command. One
@@ -910,6 +929,7 @@ export class Terminals {
     const line = sent?.clientId ?? `${t.id.slice(0, 8)}-${state.pid}-${state.seq}`;
     const now = Date.now();
     t.running = { key: state.key, pid: state.pid, seq: state.seq, command, at: now, segments: [{ line }], readAt: 0 };
+    t.isAtRest = false;
     t.lastCommand = command;
     t.lastActiveAt = now;
     this.#append(t, { role: 'user', text: command, shell: true, at: now });
@@ -1276,7 +1296,7 @@ export class Terminals {
 
   #setStatus(t, status, fields) {
     t.status = status;
-    this.#store.report(t.id, 'session.status', { status }, { fields });
+    this.#store.report(t.id, 'session.status', { status, ...(status === 'running' && t.isAtRest && { working: false }) }, { fields });
   }
 
   #append(t, item) {

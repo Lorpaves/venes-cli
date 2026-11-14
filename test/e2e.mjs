@@ -2169,6 +2169,47 @@ async function isThePagesSizeWhoeverHasItOpen(r) {
   }
 }
 
+// A program that tells its terminal what it's doing, as codex does: at rest when it starts, and at
+// work from a line that says "work" until the next line.
+const STATUS_PROGRAM = `const say = state => process.stdout.write('\\u001b]7501;state=' + state + ':app=e2e\\u001b\\\\');
+say('idle');
+process.stdin.on('data', chunk => say(String(chunk).includes('work') ? 'working' : 'idle'));
+`;
+const statusProgram = () => {
+  const file = path.join(fs.realpathSync(WS), 'says-status.mjs');
+  fs.writeFileSync(file, STATUS_PROGRAM);
+  return file;
+};
+
+// In Rex, a program that says it's waiting for its next line is running, and not at work.
+async function saysWhenItsProgramIsAtRest(r) {
+  const script = statusProgram();
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
+  const status = (wanted, working) => r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === wanted && e.working === working, 10000, `${wanted}, working ${working}`);
+  const listed = async () => (await r.client.request('sessions')).sessions.find(s => s.id === sessionId);
+  await r.client.request('send', { sessionId, text: `node '${script}'`, clientId: 'c1' });
+  await status('running', false);
+  assert.deepEqual([(await listed()).status, (await listed()).working], ['running', false]);
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'work', clientId: 'c2' });
+  await status('running', undefined);
+  assert.equal((await listed()).working, undefined);
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'rest', clientId: 'c3' });
+  await status('running', false);
+  r.mark();
+  await r.client.request('interrupt', { sessionId });
+  await status('idle', undefined);
+  assert.equal((await listed()).working, undefined);
+  // A command that says nothing is at work for as long as it runs.
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'sleep 2', clientId: 'c4' });
+  await status('running', undefined);
+  await status('idle', undefined);
+  assert.ok(!r.events.some(e => e.kind === 'session.status' && e.sessionId === sessionId && e.working === false));
+  await r.client.request('delete', { sessionId });
+}
+
 // A terminal the reader opened in Rex themselves, with none of the helper's hooks in its shell, and a
 // prompt of three lines, as a framework draws one.
 async function mirrorsATerminalOpenInRex(r) {
@@ -2241,6 +2282,18 @@ async function mirrorsATerminalOpenInRex(r) {
     await status('idle');
     await send('echo after-the-flood', 'p5');
     assert.equal(plainOf((await said('p5')).stdout), 'after-the-flood');
+    await status('idle');
+
+    // A program that says it's waiting for its next line is running, and not at work.
+    const atWork = flag => r.wait(e => e.kind === 'session.status' && e.sessionId === id && e.status === 'running' && e.working === flag, 10000, `working ${flag}`);
+    const script = statusProgram();
+    await send(`node '${script}'`, 'p11');
+    await atWork(false);
+    assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).working, false);
+    await send('work', 'p12');
+    await atWork(undefined);
+    r.mark();
+    await r.client.request('interrupt', { sessionId: id });
     await status('idle');
 
     // A program in front is running, and takes a line and Ctrl-C. It's the command's own, so nothing
@@ -2320,7 +2373,8 @@ async function mirrorsATerminalOpenInRex(r) {
     assert.deepEqual(again.items.filter(item => item.role === 'user').map(item => [item.text, item.input]), [
       ['echo from-the-phone; tput cols', undefined], ['echo typed-at-the-mac', undefined], ['printf no-line-end', undefined],
       ['echo sent-after', undefined], ['cd /tmp', undefined],
-      ['seq 1 150000', undefined], ['echo after-the-flood', undefined], ['cat', undefined], ['to-the-program', true], ['less /etc/hosts', undefined],
+      ['seq 1 150000', undefined], ['echo after-the-flood', undefined], [`node '${script}'`, undefined], ['work', true],
+      ['cat', undefined], ['to-the-program', true], ['less /etc/hosts', undefined],
       ['cat', undefined], ['from-the-phone', true], [pager.text, undefined], ['less', undefined],
     ]);
     assert.ok(again.items.filter(item => item.role === 'output').every(item => !/❯/.test(plainOf(item.stdout))));
@@ -2347,6 +2401,7 @@ if (hasRex) {
   T('in_rex_terminal_runs_commands_one_by_one', { noClaude: true, rex: true }, runsCommandsOneByOne);
   T('in_rex_terminal_is_the_size_of_the_page_that_has_it_open', { noClaude: true, rex: true }, isThePagesSize);
   T('in_rex_terminal_is_the_page_s_size_whoever_has_it_open', { noClaude: true, rex: true }, isThePagesSizeWhoeverHasItOpen);
+  T('in_rex_terminal_says_when_its_program_is_at_rest', { noClaude: true, rex: true }, saysWhenItsProgramIsAtRest);
   T('in_rex_a_terminal_open_in_rex_is_mirrored', { noClaude: true, rex: true }, mirrorsATerminalOpenInRex);
   T('in_rex_terminal_moves_between_folders', { noClaude: true, rex: true }, movesBetweenFolders);
   T('in_rex_terminal_takes_a_line_and_ctrl_c', { noClaude: true, rex: true }, takesALineAndCtrlC);

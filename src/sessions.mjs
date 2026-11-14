@@ -241,7 +241,7 @@ export class SessionStore extends EventEmitter {
     Object.assign(s, fields);
     s.lastEventAt = Date.now();
     if (supersedes) this.#log = this.#log.filter(e => e.sessionId !== id || !supersedes(e));
-    if (kind === 'session.status') this.#setStatus(s, data.status);
+    if (kind === 'session.status') this.#setStatus(s, data.status, data.working);
     else this.#emit(s, kind, data);
   }
 
@@ -837,11 +837,15 @@ export class SessionStore extends EventEmitter {
     request.finish(output);
   }
 
-  #setStatus(s, status) {
+  // A terminal session's program can be running and say it isn't at work, as one waiting for the
+  // reader's next line does: that's `working: false`, and it's said again when it changes.
+  #setStatus(s, status, working) {
     if (status === 'idle' || status === 'ended') this.#stopCompacting(s); // whatever became of it, the turn is over
-    if (s.status === status) return;
+    const isAtRest = status === 'running' && working === false;
+    if (s.status === status && Boolean(s.isAtRest) === isAtRest) return;
     s.status = status;
-    this.#emit(s, 'session.status', { status });
+    s.isAtRest = isAtRest;
+    this.#emit(s, 'session.status', { status, ...(isAtRest && { working: false }) });
   }
 
   #emit(s, kind, data) {
@@ -858,6 +862,7 @@ export class SessionStore extends EventEmitter {
       permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
       startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id), ...(s.kind === 'terminal' && { terminal: true }), ...(s.mirror && { mirror: true }),
+      ...(s.isAtRest && { working: false }),
     };
   }
 

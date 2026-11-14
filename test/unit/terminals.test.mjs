@@ -7,7 +7,7 @@ import { capped, outputBody, plain, screenLines, styleBefore, vtLines, withoutPr
 import { SessionStore } from '../../src/sessions.mjs';
 import { ZSH_FILES, installShellFiles, shellCommand } from '../../src/shell.mjs';
 import { parseStatus } from '../../src/gitstate.mjs';
-import { changesTerminals } from '../../src/rex.mjs';
+import { changesTerminals, workingOf } from '../../src/rex.mjs';
 import {
   HIDDEN_TEXT, Terminals, anchorLine, commandLineOf, contextOf, historyPage, lineStarts, linesAdded, mirrorId, parseState, partFrom, partStarts, partTexts,
   promptHeight, promptLike, promptLinesAbove, shellQuoted, sizeOf, tailOf,
@@ -541,8 +541,8 @@ function setUpRex(t) {
     watchTerminals: listener => { rex.changed = listener; },
     closeLink: async () => {},
     front: async target => {
-      const { program, cwd } = rex.open.find(terminal => terminal.pane === target.pane);
-      return { program, cwd };
+      const { program, cwd, working } = rex.open.find(terminal => terminal.pane === target.pane);
+      return { program, cwd, working };
     },
     paste: async (target, text) => { calls.push(['paste', target.pane, text]); rex.shells.get(target.pane)?.paste(text); },
     pressKey: async (target, key) => { calls.push(['key', target.pane, key]); rex.shells.get(target.pane)?.key(key); },
@@ -649,6 +649,7 @@ test('what Rex says of its terminals is a change when one opens, closes, or does
   assert.equal(changesTerminals(inSession({ type: 'block_created', payload: { block_id: 'block:1' } })), true);
   assert.equal(changesTerminals(inSession({ type: 'block_closed', payload: { block_id: 'block:1' } })), true);
   assert.equal(changesTerminals(inSession({ type: 'block_event', payload: { block_id: 'block:1', name: 'process_changed' } })), true);
+  assert.equal(changesTerminals(inSession({ type: 'block_event', payload: { block_id: 'block:1', name: 'program_status_changed' } })), true);
   assert.equal(changesTerminals(inSession({ type: 'block_event', payload: { block_id: 'block:1', name: 'bell' } })), false);
   assert.equal(changesTerminals(inSession({ type: 'block_owner_changed', payload: {} })), false);
   assert.equal(changesTerminals({ type: 'keymap_changed' }), false);
@@ -1034,4 +1035,50 @@ test('a command typed at the Mac while a mirrored terminal\'s page is open is a 
   await until(() => ended(of, typed.clientId), 'it to end', 5000);
   assert.equal(ended(of, typed.clientId).stdout, 'cc main.c\ndone');
   assert.deepEqual(terminals.history('a').items.map(item => [item.role, item.text ?? item.stdout]), [['user', 'make -j4'], ['output', 'cc main.c\ndone']]);
+});
+
+test('a program says whether it\'s at work, and what an earlier one said isn\'t its', () => {
+  const codex = { pid: 93126, name: 'codex' };
+  assert.equal(workingOf([{ state: 'idle', app: 'codex', owner: codex }], codex), false);
+  assert.equal(workingOf([{ state: 'working', owner: codex }, { id: 'task', state: 'done', owner: codex }], codex), true);
+  assert.equal(workingOf([{ state: 'blocked', kind: 'question', owner: codex }], codex), false, 'waiting for someone isn\'t work');
+  assert.equal(workingOf([{ state: 'idle', owner: { pid: 22039, name: 'antigravity' } }], { pid: 20225, name: 'zsh' }), undefined);
+  assert.equal(workingOf([], codex), undefined, 'most programs say nothing');
+  assert.equal(workingOf(undefined, undefined), undefined);
+});
+
+test('a terminal whose program is waiting for its next line is running, and not at work', async t => {
+  const { terminals, rex, of, shell, store } = setUpRex(t);
+  const said = () => of('session.status').map(event => [event.status, event.working]);
+  rex.open = [shell('a', '/Users/me/app', { program: 'codex', working: false }), shell('b', '/Users/me/app', { program: 'make' })];
+  await terminals.restore();
+  await until(() => terminals.has('a') && terminals.has('b'), 'the first look at Rex');
+  assert.deepEqual(store.sessions().map(session => [session.id, session.status, session.working]), [['a', 'running', false], ['b', 'running', undefined]]);
+  assert.deepEqual(said(), [['running', false]], 'said of the one that says so, and nothing of one that says nothing');
+
+  // It's given something to do, and then it's done.
+  rex.open = [shell('a', '/Users/me/app', { program: 'codex', working: true }), shell('b', '/Users/me/app', { program: 'make' })];
+  rex.changed();
+  await until(() => said().length === 2, 'it to be at work');
+  rex.open = [shell('a', '/Users/me/app', { program: 'codex', working: false }), shell('b', '/Users/me/app', { program: 'make' })];
+  rex.changed();
+  await until(() => said().length === 3, 'it to be at rest');
+  assert.deepEqual(said(), [['running', false], ['running', undefined], ['running', false]]);
+  assert.equal(store.sessions().find(session => session.id === 'a').working, false);
+
+  // It's left, and the shell is back.
+  rex.open = [shell('a', '/Users/me/app'), shell('b', '/Users/me/app', { program: 'make' })];
+  rex.changed();
+  await until(() => said().at(-1)[0] === 'idle', 'the shell to be back');
+  assert.deepEqual([said().at(-1), store.sessions().find(session => session.id === 'a').working], [['idle', undefined], undefined]);
+
+  // A command sent from here that starts such a program is at rest when the program says so.
+  const zsh = fakeShell(rex, 'block:a', { runs: () => ({ lines: ['Codex'], stays: 'codex' }) });
+  await terminals.send('a', { text: 'codex', clientId: 'c1' });
+  await until(() => said().at(-1)[0] === 'running', 'it to run');
+  assert.deepEqual(said().at(-1), ['running', undefined]);
+  rex.open = rex.open.map(terminal => (terminal.pane === 'block:a' ? { ...terminal, working: false } : terminal));
+  rex.changed();
+  await until(() => said().at(-1)[1] === false, 'it to be at rest');
+  assert.equal(zsh.state.program, 'codex');
 });

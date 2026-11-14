@@ -106,7 +106,16 @@ export async function readOutput(session) {
 export async function front(session) {
   const running = await callTerminal(session, 'process', {});
   const process = running.foreground ?? running.child;
-  return { program: process?.name, cwd: process?.cwd };
+  const status = await callTerminal(session, 'program_status', {}).catch(() => undefined);
+  return { program: process?.name, cwd: process?.cwd, working: workingOf(status?.records, process) };
+}
+
+// Whether the program in front says it's at work. A program can tell its terminal what it's doing, as
+// codex and Claude Code do: at work, or at rest, waiting for someone, done. Undefined for one that
+// says nothing, as most don't, and for what an earlier program left said, which isn't this one's.
+export function workingOf(records, process) {
+  const own = (records ?? []).filter(record => process?.pid !== undefined && record.owner?.pid === process.pid);
+  return own.length ? own.some(record => record.state === 'working') : undefined;
 }
 
 // Whether a program has the screen to itself, as an editor or a pager does.
@@ -151,7 +160,7 @@ let terminalsChanged;
 
 // What makes the list of terminals, or what one of them is doing, different.
 const SESSION_CHANGES = new Set(['block_created', 'block_closed', 'session_view_changed', 'window_created', 'window_closed']);
-const BLOCK_CHANGES = new Set(['process_changed', 'pwd_changed']);
+const BLOCK_CHANGES = new Set(['process_changed', 'pwd_changed', 'program_status_changed', 'program_status_removed']);
 
 export function changesTerminals(event) {
   if (event?.type === 'session_created' || event?.type === 'session_destroyed') return true;
@@ -185,7 +194,7 @@ export function watchTerminals(listener) {
 const TERMINAL_CREATOR = 'com.superlogical.terminal';
 
 // Every terminal in a window of Rex's, on this Mac's server: its block and session, its label, the
-// program in front, and the folder that program is in.
+// program in front, the folder that program is in, and whether it says it's at work.
 export async function listTerminals() {
   const open = await link();
   const { sessions } = await open.request('session.list');
@@ -198,7 +207,8 @@ export async function listTerminals() {
       const running = await open.call(target, 'process', {}).catch(() => undefined);
       if (!running) continue;
       const front = running.foreground ?? running.child;
-      found.push({ ...target, label: block.label, program: front?.name, cwd: front?.cwd });
+      const status = await open.call(target, 'program_status', {}).catch(() => undefined);
+      found.push({ ...target, label: block.label, program: front?.name, cwd: front?.cwd, working: workingOf(status?.records, front) });
     }
   }
   return found;

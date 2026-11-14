@@ -147,11 +147,6 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
 | `pushUnregister` | `deviceId` | That phone doesn't want them any more |
 | `start` | `cwd`, `trust` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). |
-| `startTerminal` | `cwd`, `columns`, `rows` | Starts a shell of your own in that folder, with no Claude Code in it, and replies with its `sessionId` once its first prompt is up. See [Terminal sessions](#terminal-sessions). |
-| `terminalStatus` | `sessionId` | `status`: where a terminal session's shell is, as `cwd`, with your `home` folder, whether a command is `running`, and what `git` says of that folder. See [Terminal sessions](#terminal-sessions). |
-| `terminalView` | `sessionId`, `columns`, `rows` | A client has a terminal session's page open, with that much room: the terminal is that size until `terminalLeave`, or until the connection closes. Replies with the `columns` and `rows` it now has. See [Terminal sessions](#terminal-sessions). |
-| `terminalLeave` | `sessionId` | The client has left the page |
-| `terminalCd` | `sessionId`, `path` | Moves a terminal session's shell to that folder, by typing `cd` at its prompt. Refused with `terminal_busy` while a command runs. |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -251,42 +246,6 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 
 Claude Code asks before it works in a folder it doesn't trust yet, and runs no hooks, the helper's included, until that's answered. `trusted` reads its own rules from `~/.claude.json`. A folder is trusted when the folder, or one above it, has been accepted. Inside a git repository the search stops at the repository's top folder, and outside one it goes up to the top of the disk. The home folder is asked about every time. `start` for a folder that isn't trusted fails with `needs_trust` and starts nothing. With `trust: true`, the reader's word in the app, it answers Claude Code's question with "Yes, I trust this folder", as the keys at the Mac would. If Claude Code asks about a folder that looked trusted, `start` picks "No, exit", so nothing is left running, and fails with `needs_trust`.
 
-### Terminal sessions
-
-`startTerminal` opens a terminal session: zsh as a login shell, in Rex if it's on this Mac and otherwise in tmux, as a Claude Code session gets, in a window labelled `venes-term-<id>`. It reads your own startup files, so it has your `PATH`, aliases and functions, and its commands go in your own history. It's zsh whatever your login shell is. It's in `sessions` and snapshots with `terminal: true`, and its `session.discovered` says so too. The helper keeps what it has done in its own folder, so it outlives a restart, and the shell goes on in its terminal meanwhile.
-
-Each `send` is typed at the prompt as a command, or, while one runs, as a line for it, followed by Enter, as typing at the terminal does. `columns` and `rows` say how much room the client has, and the terminal takes that size before the line is typed, so what a program lays out fits. A command sent from here comes back as `message.user` with `shell: true` and the send's `clientId`, once the shell runs it, and so does one typed at the Mac, with a `clientId` of the helper's own. A line sent to a running command comes back at once with `input: true`, and as `••••••` when the program reads it without showing it, as a password prompt does.
-
-`message.output` carries what a command printed, in `stdout`, with the escape sequences that colour it and nothing else, `stderr` empty, and `replies` false. It has `columns`, the width the terminal really was, which is where its lines were broken: the client's, unless someone has the terminal open at another size, as Rex's app has every terminal in a window it shows. It's read off the screen while the command runs, with `running: true`, and again once it's done, with `running: false` and `exitCode`, and each time it's all of it so far: the last 2,000 lines, or 200,000 characters, as a terminal's scrollback keeps them. Its `clientId` is the line's it's under. What a command prints after a line sent to it is that line's: from the line it was typed on, when the typing shows there, as on a program's own prompt, and from the line under it otherwise. So a prompt can move from the command's own output to the line's, and the command's own output then comes again without it, empty if that was all of it. An output that's empty from the start and ends with 0 doesn't come at all. A reconnecting client is sent only the latest of a line's outputs.
-
-To do that, the shell runs hooks of the helper's own after your startup files. They clear the terminal and its scrollback before each command, so it holds the latest command alone, and they put back a plain prompt of the folder's path before each one, which is how the end of a command's output is found.
-
-A program that takes the whole screen, such as an editor or a pager, sends `terminal.screen` with `fullScreen: true`, and `false` once it has gone. What it shows is the output of the line it's under: the command's own, or the last line sent to the program. It comes as that line's `message.output`, with `running: true`, and again whole each time the screen changes, with the escape sequences that colour it, backgrounds too, and the spaces at a line's end that show on one. It's one screen, under the last line sent: a line sent to the program takes it from the line before, whose output comes again without it, empty if that was all of it. When the program gives the screen back, what it showed last stays as that output, with whatever is printed after it underneath, as in a terminal that keeps such a screen. A client needs nothing more to show it. For the keys a line can't send, `page` gives the screen as a page, and `pageKey` and `pageText` work it, as for Claude Code's pages. A line sent to it replies with `page: true`. `pageClose` leaves it running, as only the program knows how it's left without losing anything. `interrupt` presses Ctrl-C.
-
-A terminal session is `running` for as long as a command is. A program can be running and not at work, as codex is while it waits for the next thing to do, and in Rex such a program can say so: it tells its terminal what it's doing, with the [program status](https://www.superlogical.com/rex/docs/build/program-status) escape sequence, as codex, Antigravity and Claude Code do. While the program in front says anything but that it's working, `session.status` has `working: false` beside `status: running`, and so does the session in `sessions` and `join`. It comes again without `working` when the program is at work, so the same status can come twice with only that changed. A program that says nothing, as most don't, is at work for as long as it runs, and so is every program in tmux, where nothing is said. A client can go by it to show that something is being done only while it is.
-
-In Rex, a terminal in a window follows the size of the client that owns it, and Rex's app owns every terminal it shows, so a terminal someone has open at the Mac is that window's size whatever a `send` asks for. `terminalView` is how a client gets its own: the helper keeps a connection of its own to Rex, takes the terminal for as long as a client has its page open, and gives it back to whoever had it when the last one leaves. With several clients looking, it's the size of the one that came last. If someone at the Mac takes it back meanwhile, the next line sent takes it again. In tmux the terminal is simply resized.
-
-The terminals you opened in Rex yourself are terminal sessions too, for as long as they're open, with `mirror: true` beside `terminal: true`: every terminal in a window of any of Rex's sessions, but for the ones Claude Code runs in, which are those sessions', and the ones the helper started. Rex says when they open, close, change folder or run something, so they need no asking after.
-
-A mirrored terminal's page is as any terminal session's: a line sent is a `message.user` with `shell: true`, and what it printed is that line's `message.output`. Its shell has none of the helper's hooks and its screen is never cleared, so the helper finds a command's output itself. It notes the line the prompt is on, types the command there, and says it at once. The output is what comes under that line, read while the command runs and sent as any terminal session's is. The command is over once the shell is in front again, its prompt is drawn under the output, and the screen has stopped changing: the last `message.output` is then without the prompt, with `running: false` and no `exitCode`, which nothing in the shell says. The line is found again by how far it is from the start of all the terminal holds, and when the terminal is full and has let go of older lines, by the prompt with the command after it, or by the lines above it.
-
-How many lines the prompt takes is found the first time a command is sent, by pressing Ctrl-C at the prompt, which draws it again underneath. The same is done when something is already typed at the prompt, so that the command isn't added to it.
-
-What it can't do:
-
-- What was on the screen before isn't on the page, and neither is a command typed at the Mac that's over before anyone looks. `join` gives what the helper followed, which is kept in `~/.venes/terminals/<id>` for as long as the terminal is open.
-- A prompt that takes more or fewer lines than it did leaves a line of itself in an output, or takes one from it.
-- A command that only the shell runs, with no program in front, is taken to be over if it prints nothing for a second and a half while a prompt's worth of lines is under it.
-
-A program that's running in the terminal, started at the Mac, is followed while a client has the page open, with `terminalView`: when the page is opened, and when one starts while it's open. It gets a `message.user` of its own, with `shell: true` and a `clientId` of the helper's, and its output under that, as a command sent from a client has. With the screen to itself, as codex has, the line is the program's name and the output is what it shows. Otherwise the output starts under the line the command was typed on, and the line is what was typed, when that line can be found: by the prompt, once it has been measured, or as it read when a page was last opened at it. Failing that, the line is the program's name, with what it prints from then on. A prompt that was never measured is taken to be the lines that read the same above that line and above the one it's back on, down from an empty line. With no page open it isn't read, until it ends, which is said with what was last read of it.
-
-A line sent while a command runs is for it, with `input: true`, and what's printed after is that line's, as for any terminal session. A line sent while a program started at the Mac is in front goes to that program the same way, and it's followed from where it was until the shell is back. A mirrored terminal is `running` while a command sent to it runs or a program other than a shell is in front, which is when `interrupt` presses Ctrl-C and `terminalCd` is refused, and `idle` at a prompt. `terminalCd` types `cd` there, which shows as the command it is. `terminal.program` names a program started at the Mac when it comes to the front, with no `program` once the shell is back, and it's the session's `lastPrompt` meanwhile, for a list to say what the terminal is doing. A command sent through the helper is the `lastPrompt` itself. `session.cwd` follows its shell, `terminalStatus` and the page commands work as for any terminal session, and `delete` closes it in Rex. When it closes there, or Claude Code starts in it, it goes with `session.ended` and `session.deleted`.
-
-A shell that has moved to another folder, as after a `cd`, says so with `session.cwd` once the command that moved it is over, and `cwd` in `sessions` follows it. `terminalStatus` gives that folder and what a prompt would say of it: `git` is there inside a repository, with its `root`, the `branch` checked out, or the start of the commit with `detached: true` when there's none, the `upstream` it follows with how many commits it's `ahead` and `behind`, and how many files are `staged`, `modified`, `untracked` and `conflicted`. It's left out outside a repository, and when git takes more than three seconds to say. `terminalCd` moves the shell from afar: it types `cd` and the path, in quotes when a shell would otherwise take it apart, so it shows as the command it is.
-
-`join` and `history` give what it has done as `user` items, with `shell: true` and `input: true` as the events have them, and `output` items with `stdout`, `stderr`, `replies`, `columns` and `exitCode`, each under its line, with a command still running as far as it has got, its last output with `running: true`. A shell that exits, with `exit` or when its terminal is closed, ends the session, with `session.ended` and a `reason` of `exited`, and the next `send` starts a new one where the last one was. `delete` closes its terminal and forgets what it did. `capabilities` lists nothing, `statusLine` has no `status`, and `configure` is refused with `terminal_session`.
-
 ### Notifications
 
 A phone that isn't connected hears when a session asks for something (`request.opened`) and when a turn ends (`turn.end`). A phone that's connected is left to show its own. The phone sends `pushRegister` with its own `deviceId`, its push `token` in hex, a `key` of 32 bytes in base64, `sandbox` for a development build, and `mac`, its own name for this Mac, which comes back in each notification. The connection it sends that on counts as that phone's, so while the connection is open, nothing is pushed to it. Phones are kept in `push.json` in the helper's folder, readable only by you.
@@ -385,20 +344,17 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 
 | `kind` | Fields |
 |---|---|
-| `session.discovered` | `cwd`, and `terminal` for a terminal session, with `mirror` for one mirrored from Rex and the `program` in front of its shell |
+| `session.discovered` | `cwd` |
 | `session.started` | `source`, `model`, `cwd` |
 | `session.attached` | `pane` |
-| `session.status` | `status`: `idle`, `running`, `waiting` or `ended`. For a terminal session that's `running`, `working: false` when its program says it's at rest |
+| `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
 | `session.mode` | `permissionMode` |
 | `session.model` | `model` |
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
 | `session.deleted` | |
-| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`, or a terminal session's), `input` (only for a line sent to a terminal session's running command) |
-| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed. A terminal session's also has `running`, `columns` and `exitCode`. |
-| `terminal.screen` | `fullScreen`: a terminal session's program took the whole screen, or gave it back |
-| `session.cwd` | `cwd`: a terminal session's shell is in another folder now |
-| `terminal.program` | `program`: a program started at the Mac that's in front of a mirrored terminal's shell now, by name, and nothing when the shell is |
+| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`) |
+| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
@@ -440,9 +396,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
 | `needs_trust` | Claude Code asks first whether to trust the folder. Ask the reader, and send `start` again with `trust: true`. |
-| `start_failed` | Claude Code quit, or took too long, starting a new session, or a terminal session's shell did |
-| `terminal_session` | `configure` was sent for a terminal session, which has no model |
-| `terminal_busy` | `terminalCd` was sent while a command runs in the terminal session, which would take the line for itself |
+| `start_failed` | Claude Code quit, or took too long, starting a new session |
 | `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |
 | `unreadable_folder` | `folders` couldn't read what's in that folder |

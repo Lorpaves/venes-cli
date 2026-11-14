@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, resize, runsClaude, size, startSession, tailnetAccountOf,
-} from '../../src/rex.mjs';
+import { cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
 import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from '../../src/terminal.mjs';
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
@@ -123,13 +121,6 @@ test('a session starts in a window of its own, with its folder and variables and
   const target = await startSession({ name: 'venes-1', cwd: '/w', command: ['claude', '--resume', 'id', '--', 'a "quoted" message'], env: { PATH: '/bin', A: 'b' } });
   assert.deepEqual(target, { pane: 'block:9', rexSession: 'session:7' });
   assert.deepEqual(calls().at(-1).args, ['run', '-s', 'session:7', '--label', 'venes-1', '--focus=false', '--json', '--cwd', '/w', '--shell=none', '--', 'env', 'PATH=/bin', 'A=b', 'claude', '--resume', 'id', '--', 'a "quoted" message']);
-});
-
-test('a terminal is asked for a size, and says the one it has', async t => {
-  const calls = fakeRex(t, { resize: '{}', size: '{"columns":156,"rows":70,"owner":"client:1","desired":[]}' });
-  await resize(SESSION, { columns: 47, rows: 30 });
-  assert.deepEqual(calls().at(-1).args.slice(7), ['resize', '{"columns":47,"rows":30}']);
-  assert.deepEqual(await size(SESSION), { columns: 156, rows: 70 });
 });
 
 test('the first one makes the session they share, with nothing in it', async t => {

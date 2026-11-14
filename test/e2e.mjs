@@ -38,8 +38,7 @@ const CLAUDE_CONFIG = process.env.VENES_E2E_CLAUDE_CONFIG_DIR;
 if (CLAUDE_CONFIG) process.env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG;
 const configEnv = CLAUDE_CONFIG ? [`CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG}`] : [];
 const CLAUDE = execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim();
-// Its own tmux server, by name. Another name lets a second run go on beside this one.
-const SOCK = process.env.VENES_E2E_SOCK || 'venes-e2e';
+const SOCK = 'venes-e2e';
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(PLUGIN, 'cli/venes.mjs');
 const paths = helperPaths(HOME);
@@ -79,9 +78,6 @@ await new Promise(resolve => { pushServer.listen(0, '127.0.0.1', resolve); });
 const PUSH_URL = `http://127.0.0.1:${pushServer.address().port}/push`;
 
 const REX_SOCKET = `${HOME}-rex.sock`;
-// Where the same server answers over the network, for a client that isn't on this Mac. Another port,
-// with VENES_E2E_HOME and VENES_E2E_SOCK, lets a second run go on beside this one.
-const REX_PORT = process.env.VENES_E2E_REX_PORT || '18744';
 const REX_SERVER = `unix://${REX_SOCKET}`;
 const barerEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(CLAUDE|REX_)/.test(key)));
 const rexEnv = { ...barerEnv, REX_SERVER };
@@ -95,7 +91,7 @@ async function startRexServer() {
   if (rexServerProcess) return;
   fs.rmSync(REX_SOCKET, { force: true });
   rexServerProcess = spawn('rex', [
-    'server', 'run', '--listen', REX_SERVER, '--extra-listen', `http://127.0.0.1:${REX_PORT}`, '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
+    'server', 'run', '--listen', REX_SERVER, '--extra-listen', 'http://127.0.0.1:18744', '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
   ], { env: rexEnv, stdio: 'ignore' });
   for (let i = 0; i < 100 && !fs.existsSync(REX_SOCKET); i++) await delay(50);
   await delay(200);
@@ -192,9 +188,7 @@ function launch({ mode = 'default', sources = 'project', model = MODEL, settings
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    // A helper that this session's own hook starts keeps to tmux too, and so never asks this Mac's Rex
-    // what terminals it has open.
-    'VENES_TERMINAL=tmux', 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -205,7 +199,7 @@ function launchInRex({ mode = 'default', sources = 'project', model = MODEL, set
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    'VENES_TERMINAL=rex', 'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -1617,7 +1611,7 @@ T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, a
 });
 
 // A plain address here, since a tailnet is only another way of reaching the same listener.
-const REX_URL = `ws://127.0.0.1:${REX_PORT}`;
+const REX_URL = 'ws://127.0.0.1:18744';
 const awaitLine = (pipe, test, ms = 5000) => new Promise((resolve, reject) => {
   const found = pipe.stream.lines.find(test);
   if (found) { resolve(found); return; }
@@ -1937,478 +1931,6 @@ Run.prototype.waitForPane = async function waitForPane(re, ms) {
   throw new Error(`pane never matched ${re}:\n${this.pane()}`);
 };
 
-// Terminal sessions: the reader's own shell, with no Claude Code in it, and their real dotfiles.
-const finished = (r, clientId, ms = 20000) => r.wait(
-  e => e.kind === 'message.output' && e.clientId === clientId && e.running === false, ms, `the end of ${clientId}`,
-);
-const plainOf = text => text.replace(/\u001b\[[0-9;:]*m/g, '');
-
-async function runsCommandsOneByOne(r) {
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 60, rows: 20 });
-  const { sessions } = await r.client.request('sessions');
-  const session = sessions.find(s => s.id === sessionId);
-  assert.deepEqual([session.terminal, session.status, session.cwd], [true, 'idle', fs.realpathSync(WS)]);
-
-  await r.client.request('send', { sessionId, text: 'echo hello', clientId: 'c1', columns: 47, rows: 30 });
-  const hello = await finished(r, 'c1');
-  assert.deepEqual([hello.stdout, hello.exitCode, hello.replies, hello.columns], ['hello', 0, false, 47]);
-  // What a program lays out is laid out for the client's width.
-  await r.client.request('send', { sessionId, text: 'tput cols', clientId: 'c0', columns: 47, rows: 30 });
-  assert.equal((await finished(r, 'c0')).stdout, '47');
-  const line = r.events.find(e => e.kind === 'message.user' && e.clientId === 'c1');
-  assert.deepEqual([line.text, line.shell], ['echo hello', true]);
-
-  await r.client.request('send', { sessionId, text: 'cd /tmp && pwd', clientId: 'c2' });
-  assert.match((await finished(r, 'c2')).stdout, /^\/(private\/)?tmp$/);
-  await r.client.request('send', { sessionId, text: "printf 'a\\nb'", clientId: 'c3' });
-  assert.equal((await finished(r, 'c3')).stdout, 'a\nb', 'one with no newline at its end');
-  await r.client.request('send', { sessionId, text: 'false', clientId: 'c4' });
-  assert.deepEqual([(await finished(r, 'c4')).exitCode, (await finished(r, 'c4')).stdout], [1, '']);
-  await r.client.request('send', { sessionId, text: 'printf "\\033[31mred\\033[0m\\n"', clientId: 'c5' });
-  const red = await finished(r, 'c5');
-  assert.equal(plainOf(red.stdout), 'red');
-  // tmux writes it as the program did, and Rex by its number in the palette.
-  assert.match(red.stdout, /\u001b\[(31|38;5;1)m/, 'with its colour');
-  await r.client.request('send', { sessionId, text: 'seq 1 3000', clientId: 'c6' });
-  const many = await finished(r, 'c6');
-  assert.match(many.stdout, /\n3000$/, 'a long one keeps its end');
-
-  const opened = await r.client.request('join', { sessionId, limit: 50 });
-  assert.deepEqual(opened.items.filter(i => i.role === 'user').map(i => i.text),
-    ['echo hello', 'tput cols', 'cd /tmp && pwd', "printf 'a\\nb'", 'false', 'printf "\\033[31mred\\033[0m\\n"', 'seq 1 3000']);
-  assert.ok(opened.items.filter(i => i.role === 'output').every(i => i.columns === 47), 'each as wide as the terminal was');
-  assert.equal(opened.sessions[0].terminal, true);
-  await r.client.request('delete', { sessionId });
-  await r.wait(e => e.kind === 'session.deleted' && e.sessionId === sessionId, 5000, 'session.deleted');
-}
-
-async function takesALineAndCtrlC(r) {
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
-  await r.client.request('send', { sessionId, text: 'read -s x; echo "got ${#x}"', clientId: 'c1' });
-  await r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'running', 10000, 'running');
-  await delay(500);
-  await r.client.request('send', { sessionId, text: 'secret', clientId: 'c2' });
-  const typed = await r.wait(e => e.kind === 'message.user' && e.clientId === 'c2', 5000, 'the line');
-  assert.deepEqual([typed.text, typed.input], ['••••••', true], 'a line read without showing isn\'t shown');
-  assert.equal(plainOf((await finished(r, 'c2')).stdout).trim(), 'got 6');
-
-  // A prompt of the program's own, which the typing shows on, goes with the line typed on it.
-  await r.client.request('send', { sessionId, text: `sh -c 'printf "name? "; read n; echo "hi $n"'`, clientId: 'c5' });
-  await r.wait(e => e.kind === 'message.output' && e.clientId === 'c5' && /name\?/.test(e.stdout), 10000, 'its prompt');
-  await r.client.request('send', { sessionId, text: 'bob', clientId: 'c6' });
-  assert.equal(plainOf((await finished(r, 'c6')).stdout), 'name? bob\nhi bob');
-  assert.equal(r.events.findLast(e => e.kind === 'message.output' && e.clientId === 'c5').stdout, '', 'which leaves the command\'s own with nothing');
-
-  await r.client.request('send', { sessionId, text: 'sleep 30', clientId: 'c3' });
-  await r.wait(e => e.kind === 'message.user' && e.clientId === 'c3', 5000, 'sleep');
-  await delay(300);
-  await r.client.request('interrupt', { sessionId });
-  assert.equal((await finished(r, 'c3', 10000)).exitCode, 130);
-  await assert.rejects(r.client.request('interrupt', { sessionId }), { code: 'not_running' });
-  await r.client.request('delete', { sessionId });
-}
-
-async function showsAFullScreenProgram(r) {
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 60, rows: 12 });
-  await r.client.request('send', { sessionId, text: 'less /etc/hosts', clientId: 'c1' });
-  await r.wait(e => e.kind === 'terminal.screen' && e.fullScreen === true, 10000, 'full screen');
-  // What it shows is the command's output, in the list, and its keys are a page's.
-  const shown = await r.wait(e => e.kind === 'message.output' && e.clientId === 'c1' && /localhost/.test(plainOf(e.stdout)), 10000, 'what the pager shows');
-  assert.deepEqual([shown.running, shown.columns], [true, 60]);
-  const { page } = await r.client.request('page', { sessionId });
-  assert.ok(page.lines.some(runs => runs.map(run => run.text).join('').includes('localhost')), 'what the pager shows');
-  await r.client.request('pageText', { sessionId, text: 'q' });
-  await r.wait(e => e.kind === 'terminal.screen' && e.fullScreen === false, 5000, 'the screen back');
-  await r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'idle', 5000, 'its end');
-  assert.deepEqual((await r.client.request('page', { sessionId })).page, null);
-  // It stays where it was shown, once the pager has gone.
-  assert.match(plainOf((await finished(r, 'c1')).stdout), /localhost/);
-  const kept = (await r.client.request('history', { sessionId, limit: 10 })).items;
-  assert.deepEqual([kept.map(item => item.role), /localhost/.test(plainOf(kept[1].stdout))], [['user', 'output'], true]);
-  await r.client.request('send', { sessionId, text: 'echo after', clientId: 'c2' });
-  assert.equal((await finished(r, 'c2')).stdout, 'after');
-  await r.client.request('delete', { sessionId });
-}
-
-async function comesBackAfterARestart(r) {
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
-  await r.client.request('send', { sessionId, text: 'echo one', clientId: 'c1' });
-  await finished(r, 'c1');
-  r.client.close();
-  await stopHelper();
-  startHelper();
-  const client = await connect();
-  const run = new Run(client);
-  await client.request('subscribe');
-  const { sessions } = await client.request('sessions');
-  assert.deepEqual(sessions.filter(s => s.terminal).map(s => [s.id, s.status]), [[sessionId, 'idle']]);
-  await client.request('send', { sessionId, text: 'echo two', clientId: 'c2' });
-  assert.equal((await finished(run, 'c2')).stdout, 'two');
-  const { items } = await client.request('history', { sessionId, limit: 10 });
-  assert.deepEqual(items.map(i => i.text ?? i.stdout), ['echo one', 'one', 'echo two', 'two']);
-  // The shell exits, and a command starts it again.
-  await client.request('send', { sessionId, text: 'exit', clientId: 'c3' });
-  await run.wait(e => e.kind === 'session.ended' && e.sessionId === sessionId, 15000, 'session.ended');
-  await client.request('send', { sessionId, text: 'echo three', clientId: 'c4' });
-  assert.equal((await finished(run, 'c4')).stdout, 'three');
-  await client.request('delete', { sessionId });
-  client.close();
-}
-
-async function movesBetweenFolders(r) {
-  const repo = path.join(fs.realpathSync(WS), 'repo of e2e');
-  fs.rmSync(repo, { recursive: true, force: true });
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
-  const movedTo = (where, ms = 10000) => r.wait(e => e.kind === 'session.cwd' && e.sessionId === sessionId && e.cwd === where, ms, `session.cwd ${where}`);
-  try {
-    const before = (await r.client.request('terminalStatus', { sessionId })).status;
-    assert.deepEqual([before.cwd, before.home, before.running, before.git], [fs.realpathSync(WS), os.homedir(), false, undefined]);
-
-    // A `cd` typed as any command says where the shell went, and git says what's there.
-    await r.client.request('send', { sessionId, text: 'mkdir "repo of e2e" && cd "repo of e2e" && git init -q -b main . && touch new.txt', clientId: 'c1' });
-    await movedTo(repo);
-    const { sessions } = await r.client.request('sessions');
-    assert.equal(sessions.find(s => s.id === sessionId).cwd, repo);
-    const inRepo = (await r.client.request('terminalStatus', { sessionId })).status;
-    assert.equal(inRepo.cwd, repo);
-    assert.deepEqual([fs.realpathSync(inRepo.git.root), inRepo.git.branch, inRepo.git.untracked, inRepo.git.staged, inRepo.git.modified], [repo, 'main', 1, 0, 0]);
-
-    // Moved from here, with a path a shell would take apart if it weren't quoted.
-    const ended = () => r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'idle', 10000, 'the cd to end');
-    r.mark();
-    await r.client.request('terminalCd', { sessionId, path: fs.realpathSync(WS) });
-    await movedTo(fs.realpathSync(WS));
-    await ended();
-    r.mark();
-    await r.client.request('terminalCd', { sessionId, path: repo });
-    await movedTo(repo);
-    await ended();
-    assert.equal(r.events.findLast(e => e.kind === 'message.user').text, `cd '${repo}'`, 'which shows as the command it was');
-    r.mark();
-    await r.client.request('terminalCd', { sessionId, path: repo });
-    await ended();
-    assert.ok(!r.events.some(e => e.kind === 'session.cwd'), 'and says nothing when it went nowhere');
-    assert.equal((await r.client.request('terminalStatus', { sessionId })).status.cwd, repo);
-
-    r.mark();
-    await r.client.request('send', { sessionId, text: 'sleep 30', clientId: 'c2' });
-    await r.wait(e => e.kind === 'message.user' && e.clientId === 'c2', 10000, 'sleep');
-    await assert.rejects(r.client.request('terminalCd', { sessionId, path: fs.realpathSync(WS) }), { code: 'terminal_busy' });
-    await assert.rejects(r.client.request('terminalCd', { sessionId, path: '/no/such/folder' }), { code: 'no_folder' });
-    await r.client.request('interrupt', { sessionId });
-  } finally {
-    await r.client.request('delete', { sessionId }).catch(() => {});
-    fs.rmSync(repo, { recursive: true, force: true });
-  }
-}
-
-// How wide the terminal says it is, by asking a program in it.
-async function widthIn(r, sessionId, clientId, client = r.client) {
-  await client.request('send', { sessionId, text: 'tput cols', clientId });
-  const said = await finished(r, clientId);
-  return [said.stdout, said.columns];
-}
-
-async function isThePagesSize(r) {
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 100, rows: 30 });
-  assert.deepEqual(await widthIn(r, sessionId, 'c1'), ['100', 100]);
-  const view = await r.client.request('terminalView', { sessionId, columns: 52, rows: 20 });
-  assert.deepEqual([view.columns, view.rows], [52, 20]);
-  assert.deepEqual(await widthIn(r, sessionId, 'c2'), ['52', 52]);
-  await r.client.request('terminalLeave', { sessionId });
-  await assert.rejects(r.client.request('terminalView', { sessionId: '00000000-0000-4000-8000-000000000000', columns: 52, rows: 20 }), { code: 'unknown_session' });
-  await r.client.request('delete', { sessionId });
-}
-
-// In Rex, a terminal in a window is the size of whoever owns it, which is Rex's app for every terminal
-// it shows. `app` stands in for it here.
-async function isThePagesSizeWhoeverHasItOpen(r) {
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
-  const { sessions } = await r.client.request('sessions');
-  const block = { session_id: fs.readFileSync(paths.rexSession, 'utf8').trim(), block_id: sessions.find(s => s.id === sessionId).pane };
-  const app = await RexControl.connect(REX_URL);
-  const sizeNow = async () => {
-    const { columns, rows, owner } = await app.request('com.superlogical.terminal.size', { ...block, args: {} });
-    return [columns, rows, owner === appClient ? 'app' : owner ? 'other' : 'none'];
-  };
-  await app.request('session.attach', { session_id: block.session_id });
-  const [{ owner: appClient }] = (await app.request('session.own_block', { session_id: block.session_id, block_ids: [block.block_id], mode: 'take' })).blocks;
-  await app.request('com.superlogical.terminal.resize', { ...block, args: { columns: 156, rows: 70 } });
-  try {
-    // A client that only sends is asked for its size, and the app's stays.
-    await r.client.request('send', { sessionId, text: 'tput cols', clientId: 'c1', columns: 47, rows: 30 });
-    const wide = await finished(r, 'c1');
-    assert.deepEqual([wide.stdout, wide.columns], ['156', 156], 'which its output says');
-
-    // One with the page open has it.
-    const view = await r.client.request('terminalView', { sessionId, columns: 47, rows: 30 });
-    assert.equal(view.columns, 47);
-    assert.deepEqual(await sizeNow(), [47, 30, 'other']);
-    assert.deepEqual(await widthIn(r, sessionId, 'c2'), ['47', 47]);
-
-    // The app takes it back, as when someone clicks in its window, and the next line sent has it again.
-    await app.request('session.own_block', { session_id: block.session_id, block_ids: [block.block_id], mode: 'take' });
-    assert.deepEqual(await sizeNow(), [156, 70, 'app']);
-    await r.client.request('send', { sessionId, text: 'tput cols', clientId: 'c3', columns: 47, rows: 30 });
-    assert.deepEqual([(await finished(r, 'c3')).stdout], ['47']);
-
-    // Leaving gives it back.
-    await r.client.request('terminalLeave', { sessionId });
-    assert.deepEqual(await sizeNow(), [156, 70, 'app']);
-
-    // And so does a client that just goes.
-    const other = await connect();
-    await other.request('terminalView', { sessionId, columns: 60, rows: 24 });
-    assert.deepEqual(await sizeNow(), [60, 24, 'other']);
-    other.close();
-    for (let tries = 0; tries < 50 && (await sizeNow())[0] !== 156; tries++) await delay(100);
-    assert.deepEqual(await sizeNow(), [156, 70, 'app']);
-  } finally {
-    app.close();
-    await r.client.request('delete', { sessionId }).catch(() => {});
-  }
-}
-
-// A program that tells its terminal what it's doing, as codex does: at rest when it starts, and at
-// work from a line that says "work" until the next line.
-const STATUS_PROGRAM = `const say = state => process.stdout.write('\\u001b]7501;state=' + state + ':app=e2e\\u001b\\\\');
-say('idle');
-process.stdin.on('data', chunk => say(String(chunk).includes('work') ? 'working' : 'idle'));
-`;
-const statusProgram = () => {
-  const file = path.join(fs.realpathSync(WS), 'says-status.mjs');
-  fs.writeFileSync(file, STATUS_PROGRAM);
-  return file;
-};
-
-// In Rex, a program that says it's waiting for its next line is running, and not at work.
-async function saysWhenItsProgramIsAtRest(r) {
-  const script = statusProgram();
-  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
-  const status = (wanted, working) => r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === wanted && e.working === working, 10000, `${wanted}, working ${working}`);
-  const listed = async () => (await r.client.request('sessions')).sessions.find(s => s.id === sessionId);
-  await r.client.request('send', { sessionId, text: `node '${script}'`, clientId: 'c1' });
-  await status('running', false);
-  assert.deepEqual([(await listed()).status, (await listed()).working], ['running', false]);
-  r.mark();
-  await r.client.request('send', { sessionId, text: 'work', clientId: 'c2' });
-  await status('running', undefined);
-  assert.equal((await listed()).working, undefined);
-  r.mark();
-  await r.client.request('send', { sessionId, text: 'rest', clientId: 'c3' });
-  await status('running', false);
-  r.mark();
-  await r.client.request('interrupt', { sessionId });
-  await status('idle', undefined);
-  assert.equal((await listed()).working, undefined);
-  // A command that says nothing is at work for as long as it runs.
-  r.mark();
-  await r.client.request('send', { sessionId, text: 'sleep 2', clientId: 'c4' });
-  await status('running', undefined);
-  await status('idle', undefined);
-  assert.ok(!r.events.some(e => e.kind === 'session.status' && e.sessionId === sessionId && e.working === false));
-  await r.client.request('delete', { sessionId });
-}
-
-// A terminal the reader opened in Rex themselves, with none of the helper's hooks in its shell, and a
-// prompt of three lines, as a framework draws one.
-async function mirrorsATerminalOpenInRex(r) {
-  const made = JSON.parse(rex('new', 'run', '--json', '--cwd', WS, '--shell=none', '--', '/usr/bin/env', 'PS1=\n%~\n❯ ', '/bin/zsh', '-f'));
-  const pane = made.initial_windows[0].block_ids[0];
-  const id = pane.replace(/^block:/, '');
-  const typeAtTheMac = text => rex('send', '-s', made.session_id, '-b', pane, text);
-  const status = wanted => r.wait(e => e.kind === 'session.status' && e.sessionId === id && e.status === wanted, 10000, `${wanted}`);
-  const said = line => r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === line && !e.running, 15000, `what ${line} printed`);
-  const send = async (text, clientId) => {
-    r.mark();
-    await r.client.request('send', { sessionId: id, text, clientId });
-    const line = await r.wait(e => e.kind === 'message.user' && e.sessionId === id && e.clientId === clientId, 5000, `the line ${clientId}`);
-    assert.deepEqual([line.text, line.shell], [text, true]);
-    return line;
-  };
-  try {
-    const found = await r.wait(e => e.kind === 'session.discovered' && e.sessionId === id, 10000, 'the mirror');
-    assert.deepEqual([found.terminal, found.mirror, found.cwd], [true, true, fs.realpathSync(WS)]);
-    const { sessions } = await r.client.request('sessions');
-    const session = sessions.find(s => s.id === id);
-    assert.deepEqual([session.terminal, session.mirror, session.status, session.pane], [true, true, 'idle', pane]);
-
-    // What's typed at the Mac isn't followed, so its page starts with nothing on it.
-    typeAtTheMac('echo typed-at-the-mac\n');
-    await delay(600);
-    const opened = await r.client.request('join', { sessionId: id, limit: 60 });
-    assert.deepEqual([opened.items, opened.hasMore, opened.sessions[0].mirror], [[], false, true]);
-
-    // With its page open it's the page's size. A command sent is a line of its own, and what it printed
-    // is under it: none of the prompt, and not the line it was typed on.
-    assert.equal((await r.client.request('terminalView', { sessionId: id, columns: 47, rows: 30 })).columns, 47);
-    assert.equal((await send('echo from-the-phone; tput cols', 'p1')).input, undefined);
-    const first = await said('p1');
-    assert.deepEqual([plainOf(first.stdout), first.columns, first.replies, first.exitCode], ['from-the-phone\n47', 47, false, undefined]);
-    await status('idle');
-
-    // The same thing as was typed at the Mac: only what this one printed is its.
-    await send('echo typed-at-the-mac', 'p2');
-    assert.equal(plainOf((await said('p2')).stdout), 'typed-at-the-mac');
-    await status('idle');
-
-    // Output that ends without a line's end is kept, with the mark the shell leaves after it.
-    await send('printf no-line-end', 'p9');
-    assert.equal(plainOf((await said('p9')).stdout), 'no-line-end%');
-    await status('idle');
-
-    // Something left at the prompt at the Mac goes first, or the command would be added to it.
-    typeAtTheMac('echo left-at-the-prompt');
-    await delay(300);
-    await send('echo sent-after', 'p3');
-    assert.equal(plainOf((await said('p3')).stdout), 'sent-after');
-    await status('idle');
-
-    // It says where its shell goes, as the command it is, and what git says there is asked the same way.
-    r.mark();
-    await r.client.request('terminalCd', { sessionId: id, path: '/tmp' });
-    assert.equal((await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'the cd')).text, 'cd /tmp');
-    const moved = await r.wait(e => e.kind === 'session.cwd' && e.sessionId === id, 10000, 'session.cwd');
-    assert.match(moved.cwd, /^\/(private\/)?tmp$/);
-    await status('idle');
-    assert.equal((await r.client.request('terminalStatus', { sessionId: id })).status.cwd, moved.cwd);
-    assert.ok(!r.events.some(e => e.kind === 'message.output' && e.sessionId === id), 'with nothing printed');
-
-    // One that prints more than is read at once: the end of it, without the prompt. The next one is
-    // still found, in a terminal that holds more than is read.
-    await send('seq 1 150000', 'p4');
-    const flood = plainOf((await said('p4')).stdout).split('\n');
-    assert.deepEqual([flood.at(-1), flood.every(text => /^\d+$/.test(text)), flood.length > 100], ['150000', true, true]);
-    await status('idle');
-    await send('echo after-the-flood', 'p5');
-    assert.equal(plainOf((await said('p5')).stdout), 'after-the-flood');
-    await status('idle');
-
-    // A program that says it's waiting for its next line is running, and not at work.
-    const atWork = flag => r.wait(e => e.kind === 'session.status' && e.sessionId === id && e.status === 'running' && e.working === flag, 10000, `working ${flag}`);
-    const script = statusProgram();
-    await send(`node '${script}'`, 'p11');
-    await atWork(false);
-    assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).working, false);
-    await send('work', 'p12');
-    await atWork(undefined);
-    r.mark();
-    await r.client.request('interrupt', { sessionId: id });
-    await status('idle');
-
-    // A program in front is running, and takes a line and Ctrl-C. It's the command's own, so nothing
-    // more is said of it.
-    await send('cat', 'p6');
-    await status('running');
-    await delay(800);
-    assert.ok(!r.events.some(e => e.kind === 'terminal.program' && e.sessionId === id));
-    assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).lastPrompt, 'cat');
-    await assert.rejects(r.client.request('terminalCd', { sessionId: id, path: WS }), { code: 'terminal_busy' });
-    assert.equal((await send('to-the-program', 'p7')).input, true);
-    const echoed = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p7' && /to-the-program\nto-the-program/.test(plainOf(e.stdout)), 10000, 'its answer');
-    assert.equal(echoed.running, true);
-    r.mark();
-    await r.client.request('interrupt', { sessionId: id });
-    await status('idle');
-    assert.match(plainOf((await said('p7')).stdout), /^to-the-program\nto-the-program/);
-    assert.ok(!/❯/.test(plainOf((await said('p7')).stdout)), 'without the prompt that came back');
-
-    // A program that takes the screen for itself shows as the command's output, and stays when it goes.
-    await send('less /etc/hosts', 'p10');
-    await r.wait(e => e.kind === 'terminal.screen' && e.sessionId === id && e.fullScreen === true, 10000, 'full screen');
-    const paged = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p10' && /localhost/.test(plainOf(e.stdout)), 10000, 'what the pager shows');
-    assert.equal(paged.running, true);
-    r.mark();
-    await r.client.request('pageText', { sessionId: id, text: 'q' });
-    await status('idle');
-    assert.match(plainOf((await said('p10')).stdout), /localhost/);
-    assert.ok(!/❯/.test(plainOf((await said('p10')).stdout)), 'without the prompt that came back');
-
-    // A program started at the Mac, with the page open, is a line as it was typed, and takes a line.
-    r.mark();
-    typeAtTheMac('cat\n');
-    await status('running');
-    assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, 'cat');
-    const atTheMac = await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'its line');
-    assert.deepEqual([atTheMac.text, atTheMac.shell, atTheMac.input], ['cat', true, undefined]);
-    assert.equal((await send('from-the-phone', 'p8')).input, true);
-    await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p8' && /from-the-phone\nfrom-the-phone/.test(plainOf(e.stdout)), 10000, 'its answer');
-    r.mark();
-    await r.client.request('interrupt', { sessionId: id });
-    await status('idle');
-    assert.match(plainOf((await said('p8')).stdout), /^from-the-phone\nfrom-the-phone/);
-    assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, undefined);
-
-    // One that takes the screen for itself at the Mac shows as it does when sent from here.
-    r.mark();
-    typeAtTheMac('less /etc/hosts\n');
-    const pager = await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 10000, 'its line');
-    assert.match(pager.text, /^less/);
-    const pagedAtTheMac = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === pager.clientId && /localhost/.test(plainOf(e.stdout)), 10000, 'what it shows');
-    assert.equal(pagedAtTheMac.running, true);
-    r.mark();
-    typeAtTheMac('q');
-    await status('idle');
-    assert.match(plainOf((await said(pager.clientId)).stdout), /localhost/);
-
-    // One that was already running there when the page is opened shows too, under its name.
-    await r.client.request('terminalLeave', { sessionId: id });
-    r.mark();
-    typeAtTheMac('less /etc/hosts\n');
-    await status('running');
-    await delay(800);
-    assert.ok(!r.events.some(e => e.kind === 'message.user' && e.sessionId === id), 'not while no one has the page open');
-    await r.client.request('terminalView', { sessionId: id, columns: 47, rows: 30 });
-    const already = await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'its line');
-    assert.equal(already.text, 'less');
-    await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === already.clientId && /localhost/.test(plainOf(e.stdout)), 10000, 'what it shows');
-    assert.deepEqual((await r.client.request('join', { sessionId: id, limit: 2 })).items.map(item => item.role), ['user', 'output'], 'on the page from the start');
-    r.mark();
-    typeAtTheMac('q');
-    await status('idle');
-    assert.match(plainOf((await said(already.clientId)).stdout), /localhost/);
-
-    // What it did is there for a client that comes later.
-    const again = await r.client.request('join', { sessionId: id, limit: 60 });
-    assert.deepEqual(again.items.filter(item => item.role === 'user').map(item => [item.text, item.input]), [
-      ['echo from-the-phone; tput cols', undefined], ['echo typed-at-the-mac', undefined], ['printf no-line-end', undefined],
-      ['echo sent-after', undefined], ['cd /tmp', undefined],
-      ['seq 1 150000', undefined], ['echo after-the-flood', undefined], [`node '${script}'`, undefined], ['work', true],
-      ['cat', undefined], ['to-the-program', true], ['less /etc/hosts', undefined],
-      ['cat', undefined], ['from-the-phone', true], [pager.text, undefined], ['less', undefined],
-    ]);
-    assert.ok(again.items.filter(item => item.role === 'output').every(item => !/❯/.test(plainOf(item.stdout))));
-
-    // Claude Code isn't mirrored, and neither is what the helper starts.
-    assert.ok(sessions.every(s => !s.mirror || s.id === id));
-
-    // Closed in Rex, it's gone.
-    rex('kill', made.session_id);
-    await r.wait(e => e.kind === 'session.deleted' && e.sessionId === id, 10000, 'session.deleted');
-    await assert.rejects(r.client.request('join', { sessionId: id }), { code: 'unknown_session' });
-  } finally {
-    try { rex('kill', made.session_id); } catch { /* already gone */ }
-  }
-}
-
-T('terminal_runs_commands_one_by_one', { noClaude: true }, runsCommandsOneByOne);
-T('terminal_is_the_size_of_the_page_that_has_it_open', { noClaude: true }, isThePagesSize);
-T('terminal_moves_between_folders', { noClaude: true }, movesBetweenFolders);
-T('terminal_takes_a_line_and_ctrl_c', { noClaude: true }, takesALineAndCtrlC);
-T('terminal_shows_a_full_screen_program', { noClaude: true }, showsAFullScreenProgram);
-T('terminal_comes_back_after_a_restart', { noClaude: true }, comesBackAfterARestart);
-if (hasRex) {
-  T('in_rex_terminal_runs_commands_one_by_one', { noClaude: true, rex: true }, runsCommandsOneByOne);
-  T('in_rex_terminal_is_the_size_of_the_page_that_has_it_open', { noClaude: true, rex: true }, isThePagesSize);
-  T('in_rex_terminal_is_the_page_s_size_whoever_has_it_open', { noClaude: true, rex: true }, isThePagesSizeWhoeverHasItOpen);
-  T('in_rex_terminal_says_when_its_program_is_at_rest', { noClaude: true, rex: true }, saysWhenItsProgramIsAtRest);
-  T('in_rex_a_terminal_open_in_rex_is_mirrored', { noClaude: true, rex: true }, mirrorsATerminalOpenInRex);
-  T('in_rex_terminal_moves_between_folders', { noClaude: true, rex: true }, movesBetweenFolders);
-  T('in_rex_terminal_takes_a_line_and_ctrl_c', { noClaude: true, rex: true }, takesALineAndCtrlC);
-  T('in_rex_terminal_shows_a_full_screen_program', { noClaude: true, rex: true }, showsAFullScreenProgram);
-  T('in_rex_terminal_comes_back_after_a_restart', { noClaude: true, rex: true }, comesBackAfterARestart);
-}
-
 async function runCase(name) {
   const { opts, fn } = cases[name];
   for (const f of fs.readdirSync(WS)) if (f.startsWith('e2e-')) fs.rmSync(path.join(WS, f));
@@ -2429,11 +1951,9 @@ async function runCase(name) {
       run = new Run(client);
       await client.request('subscribe');
     }
-    if (!opts.noClaude) {
-      if (opts.rex) launchInRex(opts);
-      else launch(opts);
-      await ready(run);
-    }
+    if (opts.rex) launchInRex(opts);
+    else launch(opts);
+    await ready(run);
     await fn(run);
     console.log(`ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
     return true;
@@ -2447,17 +1967,8 @@ async function runCase(name) {
     await delay(500);
     client?.close();
     await stopHelper();
-    // What a terminal case left behind, so that the next case's helper doesn't take it up.
-    for (const name of tmuxSessions().filter(session => session.startsWith('venes-term-'))) {
-      try { tmux('kill-session', '-t', `=${name}`); } catch { /* already gone */ }
-    }
-    fs.rmSync(paths.terminals, { recursive: true, force: true });
     inRex = undefined;
   }
-}
-
-function tmuxSessions() {
-  try { return tmux('list-sessions', '-F', '#{session_name}').split('\n').filter(Boolean); } catch { return []; }
 }
 
 // Every case starts a real Claude Code session, which Claude Code keeps with everyone else's, so

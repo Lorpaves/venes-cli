@@ -153,9 +153,12 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `fileRead` | `sessionId`, `path` | One of its files: its `text`, or for anything else its bytes in `data`. See [Files and git](#files-and-git). |
 | `git` | `sessionId` | `git`: the branch and what has changed in the session's folder, or null outside a repository. See [Files and git](#files-and-git). |
 | `gitDiff` | `sessionId`, `path`, `staged`, `commit` | `diff`: one file's change, from its first hunk on |
-| `gitLog` | `sessionId`, `limit`, `skip` | `commits`, newest first, and `hasMore` |
+| `gitLog` | `sessionId`, `limit`, `skip`, `all` | `commits`, newest first, each with its `parents` and `refs`, and `hasMore` |
 | `gitCommit` | `sessionId`, `commit` | `commit`, with all it says, and the `files` it changed |
 | `gitBranches` | `sessionId` | `branches`, the one last committed to first |
+| `gitStage`, `gitUnstage` | `sessionId`, `paths` or `all` | Puts files' changes in the next commit, or takes them back out |
+| `gitCommitStaged` | `sessionId`, `message` | Commits what's staged. Replies with the `commit`'s `hash` and `short` form. |
+| `gitSwitch` | `sessionId`, `branch` | Moves the folder to another of the repository's branches |
 | `subscribe` | `since`, `bootId` (both optional), `agents` | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. `agents` lists the sessions other than Claude Code's that the client can show: `["codex"]`. See [Codex sessions](#codex-sessions). |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -304,7 +307,7 @@ A line that starts with `!` is your own command, as in Codex's terminal: `send` 
 
 ### Files and git
 
-A session's folder can be looked at from afar, for a Claude Code session and a Codex one alike: a session the helper follows by where it is now, and a stored one by where it ran. Everything here is read. Nothing changes the folder or its repository.
+A session's folder can be looked at from afar, for a Claude Code session and a Codex one alike: a session the helper follows by where it is now, and a stored one by where it ran. All of it is read, but for the four commands at the end, which change the repository: what the next commit takes, the commit, and the branch. Nothing here edits or deletes a file.
 
 `files` lists a folder: the session's own with no `path`, or one inside it, named whole or from the session's folder. A path that leads out of the session's folder is refused with `bad_path`. The reply has `root`, the session's folder, the `path` and `name` of the one listed, and `entries`: folders first, then files, each by name as Finder sorts them, up to 2,000 with `truncated` past that. An entry has its `name`, its `path`, its `kind`, `dir` or `file`, and a file's `size`. A link is what it leads to. `.git` and `.DS_Store` are left out, and other hidden files are there. Inside a git repository an entry that has changed has `change`: a file what happened to it, as in `git` below, and a folder `changed` when something inside it has.
 
@@ -314,7 +317,9 @@ A session's folder can be looked at from afar, for a Claude Code session and a C
 
 `gitDiff` gives one file's change as `diff`: what `git diff` prints from the first `@@` line on, without git's own header. With `staged` it's what's staged, with `commit` what that commit did to the file, and otherwise what's only in the folder, which for a file git doesn't follow yet is all of it. A file that isn't text has `binary` and an empty `diff`. Past 512 KB it's cut at a line's end, with `truncated`.
 
-`gitLog` lists the commits that lead to where the folder is: each `hash`, its `short` form, `subject`, `author`, `at` and `refs`, the branches and tags that point at it. `limit` is 30 unless given, up to 200, and `skip` and `hasMore` page through them. `gitCommit` gives one, by its hash or the start of it: the same with its `body`, the author's `email` and its `parents`, and the `files` it changed, as `git` lists them. A merge is told against its first parent. `gitBranches` lists the local `branches`: each `name`, whether it's the `current` one, its `upstream` with `ahead` and `behind`, and the `at` and `subject` of its last commit.
+`gitLog` lists the commits that lead to where the folder is: each `hash`, its `short` form, `subject`, `author`, `at`, its `parents`, which are two or more for a merge, and its `refs`, the names that point at it. A ref is `{name, kind}`, where `kind` is `head` for the branch the folder is on (named `HEAD` when none is checked out), `branch` for another of the repository's, `remote` for a remote's, and `tag`. With `all: true` the commits of every branch, remote branch and tag are listed too. No commit comes before one that came from it, and a line of history stays together, so a graph can be drawn from the list as it comes. `limit` is 30 unless given, up to 200, and `skip` and `hasMore` page through them. `gitCommit` gives one, by its hash or the start of it: the same with its `body`, the author's `email` and its `parents`, and the `files` it changed, as `git` lists them. A merge is told against its first parent. `gitBranches` lists the local `branches`: each `name`, whether it's the `current` one, its `upstream` with `ahead` and `behind`, and the `at` and `subject` of its last commit.
+
+`gitStage` puts changes in the next commit and `gitUnstage` takes them back out, leaving the folder as it is: the files in `paths`, each from the repository's top as `git` lists them, or everything with `all: true`. A file that's gone from the folder is staged as gone. A renamed file is two paths to git, the one it had and the one it has, so both are named to unstage it. Names are taken as they are, with none of git's patterns read into them. `gitCommitStaged` commits what's staged with `message`, as whoever git is set up for on the Mac, and runs the repository's hooks. With nothing staged it fails with `nothing_staged`. `gitSwitch` moves the folder to `branch`, one of the local branches. When git won't do one of these, such as a hook that refuses a commit or a switch that would write over changes in the folder, the command fails with `git_failed` and the message is what git said.
 
 ### Notifications
 
@@ -471,10 +476,13 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `session_elsewhere` | The Codex session is open in a terminal of its own at the Mac, which has to close it first |
 | `send_failed` | Codex didn't take a message |
 | `bad_agent` | `start` was asked for something other than Claude Code or Codex |
-| `bad_path` | `files`, `fileRead` or `gitDiff` was given a path that leads out of the session's folder, or out of its repository |
+| `bad_path` | `files`, `fileRead`, `gitDiff`, `gitStage` or `gitUnstage` was given a path that leads out of the session's folder, or out of its repository, or no path at all |
 | `no_file`, `unreadable_file` | `fileRead` was asked for a file that has gone, or one that can't be read |
 | `no_repository` | A git command was sent for a session whose folder is in no repository |
 | `bad_commit` | `gitCommit` or `gitDiff` was given something that isn't a commit of the repository |
+| `git_failed` | Git wouldn't stage, unstage, commit or switch. The message is what it said. |
+| `nothing_staged`, `bad_message` | `gitCommitStaged` was sent with nothing staged, or with no message |
+| `no_branch` | `gitSwitch` was given something other than one of the repository's local branches |
 | `start_failed` | Claude Code quit, or took too long, starting a new session |
 | `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |

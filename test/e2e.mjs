@@ -2155,6 +2155,55 @@ T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissio
   }
 });
 
+T('a_change_is_staged_committed_and_the_branch_switched', { mode: 'bypassPermissions' }, async r => {
+  const { id: sessionId } = await r.session();
+  // The workspace is made a repository for as long as this takes. One that's a repository already is
+  // whoever's it is, and isn't committed to.
+  if (fs.existsSync(path.join(WS, '.git'))) throw new Error(`${WS} is a repository of its own, which this would commit to`);
+  const git = (...args) => execFileSync('git', ['-C', WS, ...args], { encoding: 'utf8' });
+  try {
+    git('init', '-q', '-b', 'e2e-main');
+    for (const [key, value] of [['user.name', 'E2E'], ['user.email', 'e2e@example.com'], ['commit.gpgsign', 'false'], ['core.hooksPath', '/dev/null']]) git('config', key, value);
+    // Only this case's own files are git's to see, so that none of the workspace's others is committed, or
+    // taken away by a switch to a branch without it.
+    fs.writeFileSync(path.join(WS, '.git', 'info', 'exclude'), '/*\n!/e2e-*\n');
+    fs.writeFileSync(path.join(WS, 'e2e-stage.txt'), 'one\n');
+    fs.writeFileSync(path.join(WS, 'e2e-left.txt'), 'left\n');
+    const paths = async () => {
+      const { git: state } = await r.client.request('git', { sessionId });
+      return [state.staged.map(file => file.path).sort(), state.changes.map(file => file.path).sort()];
+    };
+    assert.deepEqual(await paths(), [[], ['e2e-left.txt', 'e2e-stage.txt']]);
+    await r.client.request('gitStage', { sessionId, paths: ['e2e-stage.txt'] });
+    assert.deepEqual(await paths(), [['e2e-stage.txt'], ['e2e-left.txt']]);
+    // Before the first commit, and after it.
+    await r.client.request('gitUnstage', { sessionId, paths: ['e2e-stage.txt'] });
+    assert.deepEqual((await paths())[0], []);
+    await assert.rejects(r.client.request('gitCommitStaged', { sessionId, message: 'Nothing' }), { code: 'nothing_staged' });
+    await r.client.request('gitStage', { sessionId, paths: ['e2e-stage.txt'] });
+    await assert.rejects(r.client.request('gitCommitStaged', { sessionId, message: ' ' }), { code: 'bad_message' });
+    const first = await r.client.request('gitCommitStaged', { sessionId, message: 'E2E: the first' });
+    fs.writeFileSync(path.join(WS, 'e2e-stage.txt'), 'one\ntwo\n');
+    await r.client.request('gitStage', { sessionId, all: true });
+    assert.deepEqual(await paths(), [['e2e-left.txt', 'e2e-stage.txt'], []]);
+    await r.client.request('gitUnstage', { sessionId, paths: ['e2e-left.txt'] });
+    const second = await r.client.request('gitCommitStaged', { sessionId, message: 'E2E: the second\n\nWith a body.' });
+    const { commits, hasMore } = await r.client.request('gitLog', { sessionId, limit: 5, all: true });
+    assert.deepEqual([commits.map(entry => entry.hash), hasMore], [[second.commit.hash, first.commit.hash], false]);
+    assert.deepEqual([commits[0].subject, commits[0].parents, commits[0].refs, commits[1].parents], ['E2E: the second', [first.commit.hash], [{ name: 'e2e-main', kind: 'head' }], []]);
+    assert.deepEqual(await paths(), [[], ['e2e-left.txt']]);
+
+    git('branch', 'e2e-other', first.commit.hash);
+    assert.deepEqual((await r.client.request('gitSwitch', { sessionId, branch: 'e2e-other' })).branch, 'e2e-other');
+    assert.equal((await r.client.request('git', { sessionId })).git.branch, 'e2e-other');
+    assert.equal(fs.readFileSync(path.join(WS, 'e2e-stage.txt'), 'utf8'), 'one\n');
+    await assert.rejects(r.client.request('gitSwitch', { sessionId, branch: 'e2e-no-such' }), { code: 'no_branch' });
+    await assert.rejects(r.client.request('gitStage', { sessionId, paths: ['../outside'] }), { code: 'bad_path' });
+  } finally {
+    fs.rmSync(path.join(WS, '.git'), { recursive: true, force: true });
+  }
+});
+
 Run.prototype.waitForPane = async function waitForPane(re, ms) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (re.test(this.pane())) return; await delay(150); }

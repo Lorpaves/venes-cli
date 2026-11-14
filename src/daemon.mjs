@@ -11,7 +11,10 @@ import net from 'node:net';
 import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
 import { listFolder, readFile } from './files.mjs';
-import { branches as gitBranches, commit as gitCommit, diff as gitDiff, log as gitLog, status as gitStatus } from './git.mjs';
+import {
+  branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, stage as gitStage,
+  status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
+} from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
@@ -393,9 +396,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // What git says of the session's folder, all of it read and none of it changed: null outside a repository.
     git: async ({ sessionId }) => ({ git: (await gitStatus(await folderOf(sessionId))) ?? null }),
     gitDiff: async ({ sessionId, path: file, staged, commit }) => gitDiff(await folderOf(sessionId), { path: file, staged: staged === true, commit }),
-    gitLog: async ({ sessionId, limit, skip }) => gitLog(await folderOf(sessionId), { limit, skip }),
+    gitLog: async ({ sessionId, limit, skip, all }) => gitLog(await folderOf(sessionId), { limit, skip, all }),
     gitCommit: async ({ sessionId, commit }) => gitCommit(await folderOf(sessionId), { commit }),
     gitBranches: async ({ sessionId }) => gitBranches(await folderOf(sessionId)),
+    // The few things that change the repository: what the next commit takes, the commit itself, and the branch.
+    gitStage: async ({ sessionId, paths, all }) => gitStage(await folderOf(sessionId), { paths, all }),
+    gitUnstage: async ({ sessionId, paths, all }) => gitUnstage(await folderOf(sessionId), { paths, all }),
+    gitCommitStaged: async ({ sessionId, message }) => gitCommitStaged(await folderOf(sessionId), { message }),
+    gitSwitch: async ({ sessionId, branch }) => gitSwitch(await folderOf(sessionId), { branch }),
     capabilities: forCodex('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);

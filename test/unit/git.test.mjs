@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  branches, changedPaths, commit, diff, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat, parseStatus, repositoryOf, status,
+  branches, changedPaths, commit, commitStaged, diff, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat, parseRefs, parseStatus,
+  repositoryOf, stage, status, switchBranch, unstage,
 } from '../../src/git.mjs';
 
 // A repository of the test's own, with nothing of this Mac's git settings in it.
@@ -19,6 +20,10 @@ function repository(t) {
     fs.writeFileSync(path.join(root, name), text);
   };
   git('init', '-q', '-b', 'main');
+  // For the commits made through the code under test, which runs git as this Mac has it set up.
+  for (const [key, value] of [['user.name', 'Ada'], ['user.email', 'ada@example.com'], ['commit.gpgsign', 'false'], ['core.hooksPath', '/dev/null']]) {
+    git('config', key, value);
+  }
   return { root, git, write };
 }
 
@@ -79,16 +84,29 @@ test('a diff is its hunks, without git\'s own header, cut at a line\'s end when 
 });
 
 test('commits and branches are read a record at a time', () => {
-  const printed = 'aaa\x1fa1\x1fFix the thing\x1fAda\x1f1767323045\x1fHEAD -> main, origin/main\x1e\nbbb\x1fb1\x1fStart\x1fGrace\x1f1767323000\x1f\x1e\n';
+  const printed = 'aaa\x1fa1\x1fFix the thing\x1fAda\x1f1767323045\x1fbbb ccc\x1fHEAD -> refs/heads/main, refs/remotes/origin/main\x1e\n'
+    + 'bbb\x1fb1\x1fStart\x1fGrace\x1f1767323000\x1f\x1f\x1e\n';
   assert.deepEqual(parseLog(printed), [
-    { hash: 'aaa', short: 'a1', subject: 'Fix the thing', author: 'Ada', at: 1767323045000, refs: ['HEAD -> main', 'origin/main'] },
-    { hash: 'bbb', short: 'b1', subject: 'Start', author: 'Grace', at: 1767323000000, refs: [] },
+    {
+      hash: 'aaa', short: 'a1', subject: 'Fix the thing', author: 'Ada', at: 1767323045000, parents: ['bbb', 'ccc'],
+      refs: [{ name: 'main', kind: 'head' }, { name: 'origin/main', kind: 'remote' }],
+    },
+    { hash: 'bbb', short: 'b1', subject: 'Start', author: 'Grace', at: 1767323000000, parents: [], refs: [] },
   ]);
   assert.deepEqual(parseLog(''), []);
   assert.deepEqual(parseBranches('main\x1f*\x1forigin/main\x1fahead 2, behind 1\x1f1767323045\x1fFix the thing\nold\x1f \x1f\x1f\x1f1767000000\x1fStart\n'), [
     { name: 'main', current: true, upstream: 'origin/main', ahead: 2, behind: 1, at: 1767323045000, subject: 'Fix the thing' },
     { name: 'old', current: false, ahead: 0, behind: 0, at: 1767000000000, subject: 'Start' },
   ]);
+});
+
+test('the names at a commit are told apart by what they are', () => {
+  assert.deepEqual(parseRefs('HEAD -> refs/heads/main, tag: refs/tags/v1.0, refs/remotes/origin/main, refs/remotes/origin/HEAD, refs/heads/feature/x, refs/stash'), [
+    { name: 'main', kind: 'head' }, { name: 'v1.0', kind: 'tag' }, { name: 'origin/main', kind: 'remote' }, { name: 'feature/x', kind: 'branch' },
+  ]);
+  assert.deepEqual(parseRefs('HEAD, refs/heads/main'), [{ name: 'HEAD', kind: 'head' }, { name: 'main', kind: 'branch' }]);
+  assert.deepEqual(parseRefs(''), []);
+  assert.deepEqual(parseRefs(undefined), []);
 });
 
 test('a folder that\'s in no repository has none, and one inside a repository has its top', async t => {
@@ -161,7 +179,8 @@ test('the commits come newest first, a page at a time', async t => {
   const first = await log(root, { limit: 3 });
   assert.deepEqual(first.commits.map(entry => entry.subject), ['Commit 4', 'Commit 3', 'Commit 2']);
   assert.equal(first.hasMore, true);
-  assert.deepEqual(first.commits[0].refs, ['HEAD -> main']);
+  assert.deepEqual(first.commits[0].refs, [{ name: 'main', kind: 'head' }]);
+  assert.deepEqual(first.commits.map(entry => entry.parents), [[first.commits[1].hash], [first.commits[2].hash], [first.commits[2].parents[0]]]);
   assert.deepEqual([first.commits[0].author, first.commits[0].at, first.commits[0].hash.length, first.commits[0].short.length >= 7], ['Ada', Date.parse('2026-01-02T03:04:05Z'), 40, true]);
   const second = await log(root, { limit: 3, skip: 3 });
   assert.deepEqual([second.commits.map(entry => entry.subject), second.hasMore], [['First commit'], false]);
@@ -208,4 +227,140 @@ test('the branches are listed with the one the folder is on', async t => {
   const listed = (await branches(root)).branches;
   assert.deepEqual(listed.map(branch => [branch.name, branch.current, branch.subject]).sort(), [['feature/one', true, 'On the branch'], ['main', false, 'First commit']]);
   assert.equal((await status(root)).branch, 'feature/one');
+});
+
+test('with every branch asked for, the commits of the others come too, a merge with both it came from', async t => {
+  const { root, git, write } = committed(t);
+  git('checkout', '-q', '-b', 'side');
+  write('side.txt', 'side\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'On the side');
+  git('checkout', '-q', 'main');
+  write('main.txt', 'main\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'On main');
+  git('merge', '-q', '--no-ff', '-m', 'Merge side', 'side');
+  git('tag', 'v1');
+  git('checkout', '-q', '-b', 'later', 'side');
+  write('later.txt', 'later\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'Later, apart');
+  git('checkout', '-q', 'main');
+
+  const own = (await log(root)).commits;
+  assert.deepEqual(own.map(entry => entry.subject).sort(), ['First commit', 'Merge side', 'On main', 'On the side']);
+  const { commits } = await log(root, { all: true });
+  const bySubject = Object.fromEntries(commits.map(entry => [entry.subject, entry]));
+  assert.deepEqual(Object.keys(bySubject).sort(), ['First commit', 'Later, apart', 'Merge side', 'On main', 'On the side']);
+  assert.deepEqual(bySubject['Merge side'].parents, [bySubject['On main'].hash, bySubject['On the side'].hash]);
+  assert.deepEqual(bySubject['Merge side'].refs, [{ name: 'main', kind: 'head' }, { name: 'v1', kind: 'tag' }]);
+  assert.deepEqual(bySubject['Later, apart'].refs, [{ name: 'later', kind: 'branch' }]);
+  assert.deepEqual(bySubject['On the side'].refs, [{ name: 'side', kind: 'branch' }]);
+  // No commit comes before one that came from it.
+  const place = new Map(commits.map((entry, index) => [entry.hash, index]));
+  for (const entry of commits) for (const parent of entry.parents) assert.ok(place.get(parent) > place.get(entry.hash), entry.subject);
+  assert.deepEqual((await commit(root, { commit: bySubject['Merge side'].hash })).commit.refs, [{ name: 'main', kind: 'head' }, { name: 'v1', kind: 'tag' }]);
+});
+
+test('files are staged and taken back out, by name or all at once', async t => {
+  const { root, git, write } = committed(t);
+  write('README.md', '# Venes\n\nchanged\n');
+  write('notes/a *.md', 'new\n');
+  fs.rmSync(path.join(root, 'src/app.js'));
+  git('mv', 'old name.txt', 'new name.txt');
+  const paths = async () => {
+    const state = await status(root);
+    return [state.staged.map(file => `${file.status} ${file.path}`).sort(), state.changes.map(file => `${file.status} ${file.path}`).sort()];
+  };
+  assert.deepEqual(await paths(), [['renamed new name.txt'], ['deleted src/app.js', 'modified README.md', 'untracked notes/a *.md']]);
+
+  assert.deepEqual(await stage(root, { paths: ['README.md', 'notes/a *.md', 'src/app.js'] }), {});
+  assert.deepEqual(await paths(), [['added notes/a *.md', 'deleted src/app.js', 'modified README.md', 'renamed new name.txt'], []]);
+  // A renamed file is two paths to git: where it was, and where it is.
+  await unstage(root, { paths: ['new name.txt', 'old name.txt', 'src/app.js'] });
+  assert.deepEqual(await paths(), [['added notes/a *.md', 'modified README.md'], ['deleted old name.txt', 'deleted src/app.js', 'untracked new name.txt']]);
+  await unstage(root, { all: true });
+  assert.deepEqual((await paths())[0], []);
+  await stage(root, { all: true });
+  assert.deepEqual(await paths(), [['added notes/a *.md', 'deleted src/app.js', 'modified README.md', 'renamed new name.txt'], []]);
+  // A name is taken as it is, with none of git's patterns read into it.
+  write('notes/a b.md', 'another\n');
+  await unstage(root, { all: true });
+  await stage(root, { paths: ['notes/a *.md'] });
+  assert.deepEqual((await paths())[0], ['added notes/a *.md']);
+
+  await assert.rejects(stage(root, { paths: ['../outside.txt'] }), error => error.code === 'bad_path');
+  await assert.rejects(stage(root, { paths: [] }), error => error.code === 'bad_path');
+  await assert.rejects(stage(root, {}), error => error.code === 'bad_path');
+  await assert.rejects(unstage(root, { paths: 'README.md' }), error => error.code === 'bad_path');
+  await assert.rejects(stage(root, { paths: ['not there.txt'] }), error => error.code === 'git_failed' && /not there\.txt/.test(error.message));
+});
+
+test('before the first commit, staged files can still be taken back out', async t => {
+  const { root, write } = repository(t);
+  write('a.txt', 'a\n');
+  write('b/c.txt', 'c\n');
+  await stage(root, { all: true });
+  assert.deepEqual((await status(root)).staged.map(file => file.path).sort(), ['a.txt', 'b/c.txt']);
+  await unstage(root, { paths: ['a.txt'] });
+  assert.deepEqual((await status(root)).staged.map(file => file.path), ['b/c.txt']);
+  await unstage(root, { all: true });
+  assert.deepEqual([(await status(root)).staged, (await status(root)).changes.map(file => file.path).sort()], [[], ['a.txt', 'b/c.txt']]);
+});
+
+test('what\'s staged is committed with a message, and nothing staged is none to make', async t => {
+  const { root, write } = committed(t);
+  await assert.rejects(commitStaged(root, { message: 'Nothing' }), error => error.code === 'nothing_staged');
+  write('README.md', '# Venes\n\nchanged\n');
+  write('left.txt', 'not staged\n');
+  await stage(root, { paths: ['README.md'] });
+  await assert.rejects(commitStaged(root, { message: '   ' }), error => error.code === 'bad_message');
+  await assert.rejects(commitStaged(root, {}), error => error.code === 'bad_message');
+  const made = await commitStaged(root, { message: '  Change the readme\n\nAnd say why.\n' });
+  const { commits } = await log(root, { limit: 2 });
+  assert.deepEqual([made.commit.hash, made.commit.short], [commits[0].hash, commits[0].short]);
+  assert.deepEqual([commits[0].subject, commits[0].author, commits[0].parents], ['Change the readme', 'Ada', [commits[1].hash]]);
+  assert.equal((await commit(root, { commit: made.commit.hash })).commit.body, 'And say why.');
+  // What wasn't staged is still only in the folder.
+  const state = await status(root);
+  assert.deepEqual([state.staged, state.changes.map(file => file.path)], [[], ['left.txt']]);
+});
+
+test('a hook that refuses a commit says why', async t => {
+  const { root, git, write } = committed(t);
+  const hooks = path.join(root, '.git', 'hooks-of-the-test');
+  fs.mkdirSync(hooks);
+  fs.writeFileSync(path.join(hooks, 'pre-commit'), '#!/bin/sh\necho "the hook says no" >&2\nexit 1\n', { mode: 0o755 });
+  git('config', 'core.hooksPath', hooks);
+  write('README.md', '# Venes\n\nchanged\n');
+  await stage(root, { all: true });
+  await assert.rejects(commitStaged(root, { message: 'Refused' }), error => error.code === 'git_failed' && /the hook says no/.test(error.message));
+  assert.equal((await log(root)).commits.length, 1);
+});
+
+test('the folder moves to another branch, unless that would write over what\'s changed', async t => {
+  const { root, git, write } = committed(t);
+  git('checkout', '-q', '-b', 'feature/one');
+  write('README.md', '# Venes\n\non the branch\n');
+  git('commit', '-q', '-am', 'On the branch');
+  assert.deepEqual(await switchBranch(root, { branch: 'main' }), { branch: 'main' });
+  assert.equal((await status(root)).branch, 'main');
+  // A change that the other branch has its own version of stays, and git says so.
+  write('README.md', '# Venes\n\nmine\n');
+  await assert.rejects(switchBranch(root, { branch: 'feature/one' }), error => error.code === 'git_failed' && /README\.md/.test(error.message));
+  assert.equal((await status(root)).branch, 'main');
+  git('checkout', '-q', '--', 'README.md');
+  await switchBranch(root, { branch: 'feature/one' });
+  assert.equal((await status(root)).branch, 'feature/one');
+  for (const branch of ['no-such', '--detach', 'main; rm -rf /', undefined, 7, 'HEAD']) {
+    await assert.rejects(switchBranch(root, { branch }), error => error.code === 'no_branch', `${branch}`);
+  }
+});
+
+test('nothing changes outside a repository', async t => {
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-nogit-')));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  for (const act of [() => stage(outside, { all: true }), () => unstage(outside, { all: true }), () => commitStaged(outside, { message: 'x' }), () => switchBranch(outside, { branch: 'main' })]) {
+    await assert.rejects(act(), error => error.code === 'no_repository');
+  }
 });

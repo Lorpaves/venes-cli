@@ -1,7 +1,8 @@
 // What git says of a session's folder, for someone following the work from afar: the branch, what has
-// changed and by how much, a file's diff, the commits, and the branches. All of it is read, with the
-// forms git keeps stable for programs, and nothing here changes the repository. `--no-optional-locks`
-// keeps even `git status` from taking the index's lock, which the session's own git may want.
+// changed and by how much, a file's diff, the commits, and the branches. That's all read, with the forms
+// git keeps stable for programs, and `--no-optional-locks` keeps even `git status` from taking the
+// index's lock, which the session's own git may want. At the foot are the few things a reader can do
+// from afar: stage and unstage files, commit what's staged, and switch to another branch.
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -11,6 +12,13 @@ import { HelperError } from './errors.mjs';
 
 const exec = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
+// A commit runs the repository's hooks, and a switch writes the folder's files.
+const CHANGE_TIMEOUT_MS = 60_000;
+// How much of what git said goes back to the reader when it wouldn't do something.
+const REASON_CHARS = 600;
+const MESSAGE_BYTES = 64 * 1024;
+// The paths one stage or unstage names.
+const PATHS = 1000;
 const OUTPUT_BYTES = 64 * 1024 * 1024;
 const SHORT_COMMIT = 7;
 // A diff longer than this is cut, and says so.
@@ -108,10 +116,25 @@ export function hunksOf(text, limit = DIFF_BYTES) {
   return { diff: cut.slice(0, cut.lastIndexOf('\n') + 1), truncated: true };
 }
 
+// The names at a commit, from `%D` with `--decorate=full`: the branch the folder is on (`head`), other
+// branches of this repository's, a remote's branches, and tags. A remote's own HEAD says nothing a reader
+// is after, and neither does anything else git keeps there, such as the stash.
+export function parseRefs(text) {
+  const refs = [];
+  for (const entry of (text ?? '').split(', ').filter(Boolean)) {
+    if (entry === 'HEAD') refs.push({ name: 'HEAD', kind: 'head' });
+    else if (entry.startsWith('HEAD -> refs/heads/')) refs.push({ name: entry.slice('HEAD -> refs/heads/'.length), kind: 'head' });
+    else if (entry.startsWith('refs/heads/')) refs.push({ name: entry.slice('refs/heads/'.length), kind: 'branch' });
+    else if (entry.startsWith('tag: refs/tags/')) refs.push({ name: entry.slice('tag: refs/tags/'.length), kind: 'tag' });
+    else if (entry.startsWith('refs/remotes/') && !entry.endsWith('/HEAD')) refs.push({ name: entry.slice('refs/remotes/'.length), kind: 'remote' });
+  }
+  return refs;
+}
+
 export function parseLog(text) {
   return text.split(RECORD).map(record => record.replace(/^\n/, '')).filter(Boolean).map(record => {
-    const [hash, short, subject, author, at, refs] = record.split(FIELD);
-    return { hash, short, subject, author, at: Number(at) * 1000, refs: refs ? refs.split(', ').filter(Boolean) : [] };
+    const [hash, short, subject, author, at, parents, refs] = record.split(FIELD);
+    return { hash, short, subject, author, at: Number(at) * 1000, parents: parents ? parents.split(' ') : [], refs: parseRefs(refs) };
   });
 }
 
@@ -233,15 +256,18 @@ export async function diff(cwd, { path: file, staged = false, commit } = {}) {
   return hunksOf(printed);
 }
 
-// The commits that lead to where the folder is, newest first.
-export async function log(cwd, { limit = DEFAULT_COMMITS, skip = 0 } = {}) {
+// The commits that lead to where the folder is, newest first, each with the commits it came from and the
+// names at it, which is what a graph of them is drawn from. With `all`, those of every branch, remote
+// branch and tag too. No commit comes before one that came from it, and a line of history stays together.
+export async function log(cwd, { limit = DEFAULT_COMMITS, skip = 0, all = false } = {}) {
   const root = await rootOf(cwd);
   const wanted = Math.min(Math.max(Number.isInteger(limit) ? limit : DEFAULT_COMMITS, 1), MAX_COMMITS);
   const from = Number.isInteger(skip) && skip > 0 ? skip : 0;
-  const format = ['%H', '%h', '%s', '%an', '%at', '%D'].join('%x1f');
+  const format = ['%H', '%h', '%s', '%an', '%at', '%P', '%D'].join('%x1f');
+  const which = all === true ? ['--branches', '--remotes', '--tags', 'HEAD'] : [];
   let printed;
   try {
-    printed = await git(root, ['log', `--format=${format}%x1e`, `--skip=${from}`, '-n', String(wanted + 1)]);
+    printed = await git(root, ['log', '--topo-order', '--decorate=full', `--format=${format}%x1e`, `--skip=${from}`, '-n', String(wanted + 1), ...which]);
   } catch (error) {
     // A repository with no commit yet has nothing to list, which git says as an error.
     if (/does not have any commits yet|bad default revision/.test(error.stderr ?? '')) return { commits: [], hasMore: false };
@@ -259,7 +285,7 @@ export async function commit(cwd, { commit: hash } = {}) {
   let printed;
   try {
     printed = await Promise.all([
-      git(root, ['show', '-s', `--format=${format}`, hash]),
+      git(root, ['show', '-s', '--decorate=full', `--format=${format}`, hash]),
       git(root, ['show', '--name-status', '-z', ...about]),
       git(root, ['show', '--numstat', '-z', ...about]),
     ]);
@@ -273,7 +299,7 @@ export async function commit(cwd, { commit: hash } = {}) {
   return {
     commit: {
       hash: full, short, subject, body: body.trim(), author, email, at: Number(at) * 1000,
-      parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [],
+      parents: parents ? parents.split(' ') : [], refs: parseRefs(refs),
     },
     files: files.slice(0, CHANGED_FILES).map(file => ({ ...file, ...counts.get(file.path) })),
     ...(files.length > CHANGED_FILES && { truncated: true }),
@@ -285,4 +311,68 @@ export async function branches(cwd) {
   const root = await rootOf(cwd);
   const format = ['%(refname:short)', '%(HEAD)', '%(upstream:short)', '%(upstream:track,nobracket)', '%(committerdate:unix)', '%(subject)'].join('%1f');
   return { branches: parseBranches(await git(root, ['for-each-ref', '--sort=-committerdate', `--format=${format}`, 'refs/heads'])) };
+}
+
+// Git, to change something: it takes the locks it needs, and what it says when it won't is for the reader.
+async function change(root, args, { literal = false } = {}) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+  // Paths are named as they are, with none of git's patterns read into them.
+  const options = ['-c', 'core.quotePath=false', ...(literal ? ['--literal-pathspecs'] : []), '-C', root];
+  try {
+    return (await exec('git', [...options, ...args], { timeout: CHANGE_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env })).stdout;
+  } catch (error) {
+    if (error.killed) throw new HelperError('git_failed', 'Git took too long, and was stopped.');
+    const said = `${error.stderr ?? ''}`.trim() || `${error.stdout ?? ''}`.trim() || error.message;
+    throw new HelperError('git_failed', said.slice(0, REASON_CHARS));
+  }
+}
+
+// The paths a client named, each as git names it. With none named, and `all`, there are none to name.
+function namedPaths(root, paths, all) {
+  if (all === true) return [];
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > PATHS) throw new HelperError('bad_path', 'Say which files.');
+  return paths.map(file => repositoryPath(root, file));
+}
+
+const hasCommits = root => git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).then(() => true, () => false);
+
+// Puts files' changes in the next commit: all that's changed in the repository with `all`, or else the
+// paths named. A file that's gone from the folder is staged as gone.
+export async function stage(cwd, { paths, all } = {}) {
+  const root = await rootOf(cwd);
+  const named = namedPaths(root, paths, all);
+  await change(root, ['add', '-A', ...(named.length ? ['--', ...named] : [])], { literal: true });
+  return {};
+}
+
+// Takes files' changes back out of the next commit, and leaves the folder as it is.
+export async function unstage(cwd, { paths, all } = {}) {
+  const root = await rootOf(cwd);
+  const named = namedPaths(root, paths, all);
+  // Before the first commit there's nothing to set the index back to, so the files are taken out of it.
+  if (await hasCommits(root)) await change(root, ['reset', '-q', ...(named.length ? ['--', ...named] : [])], { literal: true });
+  else await change(root, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...(named.length ? named : ['.'])], { literal: true });
+  return {};
+}
+
+// Commits what's staged, as whoever git is set up for on this Mac, with the repository's own hooks.
+export async function commitStaged(cwd, { message } = {}) {
+  const root = await rootOf(cwd);
+  if (typeof message !== 'string' || !message.trim()) throw new HelperError('bad_message', 'A commit needs a message.');
+  if (Buffer.byteLength(message) > MESSAGE_BYTES) throw new HelperError('bad_message', 'That message is too long.');
+  const staged = await git(root, ['diff', '--cached', '--name-only', '-z']);
+  if (!staged) throw new HelperError('nothing_staged', 'Nothing is staged to commit.');
+  await change(root, ['commit', '-q', '-m', message.trim()]);
+  const [hash, short] = (await git(root, ['log', '-1', '--format=%H%x1f%h'])).trim().split(FIELD);
+  return { commit: { hash, short } };
+}
+
+// Moves the folder to another of the repository's branches. Git won't when that would write over
+// changes in the folder, and says which.
+export async function switchBranch(cwd, { branch } = {}) {
+  const root = await rootOf(cwd);
+  const names = (await git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'])).split('\n').filter(Boolean);
+  if (typeof branch !== 'string' || !names.includes(branch)) throw new HelperError('no_branch', 'This repository has no such branch.');
+  await change(root, ['switch', '--no-guess', branch]);
+  return { branch };
 }

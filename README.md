@@ -147,6 +147,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
 | `pushUnregister` | `deviceId` | That phone doesn't want them any more |
 | `start` | `cwd`, `trust` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). |
+| `startTerminal` | `cwd`, `columns`, `rows` | Starts a shell of your own in that folder, with no Claude Code in it, and replies with its `sessionId` once its first prompt is up. See [Terminal sessions](#terminal-sessions). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -245,6 +246,20 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 `start` opens Claude Code in a new terminal session of its own in `cwd`, in Rex if it's on this Mac and otherwise in tmux, as a resumed session gets. It replies once the session's first hook arrives, and the session is in `sessions` by then. If it doesn't start within 30 seconds, `start` fails, and the terminal stays open when a dialog is waiting in it.
 
 Claude Code asks before it works in a folder it doesn't trust yet, and runs no hooks, the helper's included, until that's answered. `trusted` reads its own rules from `~/.claude.json`. A folder is trusted when the folder, or one above it, has been accepted. Inside a git repository the search stops at the repository's top folder, and outside one it goes up to the top of the disk. The home folder is asked about every time. `start` for a folder that isn't trusted fails with `needs_trust` and starts nothing. With `trust: true`, the reader's word in the app, it answers Claude Code's question with "Yes, I trust this folder", as the keys at the Mac would. If Claude Code asks about a folder that looked trusted, `start` picks "No, exit", so nothing is left running, and fails with `needs_trust`.
+
+### Terminal sessions
+
+`startTerminal` opens a terminal session: zsh as a login shell, in Rex if it's on this Mac and otherwise in tmux, as a Claude Code session gets, in a window labelled `venes-term-<id>`. It reads your own startup files, so it has your `PATH`, aliases and functions, and its commands go in your own history. It's zsh whatever your login shell is. It's in `sessions` and snapshots with `terminal: true`, and its `session.discovered` says so too. The helper keeps what it has done in its own folder, so it outlives a restart, and the shell goes on in its terminal meanwhile.
+
+Each `send` is typed at the prompt as a command, or, while one runs, as a line for it, followed by Enter, as typing at the terminal does. `columns` and `rows` say how much room the client has, and the terminal takes that size, so what a program lays out fits. A command sent from here comes back as `message.user` with `shell: true` and the send's `clientId`, once the shell runs it, and so does one typed at the Mac, with a `clientId` of the helper's own. A line sent to a running command comes back at once with `input: true`, and as `••••••` when the program reads it without showing it, as a password prompt does.
+
+`message.output` carries what a command printed, in `stdout`, with the escape sequences that colour it and nothing else, `stderr` empty, and `replies` false. It's read off the screen while the command runs, with `running: true`, and again once it's done, with `running: false` and `exitCode`, and each time it's all of it so far: the last 2,000 lines, or 200,000 characters, as a terminal's scrollback keeps them. Its `clientId` is the line's it's under. What a command prints after a line sent to it is that line's: from the line it was typed on, when the typing shows there, as on a program's own prompt, and from the line under it otherwise. So a prompt can move from the command's own output to the line's, and the command's own output then comes again without it, empty if that was all of it. An output that's empty from the start and ends with 0 doesn't come at all. A reconnecting client is sent only the latest of a line's outputs.
+
+To do that, the shell runs hooks of the helper's own after your startup files. They clear the terminal and its scrollback before each command, so at the Mac it shows the latest command alone, and they put back a plain prompt of the folder's path before each one, which is how the end of a command's output is found.
+
+A program that takes the whole screen, such as an editor or a pager, sends `terminal.screen` with `fullScreen: true`, and `false` once it has gone. What it shows meanwhile is none of the command's output. Meanwhile `page` gives the screen as a page, and `pageKey` and `pageText` work it, as for Claude Code's pages, and a line sent to it replies with `page: true`, for a client to show it again. `pageClose` leaves it running, as only the program knows how it's left without losing anything. `interrupt` presses Ctrl-C.
+
+`join` and `history` give what it has done as `user` items, with `shell: true` and `input: true` as the events have them, and `output` items with `stdout`, `stderr`, `replies` and `exitCode`, each under its line, with a command still running as far as it has got, its last output with `running: true`. A shell that exits, with `exit` or when its terminal is closed, ends the session, with `session.ended` and a `reason` of `exited`, and the next `send` starts a new one where the last one was. `delete` closes its terminal and forgets what it did. `capabilities` lists nothing, `statusLine` has no `status`, and `configure` is refused with `terminal_session`.
 
 ### Notifications
 
@@ -353,8 +368,9 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
 | `session.deleted` | |
-| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`) |
-| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed |
+| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`, or a terminal session's), `input` (only for a line sent to a terminal session's running command) |
+| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed. A terminal session's also has `running` and `exitCode`. |
+| `terminal.screen` | `fullScreen`: a terminal session's program took the whole screen, or gave it back |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
@@ -396,7 +412,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
 | `needs_trust` | Claude Code asks first whether to trust the folder. Ask the reader, and send `start` again with `trust: true`. |
-| `start_failed` | Claude Code quit, or took too long, starting a new session |
+| `start_failed` | Claude Code quit, or took too long, starting a new session, or a terminal session's shell did |
+| `terminal_session` | `configure` was sent for a terminal session, which has no model |
 | `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |
 | `unreadable_folder` | `folders` couldn't read what's in that folder |

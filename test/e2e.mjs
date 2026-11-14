@@ -1931,6 +1931,125 @@ Run.prototype.waitForPane = async function waitForPane(re, ms) {
   throw new Error(`pane never matched ${re}:\n${this.pane()}`);
 };
 
+// Terminal sessions: the reader's own shell, with no Claude Code in it, and their real dotfiles.
+const finished = (r, clientId, ms = 20000) => r.wait(
+  e => e.kind === 'message.output' && e.clientId === clientId && e.running === false, ms, `the end of ${clientId}`,
+);
+const plainOf = text => text.replace(/\u001b\[[0-9;:]*m/g, '');
+
+async function runsCommandsOneByOne(r) {
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 60, rows: 20 });
+  const { sessions } = await r.client.request('sessions');
+  const session = sessions.find(s => s.id === sessionId);
+  assert.deepEqual([session.terminal, session.status, session.cwd], [true, 'idle', fs.realpathSync(WS)]);
+
+  await r.client.request('send', { sessionId, text: 'echo hello', clientId: 'c1' });
+  const hello = await finished(r, 'c1');
+  assert.deepEqual([hello.stdout, hello.exitCode, hello.replies], ['hello', 0, false]);
+  const line = r.events.find(e => e.kind === 'message.user' && e.clientId === 'c1');
+  assert.deepEqual([line.text, line.shell], ['echo hello', true]);
+
+  await r.client.request('send', { sessionId, text: 'cd /tmp && pwd', clientId: 'c2' });
+  assert.match((await finished(r, 'c2')).stdout, /^\/(private\/)?tmp$/);
+  await r.client.request('send', { sessionId, text: "printf 'a\\nb'", clientId: 'c3' });
+  assert.equal((await finished(r, 'c3')).stdout, 'a\nb', 'one with no newline at its end');
+  await r.client.request('send', { sessionId, text: 'false', clientId: 'c4' });
+  assert.deepEqual([(await finished(r, 'c4')).exitCode, (await finished(r, 'c4')).stdout], [1, '']);
+  await r.client.request('send', { sessionId, text: 'printf "\\033[31mred\\033[0m\\n"', clientId: 'c5' });
+  const red = await finished(r, 'c5');
+  assert.equal(plainOf(red.stdout), 'red');
+  // tmux writes it as the program did, and Rex by its number in the palette.
+  assert.match(red.stdout, /\u001b\[(31|38;5;1)m/, 'with its colour');
+  await r.client.request('send', { sessionId, text: 'seq 1 3000', clientId: 'c6' });
+  const many = await finished(r, 'c6');
+  assert.match(many.stdout, /\n3000$/, 'a long one keeps its end');
+
+  const opened = await r.client.request('join', { sessionId, limit: 50 });
+  assert.deepEqual(opened.items.filter(i => i.role === 'user').map(i => i.text),
+    ['echo hello', 'cd /tmp && pwd', "printf 'a\\nb'", 'false', 'printf "\\033[31mred\\033[0m\\n"', 'seq 1 3000']);
+  assert.equal(opened.sessions[0].terminal, true);
+  await r.client.request('delete', { sessionId });
+  await r.wait(e => e.kind === 'session.deleted' && e.sessionId === sessionId, 5000, 'session.deleted');
+}
+
+async function takesALineAndCtrlC(r) {
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
+  await r.client.request('send', { sessionId, text: 'read -s x; echo "got ${#x}"', clientId: 'c1' });
+  await r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'running', 10000, 'running');
+  await delay(500);
+  await r.client.request('send', { sessionId, text: 'secret', clientId: 'c2' });
+  const typed = await r.wait(e => e.kind === 'message.user' && e.clientId === 'c2', 5000, 'the line');
+  assert.deepEqual([typed.text, typed.input], ['••••••', true], 'a line read without showing isn\'t shown');
+  assert.equal(plainOf((await finished(r, 'c2')).stdout).trim(), 'got 6');
+
+  // A prompt of the program's own, which the typing shows on, goes with the line typed on it.
+  await r.client.request('send', { sessionId, text: `sh -c 'printf "name? "; read n; echo "hi $n"'`, clientId: 'c5' });
+  await r.wait(e => e.kind === 'message.output' && e.clientId === 'c5' && /name\?/.test(e.stdout), 10000, 'its prompt');
+  await r.client.request('send', { sessionId, text: 'bob', clientId: 'c6' });
+  assert.equal(plainOf((await finished(r, 'c6')).stdout), 'name? bob\nhi bob');
+  assert.equal(r.events.findLast(e => e.kind === 'message.output' && e.clientId === 'c5').stdout, '', 'which leaves the command\'s own with nothing');
+
+  await r.client.request('send', { sessionId, text: 'sleep 30', clientId: 'c3' });
+  await r.wait(e => e.kind === 'message.user' && e.clientId === 'c3', 5000, 'sleep');
+  await delay(300);
+  await r.client.request('interrupt', { sessionId });
+  assert.equal((await finished(r, 'c3', 10000)).exitCode, 130);
+  await assert.rejects(r.client.request('interrupt', { sessionId }), { code: 'not_running' });
+  await r.client.request('delete', { sessionId });
+}
+
+async function showsAFullScreenProgram(r) {
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 60, rows: 12 });
+  await r.client.request('send', { sessionId, text: 'less /etc/hosts', clientId: 'c1' });
+  await r.wait(e => e.kind === 'terminal.screen' && e.fullScreen === true, 10000, 'full screen');
+  const { page } = await r.client.request('page', { sessionId });
+  assert.ok(page.lines.some(runs => runs.map(run => run.text).join('').includes('localhost')), 'what the pager shows');
+  await r.client.request('pageText', { sessionId, text: 'q' });
+  await r.wait(e => e.kind === 'terminal.screen' && e.fullScreen === false, 5000, 'the screen back');
+  await r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'idle', 5000, 'its end');
+  assert.deepEqual((await r.client.request('page', { sessionId })).page, null);
+  assert.ok(!r.events.some(e => e.kind === 'message.output' && e.clientId === 'c1'), 'what it showed was the page\'s, and none of its output');
+  await r.client.request('send', { sessionId, text: 'echo after', clientId: 'c2' });
+  assert.equal((await finished(r, 'c2')).stdout, 'after');
+  await r.client.request('delete', { sessionId });
+}
+
+async function comesBackAfterARestart(r) {
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
+  await r.client.request('send', { sessionId, text: 'echo one', clientId: 'c1' });
+  await finished(r, 'c1');
+  r.client.close();
+  await stopHelper();
+  startHelper();
+  const client = await connect();
+  const run = new Run(client);
+  await client.request('subscribe');
+  const { sessions } = await client.request('sessions');
+  assert.deepEqual(sessions.filter(s => s.terminal).map(s => [s.id, s.status]), [[sessionId, 'idle']]);
+  await client.request('send', { sessionId, text: 'echo two', clientId: 'c2' });
+  assert.equal((await finished(run, 'c2')).stdout, 'two');
+  const { items } = await client.request('history', { sessionId, limit: 10 });
+  assert.deepEqual(items.map(i => i.text ?? i.stdout), ['echo one', 'one', 'echo two', 'two']);
+  // The shell exits, and a command starts it again.
+  await client.request('send', { sessionId, text: 'exit', clientId: 'c3' });
+  await run.wait(e => e.kind === 'session.ended' && e.sessionId === sessionId, 15000, 'session.ended');
+  await client.request('send', { sessionId, text: 'echo three', clientId: 'c4' });
+  assert.equal((await finished(run, 'c4')).stdout, 'three');
+  await client.request('delete', { sessionId });
+  client.close();
+}
+
+T('terminal_runs_commands_one_by_one', { noClaude: true }, runsCommandsOneByOne);
+T('terminal_takes_a_line_and_ctrl_c', { noClaude: true }, takesALineAndCtrlC);
+T('terminal_shows_a_full_screen_program', { noClaude: true }, showsAFullScreenProgram);
+T('terminal_comes_back_after_a_restart', { noClaude: true }, comesBackAfterARestart);
+if (hasRex) {
+  T('in_rex_terminal_runs_commands_one_by_one', { noClaude: true, rex: true }, runsCommandsOneByOne);
+  T('in_rex_terminal_takes_a_line_and_ctrl_c', { noClaude: true, rex: true }, takesALineAndCtrlC);
+  T('in_rex_terminal_shows_a_full_screen_program', { noClaude: true, rex: true }, showsAFullScreenProgram);
+  T('in_rex_terminal_comes_back_after_a_restart', { noClaude: true, rex: true }, comesBackAfterARestart);
+}
+
 async function runCase(name) {
   const { opts, fn } = cases[name];
   for (const f of fs.readdirSync(WS)) if (f.startsWith('e2e-')) fs.rmSync(path.join(WS, f));
@@ -1951,9 +2070,11 @@ async function runCase(name) {
       run = new Run(client);
       await client.request('subscribe');
     }
-    if (opts.rex) launchInRex(opts);
-    else launch(opts);
-    await ready(run);
+    if (!opts.noClaude) {
+      if (opts.rex) launchInRex(opts);
+      else launch(opts);
+      await ready(run);
+    }
     await fn(run);
     console.log(`ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
     return true;
@@ -1967,8 +2088,17 @@ async function runCase(name) {
     await delay(500);
     client?.close();
     await stopHelper();
+    // What a terminal case left behind, so that the next case's helper doesn't take it up.
+    for (const name of tmuxSessions().filter(session => session.startsWith('venes-term-'))) {
+      try { tmux('kill-session', '-t', `=${name}`); } catch { /* already gone */ }
+    }
+    fs.rmSync(paths.terminals, { recursive: true, force: true });
     inRex = undefined;
   }
+}
+
+function tmuxSessions() {
+  try { return tmux('list-sessions', '-F', '#{session_name}').split('\n').filter(Boolean); } catch { return []; }
 }
 
 // Every case starts a real Claude Code session, which Claude Code keeps with everyone else's, so

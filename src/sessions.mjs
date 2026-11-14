@@ -184,8 +184,8 @@ export class SessionStore extends EventEmitter {
   liveSessions() { return [...this.#sessions.values()].filter(s => s.status !== 'ended'); }
 
   // Sessions a restart would lose. One outside tmux can't be found again or typed into, so it
-  // comes back with its next hook, as it always did.
-  registry() { return this.liveSessions().filter(s => s.pane); }
+  // comes back with its next hook, as it always did. A terminal session keeps its own records.
+  registry() { return this.liveSessions().filter(s => s.pane && !s.kind); }
 
   // Sessions from before a restart. Hooks only tell the helper about a session when it does
   // something, so an idle one would otherwise stay gone.
@@ -203,8 +203,9 @@ export class SessionStore extends EventEmitter {
 
   // Whether the helper could restart now without losing anything in progress. Restarting
   // forgets held messages, and turns an open request back into a terminal-only prompt.
+  // A terminal session's shell outlives the helper, which picks up where it was.
   isQuiet(now = Date.now()) {
-    return this.liveSessions().every(s => now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s) && !this.pendingFor(s).length));
+    return this.liveSessions().every(s => s.kind || now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s) && !this.pendingFor(s).length));
   }
 
   get(idOrPrefix) {
@@ -222,6 +223,26 @@ export class SessionStore extends EventEmitter {
       if (error.code === 'unknown_session') return undefined;
       throw error;
     }
+  }
+
+  // A session the helper runs itself, which no hook speaks for: a terminal session, whose `kind` says so.
+  adopt(record) {
+    const s = { ...blankSession(record.id), ...record };
+    this.#sessions.set(s.id, s);
+    this.#deleted.delete(s.id);
+    return s;
+  }
+
+  // An event for a session the helper runs itself. `fields` change what's known of it first, and
+  // `supersedes` takes out earlier events it makes stale, such as output a newer read has all of.
+  report(id, kind, data = {}, { fields, supersedes } = {}) {
+    const s = this.#sessions.get(id);
+    if (!s) return;
+    Object.assign(s, fields);
+    s.lastEventAt = Date.now();
+    if (supersedes) this.#log = this.#log.filter(e => e.sessionId !== id || !supersedes(e));
+    if (kind === 'session.status') this.#setStatus(s, data.status);
+    else this.#emit(s, kind, data);
   }
 
   // A session about to be resumed, so that it can expect messages before its first hook.
@@ -528,8 +549,9 @@ export class SessionStore extends EventEmitter {
     s.tmuxSocket = socket;
     s.rexSession = rexSession;
     s.rexServer = rexServer;
+    // Claude Code run in a terminal session shares its pane, and the terminal session goes on.
     for (const other of this.#sessions.values()) {
-      if (other !== s && other.pane === pane && other.tmuxSocket === socket && other.status !== 'ended') {
+      if (other !== s && !other.kind && other.pane === pane && other.tmuxSocket === socket && other.status !== 'ended') {
         this.#endSession(other, 'replaced');
       }
     }
@@ -835,7 +857,7 @@ export class SessionStore extends EventEmitter {
       model: s.model, effort: s.effort, lastPrompt: s.lastPrompt, lastMessage: s.lastMessage,
       permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
-      startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id),
+      startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id), ...(s.kind === 'terminal' && { terminal: true }),
     };
   }
 

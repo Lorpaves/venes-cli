@@ -34,6 +34,7 @@ import { screenAccess, sshAccess } from './ssh.mjs';
 import { pruneStatus, readStatus } from './status.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
+import { Terminals } from './terminals.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
 
@@ -148,7 +149,7 @@ async function reofferPromptRows(store, request) {
   if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, terminals = undefined) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -205,6 +206,9 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     };
     notify({ devices, isConnected, event, title }).catch(error => console.error(`push: ${error.message}`));
   });
+
+  // A terminal session, which the helper runs itself, for the commands that work on one differently.
+  const terminal = sessionId => terminals?.has(sessionId);
 
   const sessionWithPane = sessionId => {
     const session = store.get(sessionId);
@@ -320,10 +324,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         return { ...named(checked), ...subfolders(checked, undefined, { hidden: hidden === true }) };
       }
       const [stored, running] = await Promise.all([library.recent(RECENT_SESSIONS).catch(() => []), library.running().catch(() => [])]);
-      const counts = runningIn(running, store.liveSessions());
+      const counts = runningIn(running, store.liveSessions().filter(session => !session.kind));
       return { home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })) };
     },
     start: msg => startNewSession({ store, terminal: resumeTerminal() }, msg),
+    // A shell of the reader's own in that folder, for commands from the client. See terminals.mjs.
+    startTerminal: msg => {
+      if (!terminals) throw new HelperError('unknown_command', 'Unknown command: startTerminal');
+      return terminals.start(msg);
+    },
     // What an @ in a message can name, from the session's folder: files, and folders ending in /.
     mentions: async ({ sessionId, query = '', limit = MENTION_LIMIT }) => {
       if (typeof query !== 'string' || query.length > 500) throw new HelperError('bad_query', 'That can\'t be looked for.');
@@ -333,11 +342,16 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
     },
     capabilities: async msg => {
+      if (terminal(msg.sessionId)) return { commands: [], models: [] };
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);
     },
-    configure,
+    configure: msg => {
+      if (terminal(msg.sessionId)) throw new HelperError('terminal_session', 'A terminal session has no model.');
+      return configure(msg);
+    },
     delete: async ({ sessionId }) => {
+      if (terminal(sessionId)) return terminals.remove(sessionId);
       await resuming.get(sessionId)?.catch(() => {});
       await typing(sessionId, () => removeSession({ store, library }, sessionId));
       chosenForResume.delete(sessionId);
@@ -345,6 +359,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return {};
     },
     history: msg => {
+      if (terminal(msg.sessionId)) return terminals.history(msg.sessionId, msg);
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);
     },
@@ -360,6 +375,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // Nothing here awaits for a session the helper knows, so every event is either in this
     // reply or follows it on the wire.
     join: msg => {
+      if (terminal(msg.sessionId)) return terminals.join(msg.sessionId, msg);
       const session = store.find(msg.sessionId);
       if (!session?.transcriptPath) return joinStored(msg);
       const turn = store.openTurn(session);
@@ -400,6 +416,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // What the session's status line was last told, or null before Claude Code has run it.
     statusLine: async ({ sessionId }) => {
       store.get(sessionId);
+      if (terminal(sessionId)) return { status: null };
       return { status: (await readStatus(statusDir, sessionId)) ?? null };
     },
     // What a message had attached, for a client that didn't send it or no longer has it.
@@ -409,6 +426,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { name: upload.name, mediaType: upload.mediaType, data: fs.readFileSync(upload.path).toString('base64') };
     },
     send: async msg => {
+      if (terminal(msg.sessionId)) {
+        if (msg.attachments?.length) throw new HelperError('bad_attachment', 'A terminal session takes no attachments.');
+        return terminals.send(msg.sessionId, msg);
+      }
       const attachments = attachmentsOf(msg);
       const text = typeof msg.text === 'string' ? msg.text : '';
       if (!text.trim() && !attachments.length) throw new HelperError('bad_text', 'Nothing to send.');
@@ -431,20 +452,23 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { queued: false, ...(page && { page: true }) };
     },
     // What a command opened in the terminal, to see and work from afar: null when nothing is.
-    page: async ({ sessionId }) => ({ page: await readPage(sessionWithPane(sessionId)) }),
+    page: async ({ sessionId }) => (terminal(sessionId) ? terminals.page(sessionId) : { page: await readPage(sessionWithPane(sessionId)) }),
     pageKey: async ({ sessionId, key }) => {
+      if (terminal(sessionId)) return terminals.pageKey(sessionId, key);
       const session = sessionWithPane(sessionId);
       await typing(session.id, () => pressPageKey(session, key));
       return {};
     },
     pageText: async ({ sessionId, text }) => {
       if (typeof text !== 'string' || !text) throw new HelperError('bad_text', 'Nothing to type.');
+      if (terminal(sessionId)) return terminals.pageText(sessionId, text);
       const session = sessionWithPane(sessionId);
       await typing(session.id, () => typeOnPage(session, text));
       return {};
     },
     // Closes what's open, as the reader leaves it.
     pageClose: async ({ sessionId }) => {
+      if (terminal(sessionId)) return terminals.pageClose(sessionId);
       const session = sessionWithPane(sessionId);
       await typing(session.id, () => closePage(session));
       return {};
@@ -462,6 +486,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return readTail(task.outputFile, TASK_OUTPUT_BYTES);
     },
     interrupt: async msg => {
+      if (terminal(msg.sessionId)) return terminals.interrupt(msg.sessionId);
       const session = sessionWithPane(msg.sessionId);
       if (session.status !== 'running' && session.status !== 'waiting') throw new HelperError('not_running', 'Nothing to interrupt.');
       await sendEscape(session);
@@ -558,7 +583,11 @@ export async function startDaemon(paths) {
   pruneStatus(paths.statusDir);
   const rexAccount = cachedAccount();
   await rexAccount.refresh();
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current);
+  const terminals = new Terminals({ store, root: paths.terminals, shellDir: paths.shellDir });
+  await terminals.restore().catch(error => console.error(`terminals: ${error.stack}`));
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(
+    store, updater.check, library, paths, () => rexAccount.current, terminals,
+  );
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -571,6 +600,7 @@ export async function startDaemon(paths) {
       const installing = library.stop();
       stopSaving();
       transcripts.stop();
+      terminals.stop();
       updater.stop();
       clearInterval(heldTimer);
       for (const socket of subscribers) socket.destroy();

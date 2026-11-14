@@ -1,0 +1,627 @@
+// Terminal sessions: a shell of the reader's own, in Rex or tmux as Claude Code's sessions are, that a
+// client types commands into and reads each one's output back from, as a chat. The shell's hooks
+// (shell.mjs) clear the screen before each command and leave what it's doing in files, so a command's
+// output is the screen under its own line until the prompt comes back. Output streams while a command
+// runs. A line sent while it runs goes to it, and what it prints after that is that line's.
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { checkedFolder } from './folders.mjs';
+import { capped, outputBody, plain, styleBefore, trimEnd, vtLines, withoutPrompt } from './output.mjs';
+import * as rex from './rex.mjs';
+import { runsOf, screenCells } from './screen.mjs';
+import { HelperError } from './sessions.mjs';
+import { installShellFiles, shellCommand } from './shell.mjs';
+import { PAGE_KEYS } from './terminal.mjs';
+import * as tmux from './tmux.mjs';
+
+export const TERMINAL_KIND = 'terminal';
+const NAME_PREFIX = 'venes-term-';
+const TICK_MS = 250;
+// How often a running command's output is read again: often enough to follow, and no more. One that
+// has printed nothing new for a while, as a server waiting for requests hasn't, is read less often.
+const READ_EVERY_MS = 400;
+const QUIET_AFTER_MS = 10_000;
+const QUIET_READ_EVERY_MS = 2000;
+const LIVE_CHECK_MS = 10_000;
+// A send checks that the terminal is still there, unless it was just seen to be.
+const LIVE_FRESH_MS = 1000;
+// A login shell with a framework like oh-my-zsh was ready in about a second when measured.
+const START_LIMIT_MS = 20_000;
+const START_CHECK_MS = 150;
+// The prompt follows the hook that says a command is done, so it's waited for a moment.
+const PROMPT_WAIT_MS = 1500;
+const PASTE_SETTLE_MS = 100;
+// As much of one output as a client is sent, from its end, as a terminal's scrollback keeps it.
+const MAX_LINES = 2000;
+const MAX_CHARS = 200_000;
+const MAX_PENDING = 8;
+// A sent command that hasn't shown up in the shell by then was typed over, or never ran.
+const PENDING_LIFETIME_MS = 30_000;
+const HISTORY_LIMIT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_SIZE = { columns: 80, rows: 24 };
+const SIZE_RANGE = { columns: [20, 400], rows: [5, 200] };
+// What a line shows when the program read it without showing it, as a password prompt does.
+export const HIDDEN_TEXT = '••••••';
+const META = 'session.json';
+const HISTORY = 'history.jsonl';
+
+const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
+
+function readText(file) {
+  try { return fs.readFileSync(file, 'utf8'); } catch { return undefined; }
+}
+
+function readJSON(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return undefined; }
+}
+
+// What the hooks last wrote: `idle <pid> <seq> <status>` at a prompt, `running <pid> <seq>` while a
+// command runs. A nested shell has a pid of its own, and counts from zero.
+export function parseState(text) {
+  const match = /^(idle|running) (\d+) (\d+)(?: (\d+))?\s*$/.exec(text ?? '');
+  if (!match) return undefined;
+  const [, kind, pid, seq, code] = match;
+  return { kind, pid: Number(pid), seq: Number(seq), code: code === undefined ? undefined : Number(code), key: `${pid}:${seq}` };
+}
+
+const clamp = (value, [low, high], fallback) => (Number.isInteger(value) ? Math.min(Math.max(value, low), high) : fallback);
+
+export function sizeOf({ columns, rows } = {}, fallback = DEFAULT_SIZE) {
+  return { columns: clamp(columns, SIZE_RANGE.columns, fallback.columns), rows: clamp(rows, SIZE_RANGE.rows, fallback.rows) };
+}
+
+// The output from line `from` on, in the colours it starts in, and no longer than a client is sent.
+export function partFrom(lines, from) {
+  const part = trimEnd(lines.slice(from));
+  return part.length ? styleBefore(lines, from) + capped(part, { maxLines: MAX_LINES, maxChars: MAX_CHARS }) : '';
+}
+
+// The last line a running command has printed on, and what it says: where a line sent to it now may
+// show, when that line is the program's own prompt.
+export function tailOf(lines) {
+  const index = trimEnd(lines).length - 1;
+  return { index, text: index < 0 ? '' : plain(lines[index]) };
+}
+
+// Where each part of a command's output starts. The first is the command's own. Each one after is a
+// line sent to it while it ran, with where the output ended when it was sent: it starts on that line
+// when the line has changed since, as a prompt the typing shows on has, and under it otherwise, as
+// when the program read the line without showing it, or the cursor was already on the next one.
+export function partStarts(lines, marks) {
+  let from = 0;
+  return marks.map(mark => {
+    if (!mark) return from;
+    const line = mark.index >= 0 ? lines[mark.index] : undefined;
+    const typedOn = line !== undefined && plain(line) !== mark.text;
+    from = Math.min(Math.max(typedOn ? mark.index : mark.index + 1, from), lines.length);
+    return from;
+  });
+}
+
+// What each part says, for the marks of `partStarts`.
+export function partTexts(lines, marks) {
+  const starts = partStarts(lines, marks);
+  return starts.map((from, index) => partFrom(lines.slice(0, starts[index + 1] ?? lines.length), from));
+}
+
+// A page of what a terminal session did, as `history` gives Claude Code's: it starts where a command
+// or a line sent to one does, so that an output never comes without the line it's under.
+export function historyPage(items, { limit = 60, before } = {}) {
+  const end = Number.isInteger(before) ? Math.min(Math.max(before, 0), items.length) : items.length;
+  let start = Math.max(0, end - Math.max(limit, 1));
+  while (start > 0 && items[start].role !== 'user') start -= 1;
+  return { items: items.slice(start, end), before: start, hasMore: start > 0 };
+}
+
+export class Terminals {
+  #store;
+  #root;
+  #shellDir;
+  #backends;
+  #useRex;
+  #env;
+  #tickMs;
+  #liveCheckMs;
+  #timer;
+  #ticking = false;
+  #terminals = new Map();
+
+  constructor({
+    store, root, shellDir, backends = { rex, tmux }, env = process.env,
+    useRex = () => (env.VENES_TERMINAL ? env.VENES_TERMINAL === 'rex' : rex.isInstalled()), tickMs = TICK_MS,
+    liveCheckMs = LIVE_CHECK_MS,
+  }) {
+    this.#store = store;
+    this.#root = root;
+    this.#shellDir = shellDir;
+    this.#backends = backends;
+    this.#useRex = useRex;
+    this.#env = env;
+    this.#tickMs = tickMs;
+    this.#liveCheckMs = liveCheckMs;
+  }
+
+  has(id) { return typeof id === 'string' && this.#terminals.has(id); }
+
+  // Those from before a restart. Their shells went on in Rex or tmux, and are followed again from where
+  // they are. One whose terminal has gone has ended, and keeps what it did.
+  async restore() {
+    fs.mkdirSync(this.#root, { recursive: true, mode: 0o700 });
+    for (const id of fs.readdirSync(this.#root)) {
+      const meta = readJSON(path.join(this.#root, id, META));
+      if (!meta?.id || meta.id !== id) continue;
+      const t = { ...meta, pending: [], fullScreen: false, checkedAt: Date.now() };
+      const alive = !meta.ended && meta.target && (await this.#backend(t).isSessionOpen(meta.name, meta.target).catch(() => false));
+      t.ended = !alive;
+      t.status = t.ended ? 'ended' : t.running ? 'running' : 'idle';
+      this.#terminals.set(id, t);
+      this.#adopt(t);
+      // A command that was running when its terminal went is over, with what was last read of it.
+      if (t.ended && t.running) this.#finishUnseen(t, null);
+    }
+    this.#timer ??= setInterval(() => { this.#tick(); }, this.#tickMs);
+    this.#timer.unref?.();
+  }
+
+  stop() {
+    clearInterval(this.#timer);
+    this.#timer = undefined;
+  }
+
+  // A shell in `cwd`, ready for its first command: the reply waits for its first prompt.
+  async start({ cwd, columns, rows } = {}) {
+    const folder = checkedFolder(cwd);
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    const t = {
+      id, name: `${NAME_PREFIX}${id.slice(0, 8)}`, cwd: folder, startedAt: now, lastActiveAt: now, size: sizeOf({ columns, rows }),
+      pending: [], fullScreen: false, checkedAt: now, status: 'idle',
+    };
+    fs.mkdirSync(this.#dir(t), { recursive: true, mode: 0o700 });
+    try {
+      await this.#launch(t, folder);
+    } catch (error) {
+      fs.rmSync(this.#dir(t), { recursive: true, force: true });
+      throw error;
+    }
+    this.#terminals.set(id, t);
+    this.#adopt(t);
+    this.#store.report(id, 'session.discovered', { cwd: folder, terminal: true });
+    this.#store.report(id, 'session.attached', { pane: t.target.pane });
+    this.#save(t);
+    this.#timer ??= setInterval(() => { this.#tick(); }, this.#tickMs);
+    this.#timer.unref?.();
+    return { sessionId: id };
+  }
+
+  // A command, typed at the prompt, or a line for the command that's running. A shell that has gone is
+  // started again where it last was. A line for a program that has the screen to itself says so, with
+  // `page`, for a client to show it again: one that takes it from now on says so with `terminal.screen`.
+  send(id, { text, clientId, columns, rows }) {
+    const t = this.#get(id);
+    if (typeof text !== 'string' || !text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
+    return this.#exclusive(t, async () => {
+      // One closed at the Mac since it was last looked at has ended, like any other.
+      if (!t.ended && Date.now() - t.checkedAt >= LIVE_FRESH_MS && !(await this.#isOpen(t))) this.#end(t);
+      if (t.ended) await this.#relaunch(t);
+      else await this.#follow(t);
+      await this.#fit(t, { columns, rows });
+      if (t.running) {
+        const reply = await this.#input(t, { text, clientId });
+        return { ...reply, ...((await this.#isFullScreen(t)) && { page: true }) };
+      }
+      t.pending = [...t.pending.filter(sent => Date.now() - sent.at < PENDING_LIFETIME_MS), { clientId, text, at: Date.now() }].slice(-MAX_PENDING);
+      await this.#type(t, text);
+      return { queued: false };
+    });
+  }
+
+  // Ctrl-C, as at the terminal.
+  async interrupt(id) {
+    const t = this.#get(id);
+    if (t.ended || !t.running) throw new HelperError('not_running', 'Nothing to interrupt.');
+    await this.#backend(t).pressKey(t.target, 'C-c');
+    return {};
+  }
+
+  // Everything needed to open a terminal session, as `join` gives a Claude Code session's: what it did,
+  // with the output of a command still running as far as it has got. Nothing here waits, so every
+  // event after `seq` follows on the wire.
+  join(id, { limit } = {}) {
+    const t = this.#get(id);
+    const page = historyPage(this.#items(t), { limit });
+    return {
+      ...page, turn: [], queued: [], seq: this.#store.seq, requests: [],
+      sessions: this.#store.sessions().filter(session => session.id === id),
+    };
+  }
+
+  history(id, { limit, before } = {}) {
+    return historyPage(this.#items(this.#get(id)), { limit, before });
+  }
+
+  // What a program that has the screen to itself shows, as a page: null while none has.
+  async page(id) {
+    const t = this.#get(id);
+    if (t.ended || !(await this.#isFullScreen(t))) return { page: null };
+    // Such a program's screen has nothing above it, so what's read is the screen.
+    const lines = screenCells(await this.#backend(t).readStyledScreen(t.target)).map(cells => {
+      let last = cells.length;
+      while (last > 0 && cells[last - 1].char === ' ' && !cells[last - 1].style.background && !cells[last - 1].style.inverse) last -= 1;
+      return runsOf(cells.slice(0, last));
+    });
+    while (lines.length && !lines.at(-1).length) lines.pop();
+    return { page: { lines } };
+  }
+
+  async pageKey(id, key) {
+    if (!PAGE_KEYS.includes(key)) throw new HelperError('bad_key', `${key} isn't a key a page takes.`);
+    const t = await this.#fullScreen(id);
+    await this.#backend(t).pressKey(t.target, key);
+    return {};
+  }
+
+  async pageText(id, text) {
+    const t = await this.#fullScreen(id);
+    await this.#backend(t).paste(t.target, text);
+    return {};
+  }
+
+  // The program goes on: only it knows how it's left, which may lose work, so that's for the reader.
+  pageClose(id) {
+    this.#get(id);
+    return {};
+  }
+
+  // Its shell ends, and what it did goes from this Mac.
+  async remove(id) {
+    const t = this.#get(id);
+    await this.#exclusive(t, async () => {
+      if (!t.ended && t.target) await this.#backend(t).closeSession(t.name, t.target).catch(() => {});
+      t.ended = true;
+    });
+    this.#terminals.delete(id);
+    fs.rmSync(this.#dir(t), { recursive: true, force: true });
+    this.#store.forget(id);
+    return {};
+  }
+
+  #get(id) {
+    const t = this.has(id) ? this.#terminals.get(id) : undefined;
+    if (!t) throw new HelperError('unknown_session', `No terminal session ${id}`);
+    return t;
+  }
+
+  #dir(t) { return path.join(this.#root, t.id); }
+
+  #backend(t) { return this.#backends[t.backend ?? 'tmux']; }
+
+  // One thing at a time for each terminal, so that a read and a send never cross.
+  #exclusive(t, work) {
+    const run = (t.lock ?? Promise.resolve()).then(work);
+    t.lock = run.catch(() => {});
+    return run;
+  }
+
+  #adopt(t) {
+    this.#store.adopt({
+      id: t.id, kind: TERMINAL_KIND, status: t.status, cwd: this.#cwdOf(t), pane: t.ended ? undefined : t.target?.pane,
+      startedAt: t.startedAt, lastEventAt: t.lastActiveAt, lastPrompt: t.lastCommand,
+    });
+  }
+
+  #cwdOf(t) { return readText(path.join(this.#dir(t), 'cwd')) || t.cwd; }
+
+  #save(t) {
+    const { id, name, cwd, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running } = t;
+    const kept = running && { ...running, tail: undefined };
+    fs.writeFileSync(path.join(this.#dir(t), META), JSON.stringify({ id, name, cwd, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running: kept }), { mode: 0o600 });
+  }
+
+  // A shell with the hooks, in a terminal of its own, once it's at its first prompt.
+  async #launch(t, cwd) {
+    installShellFiles(this.#shellDir);
+    for (const name of ['state', 'command', 'prompt', 'cwd']) fs.rmSync(path.join(this.#dir(t), name), { force: true });
+    const { command, env } = shellCommand({ shellDir: this.#shellDir, terminalDir: this.#dir(t), env: this.#env });
+    t.backend = this.#useRex() ? 'rex' : 'tmux';
+    const backend = this.#backend(t);
+    const socket = this.#env.VENES_TMUX_SOCKET;
+    t.target = await backend.startSession({ name: t.name, cwd, command, env: { ...env, ...(socket && { VENES_TMUX_SOCKET: socket }) }, size: t.size });
+    await backend.resize(t.target, t.size).catch(() => {});
+    for (const deadline = Date.now() + START_LIMIT_MS; Date.now() < deadline; await pause(START_CHECK_MS)) {
+      const state = parseState(readText(path.join(this.#dir(t), 'state')));
+      if (state) {
+        t.seen = state.key;
+        t.ended = false;
+        t.running = undefined;
+        return;
+      }
+      if (!(await backend.isSessionOpen(t.name, t.target).catch(() => false))) throw new HelperError('start_failed', 'The shell quit before it was ready.');
+    }
+    await backend.closeSession(t.name, t.target).catch(() => {});
+    throw new HelperError('start_failed', 'The shell took too long to start.');
+  }
+
+  // A shell that has gone, started again where it last was, as a stopped Claude Code session is resumed.
+  async #relaunch(t) {
+    const last = this.#cwdOf(t);
+    await this.#launch(t, last && fs.existsSync(last) ? last : t.cwd);
+    t.status = 'idle';
+    this.#store.report(t.id, 'session.attached', { pane: t.target.pane }, { fields: { pane: t.target.pane } });
+    this.#store.report(t.id, 'session.status', { status: 'idle' });
+    this.#save(t);
+  }
+
+  // The client's size, so that what a program lays out fits where it's read.
+  async #fit(t, size) {
+    const wanted = sizeOf(size, t.size);
+    if (wanted.columns === t.size.columns && wanted.rows === t.size.rows) return;
+    t.size = wanted;
+    await this.#backend(t).resize(t.target, wanted).catch(() => {});
+  }
+
+  async #type(t, text) {
+    const backend = this.#backend(t);
+    await backend.paste(t.target, text);
+    await pause(PASTE_SETTLE_MS);
+    await backend.pressKey(t.target, 'Enter');
+  }
+
+  async #isFullScreen(t) {
+    return this.#backend(t).isFullScreen(t.target).catch(() => false);
+  }
+
+  async #fullScreen(id) {
+    const t = this.#get(id);
+    if (t.ended || !(await this.#isFullScreen(t))) throw new HelperError('no_page', 'Nothing is open in the terminal.');
+    return t;
+  }
+
+  async #tick() {
+    if (this.#ticking) return;
+    this.#ticking = true;
+    try {
+      // Each by itself, so that one that's slow, as a shell starting again is, doesn't hold up the rest.
+      await Promise.all([...this.#terminals.values()].filter(t => !t.ended).map(t => this.#exclusive(t, async () => {
+        if (t.ended) return;
+        if (Date.now() - t.checkedAt >= this.#liveCheckMs && !(await this.#isOpen(t))) {
+          this.#end(t);
+          return;
+        }
+        await this.#follow(t);
+      }).catch(error => console.error(`terminal ${t.id}: ${error.message}`))));
+    } finally {
+      this.#ticking = false;
+    }
+  }
+
+  async #isOpen(t) {
+    t.checkedAt = Date.now();
+    return this.#backend(t).isSessionOpen(t.name, t.target).catch(() => true);
+  }
+
+  // Its shell has gone, with the terminal it was in. A command it was running ends with what it showed.
+  #end(t) {
+    if (t.running) this.#finishUnseen(t, null);
+    t.ended = true;
+    t.status = 'ended';
+    this.#store.report(t.id, 'session.status', { status: 'ended' }, { fields: { pane: undefined } });
+    this.#store.report(t.id, 'session.ended', { reason: 'exited' });
+    this.#save(t);
+  }
+
+  // What the hooks say now, against what was last heard.
+  async #follow(t) {
+    const state = parseState(readText(path.join(this.#dir(t), 'state')));
+    if (!state) return;
+    if (state.kind === 'running') {
+      if (t.running && t.running.key !== state.key) this.#finishUnseen(t, 'idle');
+      if (!t.running && state.key !== t.seen) this.#begin(t, state);
+      if (t.running && Date.now() - t.running.readAt >= this.#readEvery(t.running)) await this.#readRunning(t);
+      return;
+    }
+    if (t.running?.key === state.key) {
+      await this.#finishWhenPrompted(t, state);
+      return;
+    }
+    // The shell went on without a word, as a nested one does when it exits.
+    if (t.running) this.#finishUnseen(t, 'idle');
+    if (state.key === t.seen) return;
+    // A new shell's first prompt is no command.
+    if (state.seq === 0) {
+      t.seen = state.key;
+      this.#save(t);
+      return;
+    }
+    // One that came and went between two looks.
+    this.#begin(t, state);
+    await this.#finishWhenPrompted(t, state);
+  }
+
+  // A command started, from here or typed at the Mac. One sent from here keeps its send's id. Its
+  // output comes in parts: its own, then one for each line sent to it while it runs.
+  #begin(t, state) {
+    const command = readText(path.join(this.#dir(t), 'command')) ?? '';
+    const sent = this.#takeSent(t, command);
+    const line = sent?.clientId ?? `${t.id.slice(0, 8)}-${state.pid}-${state.seq}`;
+    const now = Date.now();
+    t.running = { key: state.key, pid: state.pid, seq: state.seq, command, at: now, segments: [{ line }], readAt: 0 };
+    t.lastCommand = command;
+    t.lastActiveAt = now;
+    this.#append(t, { role: 'user', text: command, shell: true, at: now });
+    this.#store.report(t.id, 'message.user', { text: command, shell: true, clientId: line }, { fields: { lastPrompt: command } });
+    this.#setStatus(t, 'running');
+    this.#save(t);
+  }
+
+  // The send a command came from: the one with its text, or else the oldest still on its way.
+  #takeSent(t, command) {
+    const fresh = t.pending.filter(sent => Date.now() - sent.at < PENDING_LIFETIME_MS);
+    const index = Math.max(fresh.findIndex(sent => sent.text.trim() === command.trim()), 0);
+    const [sent] = fresh.splice(index, 1);
+    t.pending = fresh;
+    return sent?.clientId ? sent : undefined;
+  }
+
+  async #readBody(t) {
+    const { text, cut } = await this.#backend(t).readOutput(t.target);
+    const lines = vtLines(text);
+    // The start of what was read is the middle of a line, and the command's own is long gone.
+    return cut ? { lines: lines.slice(1), cut } : { lines: outputBody(lines, t.running?.command ?? ''), cut };
+  }
+
+  #readEvery(running) {
+    return Date.now() - (running.changedAt ?? running.at) < QUIET_AFTER_MS ? READ_EVERY_MS : QUIET_READ_EVERY_MS;
+  }
+
+  // What a program that has the screen to itself shows is a page's, and none of its output.
+  async #readRunning(t) {
+    const running = t.running;
+    running.readAt = Date.now();
+    const full = await this.#isFullScreen(t);
+    if (full !== t.fullScreen) {
+      t.fullScreen = full;
+      running.changedAt = Date.now();
+      this.#store.report(t.id, 'terminal.screen', { fullScreen: full });
+    }
+    if (full) return;
+    const { lines, cut } = await this.#readBody(t);
+    running.tail = cut ? undefined : tailOf(lines);
+    if (this.#sendParts(t, lines, cut, {})) running.changedAt = Date.now();
+  }
+
+  // Each part of the running command's output that isn't what a client was last sent, sent again whole.
+  // Only the last can still grow. With `done`, that one is over too, and says how the command ended.
+  // Output too long to read from its start can't be parted, so all that's read is the last part's.
+  #sendParts(t, lines, cut, { done = false, code } = {}) {
+    const { segments } = t.running;
+    const texts = cut
+      ? segments.map((segment, index) => (index === segments.length - 1 ? partFrom(lines, 0) : segment.sent?.text ?? ''))
+      : partTexts(lines, segments.map(segment => segment.mark));
+    let changed = false;
+    segments.forEach((segment, index) => {
+      const isLast = index === segments.length - 1;
+      const text = texts[index];
+      const running = isLast && !done;
+      const sent = segment.sent ?? { text: '', running: false };
+      const ends = isLast && done && (text !== '' || code);
+      if (text === sent.text && (running === sent.running || text === '') && !ends) return;
+      segment.sent = { text, running };
+      changed = true;
+      this.#store.report(
+        t.id, 'message.output',
+        { stdout: text, stderr: '', replies: false, clientId: segment.line, running, ...(ends && code !== undefined && { exitCode: code }) },
+        { supersedes: event => event.kind === 'message.output' && event.clientId === segment.line },
+      );
+    });
+    return changed;
+  }
+
+  // Done once the prompt is back, as everything the command printed comes before it.
+  async #finishWhenPrompted(t, state) {
+    const running = t.running;
+    const { lines, cut } = await this.#readBody(t);
+    const done = withoutPrompt(lines, readText(path.join(this.#dir(t), 'prompt')) ?? '');
+    if (done === undefined) {
+      running.promptSince ??= Date.now();
+      if (Date.now() - running.promptSince < PROMPT_WAIT_MS) return;
+    }
+    this.#sendParts(t, done ?? lines, cut, { done: true, code: state.code });
+    this.#finish(t, state.code);
+  }
+
+  // The command is over without its end having been seen, as when its shell went: what was last read
+  // of it is all there is. A `status` of null leaves the session's as it is, for whoever ends it.
+  #finishUnseen(t, status) {
+    const last = t.running.segments.at(-1);
+    if (last.sent?.running) {
+      last.sent.running = false;
+      this.#store.report(
+        t.id, 'message.output', { stdout: last.sent.text, stderr: '', replies: false, clientId: last.line, running: false },
+        { supersedes: event => event.kind === 'message.output' && event.clientId === last.line },
+      );
+    }
+    this.#finish(t, undefined, status);
+  }
+
+  // What it did goes in the record: each line sent to it, under the output before it.
+  #finish(t, code, status = 'idle') {
+    const running = t.running;
+    const now = Date.now();
+    running.segments.forEach((segment, index) => {
+      const isLast = index === running.segments.length - 1;
+      if (index > 0) this.#append(t, { role: 'user', text: segment.shown, shell: true, input: true, at: segment.at ?? now });
+      const text = segment.sent?.text ?? '';
+      const exitCode = isLast ? code : undefined;
+      if (text || exitCode) this.#append(t, { role: 'output', stdout: text, stderr: '', replies: false, at: now, ...(exitCode !== undefined && { exitCode }) });
+    });
+    if (t.fullScreen) {
+      t.fullScreen = false;
+      this.#store.report(t.id, 'terminal.screen', { fullScreen: false });
+    }
+    t.seen = running.key;
+    t.running = undefined;
+    t.lastActiveAt = now;
+    if (status) this.#setStatus(t, status, { cwd: this.#cwdOf(t) });
+    this.#save(t);
+  }
+
+  // A line for the program that's running, which starts a part of its output. One the program reads
+  // without showing is hidden here too. Where the output ended is read now, unless a program has the
+  // screen, which leaves the output where it was last read.
+  async #input(t, { text, clientId }) {
+    const running = t.running;
+    const backend = this.#backend(t);
+    const hidden = await backend.hidesInput(t.target).catch(() => false);
+    let mark = running.tail;
+    if (!(await this.#isFullScreen(t))) {
+      const { lines, cut } = await this.#readBody(t);
+      mark = cut ? undefined : tailOf(lines);
+    }
+    const line = clientId ?? `${t.id.slice(0, 8)}-${running.pid}-${running.seq}-${running.segments.length}`;
+    const shown = hidden ? HIDDEN_TEXT : text;
+    running.segments.push({ line, shown, at: Date.now(), mark: mark ?? { index: -1, text: '' } });
+    // Its answer is on its way, so it's read as often as a command just started.
+    running.changedAt = Date.now();
+    this.#store.report(t.id, 'message.user', { text: shown, shell: true, input: true, clientId: line });
+    this.#save(t);
+    await this.#type(t, text);
+    return { queued: false };
+  }
+
+  #setStatus(t, status, fields) {
+    t.status = status;
+    this.#store.report(t.id, 'session.status', { status }, { fields });
+  }
+
+  #append(t, item) {
+    const file = path.join(this.#dir(t), HISTORY);
+    fs.appendFileSync(file, `${JSON.stringify(item)}\n`, { mode: 0o600 });
+    try {
+      if (fs.statSync(file).size > HISTORY_LIMIT_BYTES) this.#shorten(file);
+    } catch { /* gone with its session */ }
+  }
+
+  // The older half goes, from where a command starts.
+  #shorten(file) {
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    let start = Math.floor(lines.length / 2);
+    while (start < lines.length && !/"role":"user"/.test(lines[start])) start += 1;
+    fs.writeFileSync(file, `${lines.slice(start).join('\n')}\n`, { mode: 0o600 });
+  }
+
+  // What it did, with a running command's output and the lines sent to it as far as they've got.
+  #items(t) {
+    const items = (readText(path.join(this.#dir(t), HISTORY)) ?? '').split('\n').filter(Boolean).flatMap(line => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    (t.running?.segments ?? []).forEach((segment, index, segments) => {
+      if (index > 0) items.push({ role: 'user', text: segment.shown, shell: true, input: true, at: segment.at });
+      const text = segment.sent?.text;
+      if (text) items.push({ role: 'output', stdout: text, stderr: '', replies: false, at: t.running.readAt, ...(index === segments.length - 1 && { running: true }) });
+    });
+    return items;
+  }
+}

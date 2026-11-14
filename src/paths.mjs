@@ -24,6 +24,10 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     statusLineState: path.join(home, 'statusline.json'),
     // The phones to notify while they aren't connected, each with its device token and key.
     pushFile: path.join(home, 'push.json'),
+    // Terminal sessions, each with what its shell's hooks last said and what it has done.
+    terminals: path.join(home, 'terminals'),
+    // The startup files a terminal session's shell reads, ahead of the reader's own.
+    shellDir: path.join(home, 'shell', 'zsh'),
     // Claude Code's own settings, where the status line is set up.
     claudeSettings: process.env.VENES_CLAUDE_SETTINGS
       || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json'),

@@ -16,8 +16,11 @@ function tmuxArgs(socket, args) {
   return socket ? ['-S', socket, ...args] : args;
 }
 
+// A terminal session's whole history, which tmux keeps 2,000 lines of by default.
+const OUTPUT_BUFFER_BYTES = 8 * 1024 * 1024;
+
 async function tmux(socket, args, input) {
-  const child = exec('tmux', tmuxArgs(socket, args), { timeout: COMMAND_TIMEOUT_MS });
+  const child = exec('tmux', tmuxArgs(socket, args), { timeout: COMMAND_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES });
   if (input !== undefined) child.child.stdin.end(input);
   const { stdout } = await child;
   return stdout;
@@ -27,6 +30,36 @@ export const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-p
 export const readStyledScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-e', '-t', pane]);
 export const pressKey = ({ pane, tmuxSocket }, key) => tmux(tmuxSocket, ['send-keys', '-t', pane, key]);
 
+// Everything a terminal session's shell has printed since its screen was last cleared, coloured, with
+// the lines tmux wrapped joined again. tmux drops what's past its history limit by itself.
+export async function readOutput({ pane, tmuxSocket }) {
+  return { text: await tmux(tmuxSocket, ['capture-pane', '-p', '-e', '-J', '-S', '-', '-E', '-', '-t', pane]), cut: false };
+}
+
+const paneFormat = ({ pane, tmuxSocket }, format) => tmux(tmuxSocket, ['display-message', '-p', '-t', pane, format]).then(out => out.trim());
+
+// Whether a program has the screen to itself, as an editor or a pager does.
+export async function isFullScreen(target) {
+  return (await paneFormat(target, '#{alternate_on}')) === '1';
+}
+
+// A program reading a line without showing it, as a password prompt does. tmux doesn't say, so it's
+// asked of the pane's terminal device, which is the reader's own.
+export async function hidesInput(target) {
+  const tty = await paneFormat(target, '#{pane_tty}');
+  const { stdout } = await exec('stty', ['-a', '-f', tty], { timeout: COMMAND_TIMEOUT_MS });
+  const flags = new Set(stdout.split(/\s+/));
+  return flags.has('icanon') && flags.has('-echo');
+}
+
+export async function resize({ pane, tmuxSocket }, { columns, rows }) {
+  await tmux(tmuxSocket, ['resize-window', '-t', pane, '-x', String(columns), '-y', String(rows)]);
+}
+
+export async function closeSession(name, { tmuxSocket }) {
+  await tmux(tmuxSocket, ['kill-session', '-t', `=${name}`]);
+}
+
 // Always a paste: as send-keys arguments, a leading "-" or trailing ";" would be read by tmux
 // itself instead of reaching Claude.
 export async function paste({ pane, tmuxSocket }, text) {
@@ -35,10 +68,10 @@ export async function paste({ pane, tmuxSocket }, text) {
 }
 
 // Runs a command in a new detached session and returns its pane. The session closes with it.
-export async function startSession({ name, cwd, command, env }) {
+export async function startSession({ name, cwd, command, env, size: { columns = NEW_SESSION_COLUMNS, rows = NEW_SESSION_ROWS } = {} }) {
   const tmuxSocket = env.VENES_TMUX_SOCKET;
   const variables = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
-  const size = ['-x', String(NEW_SESSION_COLUMNS), '-y', String(NEW_SESSION_ROWS)];
+  const size = ['-x', String(columns), '-y', String(rows)];
   try {
     const output = await tmux(tmuxSocket, ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', name, ...size, '-c', cwd, ...variables, '--', ...command]);
     return { pane: output.trim(), tmuxSocket };

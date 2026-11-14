@@ -18,8 +18,10 @@ const SCREEN_BYTES = 32 * 1024;
 const SCREEN_READS = 8;
 const KEYS = {
   Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p', Tab: 'tab', BTab: 'shift+tab',
-  Space: 'space', BSpace: 'backspace',
+  Space: 'space', BSpace: 'backspace', 'C-c': 'ctrl+c',
 };
+// The most of a terminal session's output that's read back at once, from its end.
+const OUTPUT_READ_BYTES = 512 * 1024;
 const PROGRAM_NAME = 'claude';
 // Sessions the helper starts share this one, a window each, because Rex keeps a session in its
 // sidebar after its last window closes.
@@ -46,10 +48,12 @@ async function callBlock(session, method, args) {
   return JSON.parse(await rex(session, ['--autostart=false', 'block', 'call', ...blockTarget(session), method, JSON.stringify(args)]));
 }
 
-async function readFormatted(session, format) {
-  const start = await callBlock(session, 'format', { format, trim: true, max_bytes: SCREEN_BYTES });
-  if (start.id === undefined) return start.content;
-  let offset = Math.max(0, start.total - SCREEN_BYTES);
+// The end of what the terminal holds, up to `bytes` of it, and whether there was more before that.
+async function readFormatted(session, format, { bytes = SCREEN_BYTES, unwrap = false } = {}) {
+  const start = await callBlock(session, 'format', { format, trim: true, unwrap, max_bytes: bytes });
+  if (start.id === undefined) return { content: start.content, cut: false };
+  const first = Math.max(0, start.total - bytes);
+  let offset = first;
   let screen = '';
   for (let reads = 0; reads < SCREEN_READS && offset < start.total; reads++) {
     const { data = '', eof } = await callBlock(session, 'blob_read', { id: start.id, offset, max_bytes: start.total - offset });
@@ -57,12 +61,40 @@ async function readFormatted(session, format) {
     offset += Buffer.byteLength(data);
     if (eof || !data) break;
   }
-  return screen;
+  return { content: screen, cut: first > 0 };
 }
 
-export const readScreen = session => readFormatted(session, 'text');
+export const readScreen = async session => (await readFormatted(session, 'text')).content;
 // With the escape sequences that colour it.
-export const readStyledScreen = session => readFormatted(session, 'vt');
+export const readStyledScreen = async session => (await readFormatted(session, 'vt')).content;
+
+// Everything a terminal session's shell has printed since its screen was last cleared, coloured, with
+// the lines the terminal wrapped joined again. `cut` when the start didn't fit.
+export async function readOutput(session) {
+  const { content, cut } = await readFormatted(session, 'vt', { bytes: OUTPUT_READ_BYTES, unwrap: true });
+  return { text: content, cut };
+}
+
+// Whether a program has the screen to itself, as an editor or a pager does.
+export async function isFullScreen(session) {
+  return (await callBlock(session, 'modes', {})).screen === 'alternate';
+}
+
+// A program reading a line without showing it, as a password prompt does. A shell or a program that
+// edits its own line reads keys one at a time, and shows them itself.
+export async function hidesInput(session) {
+  const mode = await callBlock(session, 'input_mode', {});
+  return mode.canonical === true && mode.echo === false;
+}
+
+// It applies once no one at the Mac is looking at the terminal in a window of their own size.
+export async function resize(session, { columns, rows }) {
+  await callBlock(session, 'resize', { columns, rows });
+}
+
+export async function closeSession(_, target) {
+  await rex(target, ['--autostart=false', 'api', 'call', 'block.close', JSON.stringify({ session_id: target.rexSession, block_id: target.pane })]);
+}
 
 export async function pressKey(session, key) {
   await rex(session, ['--autostart=false', 'send-key', ...blockTarget(session), KEYS[key] ?? key]);

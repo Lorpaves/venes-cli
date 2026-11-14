@@ -21,6 +21,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { HelperClient } from '../src/client.mjs';
+import { CodexLink } from '../src/codexlink.mjs';
 import { RexControl, openPipe } from './rex-client.mjs';
 import { findClaudePanes } from '../src/tmux.mjs';
 import { VERSION } from '../src/version.mjs';
@@ -50,8 +51,13 @@ const AUTHORIZED_KEYS = `${HOME}-authorized_keys`;
 const CLAUDE_SETTINGS = `${HOME}-claude-settings.json`;
 process.env.VENES_CLAUDE_SETTINGS = CLAUDE_SETTINGS;
 // Where a helper here looks for Codex's server: nowhere, so that no run ever lists or touches the
-// threads of this Mac's own Codex. Every helper gets it, the ones a session's hook starts too.
+// threads of this Mac's own Codex. Every helper gets it, the ones a session's hook starts too. A Codex
+// case runs a server of Codex's there for itself: with this Mac's Codex account, which is all a
+// thread can be run with, and in the workspace alone.
 const CODEX_SOCKET = `${HOME}-codex/s.sock`;
+// The model and effort Codex cases run on, to spend as little of that account as a real turn can.
+const CODEX_MODEL = process.env.VENES_E2E_CODEX_MODEL || 'gpt-5.6-luna';
+const CODEX_EFFORT = 'low';
 // Kept between runs, so that a run doesn't download the SDK for each case.
 const SDK_DIR = process.env.VENES_E2E_SDK || `${HOME}-sdk`;
 const RESUME_ARGS = ['--model', MODEL, '--permission-mode', 'default', '--setting-sources', 'project', '--plugin-dir', PLUGIN];
@@ -101,13 +107,64 @@ async function startRexServer() {
 }
 process.on('exit', () => rexServerProcess?.kill());
 
-function startHelper(cli = CLI) {
+// Codex's own server, for one case. It listens where the socket really is, since Codex won't take a
+// path through a link, as /tmp is. What Rex set for the shell this runs from stays out of it, so that
+// Codex's own hooks don't take a test thread for one of that shell's.
+let codexServer;
+async function startCodexServer() {
+  codexTrustedBefore ??= readCodexConfig().includes(codexTrust());
+  const dir = path.dirname(CODEX_SOCKET);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const { REX_SESSION, REX_BLOCK, REX_SERVER: rexServer, ...env } = process.env;
+  codexServer = spawn('codex', ['app-server', '--listen', `unix://${path.join(fs.realpathSync(dir), 's.sock')}`], { env, cwd: WS, stdio: 'ignore' });
+  for (let i = 0; i < 150 && !fs.existsSync(CODEX_SOCKET); i++) await delay(100);
+  if (!fs.existsSync(CODEX_SOCKET)) throw new Error('Codex\'s server did not come up');
+}
+// What a case's threads leave in Codex's own store goes with the case: every thread whose folder is the workspace.
+async function forgetCodexThreads() {
+  const link = await CodexLink.connect(CODEX_SOCKET, { name: 'venes-e2e', title: 'Venes e2e', version: VERSION });
+  try {
+    for (const archived of [false, true]) {
+      const { data = [] } = await link.request('thread/list', { limit: 100, archived, cwd: fs.realpathSync(WS), sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'] });
+      for (const thread of data) await link.request('thread/delete', { threadId: thread.id }).catch(() => {});
+    }
+  } finally {
+    link.close();
+  }
+}
+// Codex's server writes its trust of the workspace into this Mac's own Codex config, once a thread may
+// write there. That's taken back out, unless it was there before the run.
+const CODEX_CONFIG = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
+const codexTrust = () => `[projects.${JSON.stringify(fs.realpathSync(WS))}]\ntrust_level = "trusted"\n`;
+const readCodexConfig = () => { try { return fs.readFileSync(CODEX_CONFIG, 'utf8'); } catch { return ''; } };
+let codexTrustedBefore;
+function forgetCodexTrust() {
+  const config = readCodexConfig();
+  if (codexTrustedBefore || !config.includes(codexTrust())) return;
+  const without = config.replace(`${codexTrust()}\n`, '').replace(codexTrust(), '');
+  fs.writeFileSync(CODEX_CONFIG, without, { mode: fs.statSync(CODEX_CONFIG).mode });
+}
+async function stopCodexServer({ forget = true } = {}) {
+  if (!codexServer) return;
+  if (forget) await forgetCodexThreads().catch(error => console.log(`      codex threads not deleted: ${error.message}`));
+  const gone = new Promise(resolve => { codexServer.once('exit', resolve); });
+  codexServer.kill();
+  await Promise.race([gone, delay(3000)]);
+  codexServer = undefined;
+  fs.rmSync(path.dirname(CODEX_SOCKET), { recursive: true, force: true });
+  if (forget) forgetCodexTrust();
+}
+process.on('exit', () => codexServer?.kill());
+
+function startHelper(cli = CLI, codexStart = undefined) {
   // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
   const env = {
     ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR, VENES_TERMINAL: inRex ? 'rex' : 'tmux',
     VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS, VENES_PUSH_URL: PUSH_URL, VENES_CODEX_SOCKET: CODEX_SOCKET,
     VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
     ...(inRex && { REX_SERVER }),
+    ...(codexStart && { VENES_CODEX_START_ARGS: JSON.stringify(codexStart) }),
   };
   spawn(process.execPath, [cli, 'daemon'], { env, stdio: 'ignore', detached: true }).unref();
 }
@@ -1928,6 +1985,133 @@ if (process.env.VENES_E2E_SSH) T('over_real_ssh', { noHelper: true }, async r =>
   }
 });
 
+// Codex sessions, through a server of Codex's own that the case runs. `codex` is what its threads start
+// with: sandboxed, so that nothing here depends on this Mac's Codex settings, or writes to them.
+async function startCodex(r) {
+  const cwd = fs.realpathSync(WS);
+  assert.equal((await r.client.request('folders')).codex, true, 'the folders say Codex is here');
+  // Codex's server would trust the folder without a word, so the helper asks first.
+  await assert.rejects(r.client.request('start', { cwd, agent: 'codex' }), { code: 'needs_trust' });
+  const { sessionId } = await r.client.request('start', { cwd, agent: 'codex', trust: true });
+  const { models, commands } = await r.client.request('capabilities', { sessionId });
+  assert.deepEqual(commands, []);
+  assert.ok(models.length > 0, 'Codex lists its models');
+  const model = models.find(offer => offer.value === CODEX_MODEL) ?? models.find(offer => offer.isDefault) ?? models[0];
+  await r.client.request('configure', { sessionId, model: model.value, effort: model.effortLevels.includes(CODEX_EFFORT) ? CODEX_EFFORT : model.effortLevels[0] });
+  return { sessionId, model: model.value };
+}
+
+T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-only', approvalPolicy: 'on-request' } }, async r => {
+  const { sessionId, model } = await startCodex(r);
+  const listed = (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
+  assert.deepEqual([listed.agent, listed.status, listed.model, listed.pane], ['codex', 'idle', model, null]);
+  assert.equal((await r.kind('session.discovered')).agent, 'codex');
+  assert.equal((await r.kind('session.started')).source, 'startup');
+
+  r.mark();
+  assert.deepEqual({ ...(await r.client.request('send', { sessionId, text: 'Reply with exactly: OK', clientId: 'c1' })), id: 0 }, { type: 'result', id: 0, ok: true, queued: false });
+  const sent = await r.kind('message.user', 30000);
+  assert.deepEqual([sent.text, sent.clientId, sent.shell], ['Reply with exactly: OK', 'c1', undefined]);
+  const end = await r.turnEnd(90000);
+  assert.match(end.lastMessage, /OK/);
+  const deltas = r.events.filter(event => event.kind === 'message.assistant.delta');
+  assert.match(deltas.map(event => event.text).join(''), /OK/, 'the reply came as it was written');
+  assert.equal(deltas.at(-1).final, true);
+  assert.deepEqual(r.events.filter(event => event.kind === 'session.status').map(event => event.status), ['running', 'idle']);
+
+  const { status } = await r.client.request('statusLine', { sessionId });
+  assert.equal(status.model, model);
+  assert.equal(status.effort, CODEX_EFFORT);
+  assert.ok(status.context.percent > 0 && status.context.used > 0 && status.context.size > status.context.used, 'the context after a reply');
+
+  // A line run with ! is the reader's own, and Codex has nothing to say to it. The turn before it has
+  // been over long enough by then to be history.
+  await delay(2200);
+  r.mark();
+  await r.client.request('send', { sessionId, text: '!echo venes-e2e', clientId: 'c2' });
+  const line = await r.kind('message.user', 15000);
+  assert.deepEqual([line.text, line.clientId, line.shell], ['!echo venes-e2e', 'c2', true]);
+  const printed = await r.kind('message.output', 15000);
+  assert.deepEqual([printed.stdout, printed.stderr, printed.replies, printed.clientId], ['venes-e2e\n', '', false, 'c2']);
+  // To a client that joins in the next two seconds, the line is what's going on now.
+  const during = await r.client.request('join', { sessionId });
+  assert.deepEqual(during.turn.map(event => event.kind), ['message.user', 'message.output']);
+  assert.deepEqual(during.items.map(item => item.role), ['user', 'assistant', 'turn_end']);
+  await delay(2500);
+  assert.ok(!r.events.some(event => event.kind === 'turn.end' || event.kind === 'session.status'), 'no turn, and nothing at work');
+
+  const joined = await r.client.request('join', { sessionId });
+  assert.deepEqual(joined.turn, []);
+  assert.deepEqual(joined.items.map(item => item.role), ['user', 'assistant', 'turn_end', 'user', 'output']);
+  assert.deepEqual([joined.items[0].text, joined.items[0].clientId], ['Reply with exactly: OK', 'c1']);
+  assert.match(joined.items[1].text, /OK/);
+  assert.deepEqual([joined.items[3].text, joined.items[3].shell, joined.items[4].stdout, joined.items[4].replies], ['!echo venes-e2e', true, 'venes-e2e\n', false]);
+  assert.equal(joined.sessions[0].agent, 'codex');
+  const { items } = await r.client.request('library', { limit: 5 });
+  const stored = items.find(item => item.id === sessionId);
+  assert.deepEqual([stored.agent, stored.status, stored.cwd], ['codex', 'idle', fs.realpathSync(WS)]);
+
+  // Codex's server gone and back, the thread is stored and no longer going on. A message loads it again.
+  r.mark();
+  await stopCodexServer({ forget: false });
+  assert.equal((await r.kind('session.ended', 15000)).sessionId, sessionId);
+  await startCodexServer();
+  const again = await r.client.request('join', { sessionId });
+  assert.deepEqual([again.sessions[0].status, again.items.length, again.turn.length], ['ended', 5, 0]);
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'Reply with exactly: AGAIN', clientId: 'c3' });
+  assert.equal((await r.kind('session.started', 30000)).source, 'resume');
+  assert.match((await r.turnEnd(90000)).lastMessage, /AGAIN/);
+
+  r.mark();
+  await r.client.request('delete', { sessionId });
+  await r.kind('session.deleted', 10000);
+  assert.ok(!(await r.client.request('library', { limit: 5 })).items.some(item => item.id === sessionId), 'gone from Codex too');
+});
+
+T('codex_asks_before_it_runs_a_command_and_can_be_stopped', { codex: { sandbox: 'workspace-write', approvalPolicy: 'untrusted' } }, async r => {
+  const { sessionId } = await startCodex(r);
+  const touch = name => `Run the shell command \`touch ${name}\` and nothing else, then reply with exactly: DONE`;
+
+  r.mark();
+  await r.client.request('send', { sessionId, text: touch('e2e-codex-1.txt'), clientId: 'c1' });
+  const request = await r.request('permission', 90000);
+  assert.deepEqual([request.agent, request.toolName, request.sessionId], ['codex', 'commandExecution', sessionId]);
+  assert.match(request.input.command, /touch e2e-codex-1\.txt/);
+  assert.ok(Array.isArray(request.options) && request.options.every(option => option.id && /^Yes, /.test(option.label)), 'its other ways of saying yes, in Codex\'s words');
+  assert.equal((await r.client.request('sessions')).sessions.find(session => session.id === sessionId).status, 'waiting');
+  const started = r.events.find(event => event.kind === 'tool.start' && event.toolUseId === request.toolUseId);
+  assert.equal(started.name, 'commandExecution');
+  assert.ok(!exists('e2e-codex-1.txt'), 'nothing ran before the answer');
+  await r.client.request('respond', { requestId: request.id, decision: 'allow' });
+  assert.equal((await r.closed(request.id)).by, 'client');
+  const ran = await r.wait(event => event.kind === 'tool.end' && event.toolUseId === request.toolUseId, 60000, 'the command\'s end');
+  assert.deepEqual([ran.name, ran.isError, ran.response.status, ran.response.exitCode], ['commandExecution', false, 'completed', 0]);
+  await r.turnEnd(90000);
+  assert.ok(exists('e2e-codex-1.txt'), 'the command ran once allowed');
+
+  // A no stops the turn, as Codex's terminal does, and what to do instead is the next thing it hears.
+  r.mark();
+  await r.client.request('send', { sessionId, text: touch('e2e-codex-2.txt'), clientId: 'c2' });
+  const second = await r.request('permission', 90000);
+  await r.client.request('respond', { requestId: second.id, decision: 'deny', message: 'Reply with exactly: STOPPED' });
+  await r.kind('turn.interrupted', 30000);
+  const next = await r.wait(event => event.kind === 'message.user' && event.text === 'Reply with exactly: STOPPED', 30000, 'what to do instead');
+  assert.equal(next.clientId, undefined);
+  assert.match((await r.turnEnd(90000)).lastMessage, /STOPPED/);
+  assert.ok(!exists('e2e-codex-2.txt'), 'what was turned down never ran');
+
+  // A turn going on is stopped from here.
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'Count from 1 to 400, one number on each line, with nothing else.', clientId: 'c3' });
+  await r.kind('message.assistant.delta', 60000);
+  await r.client.request('interrupt', { sessionId });
+  await r.kind('turn.interrupted', 30000);
+  assert.equal((await r.client.request('sessions')).sessions.find(session => session.id === sessionId).status, 'idle');
+  await assert.rejects(r.client.request('interrupt', { sessionId }), { code: 'not_running' });
+  await r.client.request('delete', { sessionId });
+});
+
 Run.prototype.waitForPane = async function waitForPane(re, ms) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (re.test(this.pane())) return; await delay(150); }
@@ -1949,14 +2133,16 @@ async function runCase(name) {
       if (opts.before) (await connect()).close();
       run = new Run({ on() {} });
     } else {
-      startHelper();
+      if (opts.codex) await startCodexServer();
+      startHelper(CLI, opts.codex);
       client = await connect();
       run = new Run(client);
       await client.request('subscribe');
     }
+    // A Codex case has no Claude Code session to wait for.
     if (opts.rex) launchInRex(opts);
-    else launch(opts);
-    await ready(run);
+    else if (!opts.codex) launch(opts);
+    if (!opts.codex) await ready(run);
     await fn(run);
     console.log(`ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
     return true;
@@ -1970,6 +2156,7 @@ async function runCase(name) {
     await delay(500);
     client?.close();
     await stopHelper();
+    await stopCodexServer();
     inRex = undefined;
   }
 }

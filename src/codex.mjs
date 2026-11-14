@@ -27,6 +27,8 @@ const DEFAULT_HISTORY_LIMIT = 50;
 // Turns asked for at a time, while a page of history fills. A turn can be hundreds of items long, so
 // it's a few, and a page is whole turns either way.
 const TURNS_PER_READ = 5;
+// The turns a thread's events are kept track of by, which is more than the event log can hold of one session's.
+const TURNS_TRACKED = 32;
 // The stored threads listed with the library's first page.
 const LISTED_THREADS = 100;
 // A connection that drops is tried again this often, this many times, before its sessions are taken to be over.
@@ -285,6 +287,16 @@ const REQUESTS = {
   'item/tool/requestUserInput': params => questionRequest(params),
 };
 
+// The turns some of a session's events are of, so that history doesn't tell them again: the one the
+// first of them is in, and every one after. A turn that just ended still counts as going on to a
+// client that joins, and the next can have started by then.
+export function turnsOf(events, turnStarts = []) {
+  if (!events.length) return new Set();
+  const [{ seq: first }] = events;
+  const within = turnStarts.findLastIndex(turn => turn.after < first);
+  return new Set(turnStarts.slice(Math.max(within, 0)).map(turn => turn.id));
+}
+
 const statusOf = status => (status?.type === 'active' ? (status.activeFlags?.length ? 'waiting' : 'running') : 'idle');
 
 // How long Codex's word on the account's limits is good for, between its own notices of them.
@@ -314,6 +326,8 @@ function blankThread() {
     isSubscribed: false, turnId: undefined, messages: new Map(), tools: new Map(), items: new Set(), sent: new Map(), requests: new Map(),
     // The lines run with `!` that were sent and haven't started, and the ones running, each with its send.
     shells: [], lines: new Map(),
+    // The latest turns, each with the last event before it began, to tell which turns some events are of.
+    turnStarts: [],
   };
 }
 
@@ -544,7 +558,8 @@ export class Codex {
         break;
       case 'turn/started':
         thread.turnId = params.turn?.id;
-        thread.lastTurnId = thread.turnId;
+        thread.turnStarts.push({ id: thread.turnId, after: this.#store.seq });
+        if (thread.turnStarts.length > TURNS_TRACKED) thread.turnStarts.shift();
         thread.isPartial = false;
         // A line run with `!` is a turn of its own to Codex, with nothing at work in it, so a turn is
         // only said to be running once something other than such a line is in it.
@@ -737,7 +752,8 @@ export class Codex {
     const folder = checkedFolder(cwd);
     if (trust !== true && !this.#trusts(folder)) throw new HelperError('needs_trust', 'Codex trusts a folder once a session starts in it.');
     const link = await this.#open({ start: true });
-    const started = await link.request('thread/start', { cwd: folder });
+    // A test run starts its threads sandboxed, whatever this Mac's own Codex settings are.
+    const started = await link.request('thread/start', { cwd: folder, ...JSON.parse(process.env.VENES_CODEX_START_ARGS ?? '{}') });
     // Whoever starts a thread hears all of it from then on.
     const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined });
     thread.isSubscribed = true;
@@ -829,9 +845,9 @@ export class Codex {
   }
 
   // A page of what was said, oldest first, read back a few turns at a time until it's long enough.
-  // It always starts where a turn does. `skip` is a turn left out, as the one going on is when its
+  // It always starts where a turn does. `skip` are turns left out, as the one going on is when its
   // events tell it better.
-  async #page(link, threadId, { limit = DEFAULT_HISTORY_LIMIT, cursor, skip }) {
+  async #page(link, threadId, { limit = DEFAULT_HISTORY_LIMIT, cursor, skip = new Set() }) {
     const turns = [];
     let count = 0;
     let next = cursor ?? null;
@@ -843,7 +859,7 @@ export class Codex {
           throw error;
         });
       for (const turn of read.data ?? []) {
-        if (turn.id === skip) continue;
+        if (skip.has(turn.id)) continue;
         const items = historyOf(turn);
         turns.unshift(items);
         count += items.length;
@@ -879,8 +895,7 @@ export class Codex {
     const thread = this.#threads.get(sessionId);
     // A turn joined part way is told by what's stored of it, and its events from here on.
     const turn = isLive && !thread?.isPartial ? this.#store.openTurn(session) : [];
-    // The turn those events are of, which can have just ended, isn't told twice.
-    const page = await this.#page(link, sessionId, { limit, skip: turn.length ? thread?.turnId ?? thread?.lastTurnId : undefined });
+    const page = await this.#page(link, sessionId, { limit, skip: turnsOf(turn, thread?.turnStarts) });
     if (isLive) {
       return {
         ...page, turn, queued: [], seq,

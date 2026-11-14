@@ -5,7 +5,7 @@ import os from 'node:os';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
   Codex, approvalRequest, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, modelsOf, permissionsRequest, questionRequest,
-  shellWords, statusLineOf, textOf, thinkingOf, trustedFolders, unwrapped,
+  shellWords, statusLineOf, textOf, thinkingOf, trustedFolders, turnsOf, unwrapped,
 } from '../../src/codex.mjs';
 
 const FOLDER = os.homedir();
@@ -628,6 +628,30 @@ test('joining one with a turn going gives that turn as its events, and the rest 
   assert.equal(joined.sessions[0].status, 'waiting');
   assert.equal(joined.requests.length, 1);
   assert.equal(joined.seq, store.seq);
+});
+
+test('the turns some events are of are the one the first is in, and every one after', () => {
+  const starts = [{ id: 'a', after: 10 }, { id: 'b', after: 20 }, { id: 'c', after: 30 }];
+  assert.deepEqual([...turnsOf([], starts)], []);
+  assert.deepEqual([...turnsOf([{ seq: 31 }, { seq: 32 }], starts)], ['c']);
+  assert.deepEqual([...turnsOf([{ seq: 25 }, { seq: 31 }], starts)], ['b', 'c']);
+  assert.deepEqual([...turnsOf([{ seq: 11 }], starts)], ['a', 'b', 'c']);
+  // Events from before any turn the helper heard start, which leaves every turn it did hear to them.
+  assert.deepEqual([...turnsOf([{ seq: 5 }], starts)], ['a', 'b', 'c']);
+  assert.deepEqual([...turnsOf([{ seq: 5 }])], []);
+});
+
+test('a turn that just ended and the one after it are both told as events, and neither twice', async () => {
+  const { codex, sessionId, server, say } = await running();
+  say('item/completed', { item: { type: 'agentMessage', id: 'm1', text: 'First.', phase: 'final_answer' } });
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  // The next turn starts within the two seconds a finished one still counts as going on.
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-2' } });
+  server.say('item/started', { threadId: sessionId, turnId: 'turn-2', item: { type: 'userMessage', id: 'u2', clientId: 'c2', content: [{ type: 'text', text: 'and then' }] } });
+  server.turns.set(sessionId, [turnOf(0), { ...turnOf(1), id: 'turn-1' }, { ...turnOf(2, 'inProgress'), id: 'turn-2' }]);
+  const joined = await codex.join({ sessionId });
+  assert.deepEqual(joined.items.map(item => item.text ?? item.role), ['ask 0', 'reply 0', 'turn_end']);
+  assert.deepEqual(joined.turn.filter(event => event.kind === 'message.user').map(event => event.text), ['do it', 'and then']);
 });
 
 test('a session runs on what the reader chose from its next turn', async () => {

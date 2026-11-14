@@ -4,8 +4,8 @@ import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  Codex, approvalRequest, historyOf, inputOf, isListed, isTool, isTrustedByCodex, libraryItem, modelsOf, permissionsRequest, questionRequest, textOf, thinkingOf,
-  statusLineOf, trustedFolders,
+  Codex, approvalRequest, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, modelsOf, permissionsRequest, questionRequest,
+  shellWords, statusLineOf, textOf, thinkingOf, trustedFolders, unwrapped,
 } from '../../src/codex.mjs';
 
 const FOLDER = os.homedir();
@@ -65,6 +65,7 @@ function fakeCodex() {
     },
     'turn/start': () => ({ turn: { id: 'turn', status: 'inProgress', items: [] } }),
     'turn/steer': () => ({}),
+    'thread/shellCommand': () => ({}),
     'turn/interrupt': () => ({}),
     'model/list': () => ({ data: server.models }),
     'account/rateLimits/read': () => ({ rateLimits: server.limits }),
@@ -763,4 +764,102 @@ test('a session\'s status has its context after a reply, and the limits asked fo
   const after = (await codex.status({ sessionId })).status;
   assert.deepEqual([after.context, after.fiveHour, after.sevenDay], [{ percent: 10, used: 1000, size: 10_000 }, { percent: 13 }, undefined]);
   assert.equal(server.called('account/rateLimits/read').length, 1);
+});
+
+const shellLine = (fields = {}) => command({ id: 'line-1', command: "/bin/zsh -lc 'ls -la'", source: 'userShell', ...fields });
+
+test('a command line comes apart as a shell would take it', () => {
+  assert.deepEqual(shellWords("a 'b c' d\\ e \"f g\""), ['a', 'b c', 'd e', 'f g']);
+  assert.deepEqual(shellWords('say "it\'s \\"here\\"" \'\''), ['say', 'it\'s "here"', '']);
+  assert.deepEqual(shellWords('  '), []);
+});
+
+test('a line run with ! is the command as it was typed, out of the shell Codex runs it in', () => {
+  // As Codex's server gave them for `echo venes-shell; ls /no/such/place` and `printf "it's \"quoted\"\n"`.
+  assert.equal(unwrapped("/bin/zsh -lc 'echo venes-shell; ls /no/such/place'"), 'echo venes-shell; ls /no/such/place');
+  assert.equal(unwrapped('/bin/zsh -lc "printf \\"it\'s \\\\\\"quoted\\\\\\"\\\\n\\""'), 'printf "it\'s \\"quoted\\"\\n"');
+  assert.equal(unwrapped('/bin/zsh -lc ls'), 'ls');
+  assert.equal(unwrapped('/bin/bash -lc "git status"'), 'git status');
+  // Anything else is left as it is.
+  assert.equal(unwrapped('git status'), 'git status');
+  assert.equal(unwrapped('/usr/bin/env -lc ls'), '/usr/bin/env -lc ls');
+  assert.equal(isShellLine(shellLine()), true);
+  assert.equal(isShellLine(command()), false);
+});
+
+test('a stored line run with ! is the reader\'s, with what it printed, and no reply to end', () => {
+  const alone = historyOf({ id: 't', status: 'completed', startedAt: 1_700_000_000, durationMs: 40, items: [shellLine({ status: 'failed', aggregatedOutput: 'ls: nope\n', exitCode: 1 })] });
+  assert.deepEqual(alone, [
+    { role: 'user', at: '2023-11-14T22:13:20.000Z', text: '!ls -la', shell: true },
+    { role: 'output', at: '2023-11-14T22:13:20.000Z', stdout: 'ls: nope\n', stderr: '', replies: false },
+  ]);
+  // One run during a turn is answered by that turn's reply.
+  const within = historyOf({
+    id: 't', status: 'completed', durationMs: 900, items: [
+      { type: 'userMessage', id: 'u', content: [{ type: 'text', text: 'look' }] }, shellLine({ aggregatedOutput: null }),
+      { type: 'agentMessage', id: 'm', text: 'I see.', phase: 'final_answer' },
+    ],
+  });
+  assert.deepEqual(within.map(item => [item.role, item.replies]), [['user', undefined], ['user', undefined], ['output', true], ['assistant', undefined], ['turn_end', undefined]]);
+  assert.equal(within[2].stdout, '');
+});
+
+test('a line that starts with ! is run in the reader\'s shell, and comes back as theirs', async () => {
+  const { codex, store, server, events, last, kinds } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  const before = events.length;
+  assert.deepEqual(await codex.send({ sessionId, text: '! ls -la', clientId: 'c1' }), { queued: false });
+  assert.deepEqual(server.called('thread/shellCommand'), [{ threadId: sessionId, command: 'ls -la' }]);
+  assert.equal(server.called('turn/start').length, 0);
+  const say = (method, params) => server.say(method, { threadId: sessionId, turnId: 'turn-s', ...params });
+  say('turn/started', { turn: { id: 'turn-s' } });
+  say('item/started', { item: shellLine() });
+  assert.deepEqual({ ...last('message.user'), seq: 0, at: 0 }, { seq: 0, at: 0, sessionId, kind: 'message.user', text: '!ls -la', clientId: 'c1', shell: true });
+  say('item/completed', { item: shellLine({ status: 'completed', aggregatedOutput: 'total 0\n', exitCode: 0 }) });
+  assert.deepEqual({ ...last('message.output'), seq: 0, at: 0 }, { seq: 0, at: 0, sessionId, kind: 'message.output', stdout: 'total 0\n', stderr: '', replies: false, clientId: 'c1' });
+  say('turn/completed', { turn: { id: 'turn-s', status: 'completed' } });
+  // Nothing was at work, so nothing says it was, and no turn is said to have ended.
+  assert.deepEqual(kinds().slice(before), ['message.user', 'message.output']);
+  assert.equal(store.get(sessionId).status, 'idle');
+  assert.equal(store.get(sessionId).lastPrompt, '!ls -la');
+  assert.deepEqual(store.openTurn(store.get(sessionId), Date.now() + 10_000), []);
+});
+
+test('one typed at Codex\'s own terminal has no send to name, and one only heard of at its end is still told', async () => {
+  const { codex, server, events } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  const before = events.length;
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-s' } });
+  server.say('item/completed', { threadId: sessionId, item: shellLine({ status: 'completed', aggregatedOutput: 'x\n' }) });
+  assert.deepEqual(events.slice(before).map(event => [event.kind, event.text ?? event.stdout, event.clientId]), [['message.user', '!ls -la', undefined], ['message.output', 'x\n', undefined]]);
+});
+
+test('a line run with ! during a turn is answered by that turn', async () => {
+  const { codex, sessionId, server, say, last, kinds } = await running();
+  await codex.send({ sessionId, text: '!ls -la', clientId: 'c2' });
+  assert.equal(server.called('turn/steer').length, 0);
+  say('item/started', { item: shellLine() });
+  say('item/completed', { item: shellLine({ status: 'completed', aggregatedOutput: 'total 0\n' }) });
+  assert.deepEqual([last('message.output').replies, last('message.output').clientId], [true, 'c2']);
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  assert.equal(kinds().at(-1), 'turn.end');
+});
+
+test('a line with nothing after its ! isn\'t run, and one Codex won\'t run fails', async () => {
+  const { codex, server } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  await assert.rejects(codex.send({ sessionId, text: '!  ' }), error => error.code === 'bad_text');
+  server.fails['thread/shellCommand'] = 'thread is archived';
+  await assert.rejects(codex.send({ sessionId, text: '!ls', clientId: 'c1' }), error => error.code === 'send_failed');
+  // Its send isn't waited for: the same line typed later at the terminal is nobody's.
+  server.say('item/started', { threadId: sessionId, item: shellLine({ command: '/bin/zsh -lc ls' }) });
+  assert.equal(server.called('thread/shellCommand').length, 1);
+});
+
+test('a line with a file attached is a message, since a shell takes none', async () => {
+  const { codex, server } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  await codex.send({ sessionId, text: '!look', attachments: [{ uploadId: 'u', name: 'a.png', mediaType: 'image/png', size: 1, kind: 'image', path: '/d/a.png' }] });
+  assert.equal(server.called('thread/shellCommand').length, 0);
+  assert.equal(server.called('turn/start').length, 1);
 });

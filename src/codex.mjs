@@ -93,6 +93,44 @@ const TALK = new Set([
 export const isTool = item => !TALK.has(item.type);
 const isFailed = item => item.status === 'failed' || item.status === 'declined';
 
+// A line the reader ran with `!`, which Codex keeps as a command of the reader's own, and not its own doing.
+export const isShellLine = item => item.type === 'commandExecution' && item.source === 'userShell';
+
+// The words of a command line, as a shell would take it apart: quotes taken off, and what a backslash
+// keeps, kept.
+export function shellWords(text) {
+  const words = [];
+  let word;
+  let quote;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (quote === '\'') {
+      if (char === '\'') quote = undefined;
+      else word += char;
+    } else if (quote === '"') {
+      if (char === '"') quote = undefined;
+      else if (char === '\\' && '"\\$`\n'.includes(text[at + 1])) word += text[++at];
+      else word += char;
+    } else if (char === '\'' || char === '"') {
+      quote = char;
+      word ??= '';
+    } else if (char === '\\' && at + 1 < text.length) word = (word ?? '') + text[++at];
+    else if (/\s/.test(char)) {
+      if (word !== undefined) words.push(word);
+      word = undefined;
+    } else word = (word ?? '') + char;
+  }
+  if (word !== undefined) words.push(word);
+  return words;
+}
+
+// The command as the reader typed it. Codex runs it as a login shell's script, and gives it wrapped
+// that way: `/bin/zsh -lc 'ls'`.
+export function unwrapped(command) {
+  const words = shellWords(command);
+  return words.length === 3 && words[1] === '-lc' && /(^|\/)(zsh|bash|sh)$/.test(words[0]) ? words[2] : command;
+}
+
 // What a message says, without what came with it.
 export function textOf(content = []) {
   return content.filter(part => part.type === 'text').map(part => part.text).join('\n');
@@ -126,8 +164,13 @@ const shownUpload = ({ uploadId, name, mediaType, size }) => ({ uploadId, name, 
 export function historyOf(turn) {
   const at = turn.startedAt ? new Date(turn.startedAt * 1000).toISOString() : undefined;
   const items = [];
+  // A turn that's nothing but lines run with `!` has no reply to wait for, and no end of its own to tell.
+  const isShellTurn = (turn.items ?? []).length > 0 && turn.items.every(isShellLine);
   for (const item of turn.items ?? []) {
-    if (item.type === 'userMessage') items.push({ role: 'user', at, text: textOf(item.content), ...(item.clientId && { clientId: item.clientId }) });
+    if (isShellLine(item)) {
+      items.push({ role: 'user', at, text: `!${unwrapped(item.command)}`, shell: true });
+      items.push({ role: 'output', at, stdout: item.aggregatedOutput ?? '', stderr: '', replies: !isShellTurn });
+    } else if (item.type === 'userMessage') items.push({ role: 'user', at, text: textOf(item.content), ...(item.clientId && { clientId: item.clientId }) });
     else if (item.type === 'agentMessage') {
       if (item.text) items.push({ role: 'assistant', at, text: item.text, ...(item.phase && { phase: item.phase }) });
     } else if (item.type === 'reasoning') {
@@ -137,7 +180,7 @@ export function historyOf(turn) {
     else if (isTool(item)) items.push({ role: 'tool', at, toolUseId: item.id, name: item.type, input: item, result: item, isError: isFailed(item) });
   }
   if (turn.status === 'interrupted') items.push({ role: 'system', at, kind: 'interrupted' });
-  else if (turn.status === 'completed' || turn.status === 'failed') items.push({ role: 'turn_end', at, durationMs: turn.durationMs ?? undefined });
+  else if (!isShellTurn && (turn.status === 'completed' || turn.status === 'failed')) items.push({ role: 'turn_end', at, durationMs: turn.durationMs ?? undefined });
   return items;
 }
 
@@ -267,7 +310,11 @@ export function statusLineOf({ session, usage, limits, branch, at = Date.now() }
 }
 
 function blankThread() {
-  return { isSubscribed: false, turnId: undefined, messages: new Map(), tools: new Map(), items: new Set(), sent: new Map(), requests: new Map() };
+  return {
+    isSubscribed: false, turnId: undefined, messages: new Map(), tools: new Map(), items: new Set(), sent: new Map(), requests: new Map(),
+    // The lines run with `!` that were sent and haven't started, and the ones running, each with its send.
+    shells: [], lines: new Map(),
+  };
 }
 
 export class Codex {
@@ -499,12 +546,15 @@ export class Codex {
         thread.turnId = params.turn?.id;
         thread.lastTurnId = thread.turnId;
         thread.isPartial = false;
-        report('session.status', { status: 'running' });
+        // A line run with `!` is a turn of its own to Codex, with nothing at work in it, so a turn is
+        // only said to be running once something other than such a line is in it.
+        thread.isShellTurn = true;
         break;
       case 'item/started':
         this.#onItemStarted(threadId, thread, params);
         break;
       case 'item/agentMessage/delta': {
+        this.#atWork(threadId, thread);
         const message = this.#messageOf(thread, params.itemId);
         report('message.assistant.delta', {
           messageId: params.itemId, turnId: params.turnId, index: message.index++, text: params.delta, final: false, ...(message.phase && { phase: message.phase }),
@@ -532,6 +582,34 @@ export class Codex {
     }
   }
 
+  // The turn has more in it than lines run with `!`, so Codex is at work.
+  #atWork(threadId, thread) {
+    if (!thread.isShellTurn) return;
+    thread.isShellTurn = false;
+    this.#store.report(threadId, 'session.status', { status: 'running' });
+  }
+
+  // A line run with `!`, from here or from Codex's own terminal: the line as it was typed, and then what
+  // it printed. Codex answers it only when it ran during a turn, whose reply then takes it in.
+  #onShellStarted(threadId, thread, item) {
+    if (thread.lines.has(item.id)) return;
+    const command = unwrapped(item.command);
+    const sent = thread.shells.findIndex(line => line.command === command);
+    const clientId = sent >= 0 ? thread.shells.splice(sent, 1)[0].clientId : undefined;
+    thread.lines.set(item.id, { clientId });
+    const text = `!${command}`;
+    this.#store.report(threadId, 'message.user', { text, clientId, shell: true }, { lastPrompt: text });
+  }
+
+  #onShellCompleted(threadId, thread, item) {
+    this.#onShellStarted(threadId, thread, item);
+    const { clientId } = thread.lines.get(item.id);
+    thread.lines.delete(item.id);
+    this.#store.report(threadId, 'message.output', {
+      stdout: item.aggregatedOutput ?? '', stderr: '', replies: !thread.isShellTurn, ...(clientId && { clientId }),
+    });
+  }
+
   #messageOf(thread, itemId, phase) {
     if (!thread.messages.has(itemId)) thread.messages.set(itemId, { index: 0, phase: phase ?? undefined });
     return thread.messages.get(itemId);
@@ -551,6 +629,11 @@ export class Codex {
   }
 
   #onItemStarted(threadId, thread, { item }) {
+    if (isShellLine(item)) {
+      this.#onShellStarted(threadId, thread, item);
+      return;
+    }
+    this.#atWork(threadId, thread);
     if (item.type === 'userMessage') this.#onUserMessage(threadId, thread, item);
     else if (item.type === 'agentMessage') this.#messageOf(thread, item.id, item.phase);
     else if (item.type === 'contextCompaction') this.#store.report(threadId, 'compact.start', { trigger: 'auto' });
@@ -564,6 +647,11 @@ export class Codex {
 
   #onItemCompleted(threadId, thread, { item, turnId }) {
     const report = (kind, data, fields) => this.#store.report(threadId, kind, data, fields);
+    if (isShellLine(item)) {
+      this.#onShellCompleted(threadId, thread, item);
+      return;
+    }
+    this.#atWork(threadId, thread);
     if (item.type === 'userMessage') this.#onUserMessage(threadId, thread, item);
     else if (item.type === 'agentMessage') {
       const message = this.#messageOf(thread, item.id, item.phase);
@@ -590,6 +678,10 @@ export class Codex {
     const session = this.#store.find(threadId);
     const report = (kind, data) => this.#store.report(threadId, kind, data);
     const isInterrupted = turn.status === 'interrupted';
+    // One that was nothing but lines run with `!` was never said to be running, and has no end to tell.
+    const isShellTurn = thread.isShellTurn === true && !isInterrupted;
+    thread.isShellTurn = false;
+    thread.lines.clear();
     thread.turnId = undefined;
     thread.isPartial = false;
     thread.messages.clear();
@@ -599,6 +691,7 @@ export class Codex {
     for (const [toolUseId, { name }] of thread.tools) report('tool.end', { toolUseId, name, isError: true, interrupted: true });
     thread.tools.clear();
     report('session.status', { status: 'idle' });
+    if (isShellTurn) return;
     if (isInterrupted) report('turn.interrupted', {});
     else if (turn.status === 'failed') report('turn.error', { error: turn.error?.message, details: turn.error?.additionalDetails ?? turn.error?.codexErrorInfo ?? undefined });
     else report('turn.end', { lastMessage: session?.lastMessage, backgroundTasks: 0, tasks: [] });
@@ -691,6 +784,10 @@ export class Codex {
   // What the reader chose for it to run on goes with the turn that starts, and holds from then on.
   async deliver(session, { text, clientId, attachments = [] }) {
     const { link, thread } = await this.#live(session.id);
+    if (!attachments.length && text.startsWith('!')) {
+      await this.#runLine(link, thread, session.id, { command: text.slice(1).trim(), clientId });
+      return;
+    }
     const input = inputOf(text, attachments);
     if (clientId) thread.sent.set(clientId, { text, attachments: attachments.map(shownUpload) });
     const about = { threadId: session.id, input, ...(clientId && { clientUserMessageId: clientId }) };
@@ -706,6 +803,21 @@ export class Codex {
     } catch (error) {
       if (clientId) thread.sent.delete(clientId);
       throw new HelperError('send_failed', `Codex didn't take the message: ${error.message}`);
+    }
+  }
+
+  // A line that starts with `!` is the reader's own command, which Codex runs in their shell, outside its
+  // sandbox and with no approval asked, as it does one typed that way in its terminal. It comes back as
+  // the command Codex ran, which is how its send is told.
+  async #runLine(link, thread, threadId, { command, clientId }) {
+    if (!command) throw new HelperError('bad_text', 'Nothing to run.');
+    const line = { command, clientId };
+    thread.shells.push(line);
+    try {
+      await link.request('thread/shellCommand', { threadId, command });
+    } catch (error) {
+      thread.shells = thread.shells.filter(other => other !== line);
+      throw new HelperError('send_failed', `Codex didn't run the line: ${error.message}`);
     }
   }
 

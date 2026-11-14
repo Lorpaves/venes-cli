@@ -263,7 +263,7 @@ A Codex session is told with the events and commands a Claude Code session has, 
 | Command | For a Codex session |
 |---|---|
 | `start` | With `agent: "codex"`: a new thread in `cwd`, run as your own Codex settings say, as it would be in your terminal. Codex's server trusts the folder from then on without asking, where its terminal would ask, so a folder Codex doesn't trust yet (`[projects."…"]` in `~/.codex/config.toml`, for the folder or the repository it's in) fails with `needs_trust` until `trust: true`. It starts the daemon if it isn't running, and fails with `no_codex` when Codex isn't installed. |
-| `send` | Starts a turn, or, during one, goes into it for Codex to read between its steps (`lane: "next"`, or none). `later` is held by the helper until the turn ends. A stored session is loaded by its first message. A picture goes as an image, and any other file by its path at the head of the text. |
+| `send` | Starts a turn, or, during one, goes into it for Codex to read between its steps (`lane: "next"`, or none). `later` is held by the helper until the turn ends. A stored session is loaded by its first message. A picture goes as an image, and any other file by its path at the head of the text. A line that starts with `!` is run in your shell. See below. |
 | `interrupt` | Stops the turn |
 | `join`, `history` | The same replies, read from Codex's stored turns a few at a time, so a page is whole turns. `before` is a number the helper gives out, good until it restarts. |
 | `capabilities` | `models` from Codex's own list, each with its `effortLevels`. `commands` is empty: Codex's slash commands are its terminal's own. |
@@ -279,6 +279,8 @@ A Codex session is told with the events and commands a Claude Code session has, 
 
 Everything else Codex does is a `tool.start` and a `tool.end`, named after the kind of item it is in Codex's protocol: `commandExecution`, `fileChange`, `mcpToolCall`, `dynamicToolCall`, `webSearch`, `imageView`, `imageGeneration`, `collabAgentToolCall`, `sleep` and so on. `toolUseId` is the item's id, `input` is the item as Codex first gave it, and `response` is the item once it's done, with all it has by then: a command's `aggregatedOutput` and `exitCode`, a file change's `changes`. `isError` is set for one that `failed` or was `declined`. History's `tool` items have the stored item as both `input` and `result`. Codex's notes of a subagent starting and stopping (`subAgentActivity`) aren't sent: its calls to the subagent say as much.
 
+A line that starts with `!` is your own command, as in Codex's terminal: `send` has Codex run it in your shell, outside its sandbox and with no approval asked. It comes back as it does for Claude Code, and so does one typed with `!` at Codex's terminal: `message.user` with `shell: true` and the line as typed, with the send's `clientId` when it came from one, then `message.output` with what it printed in `stdout`, `stderr` empty, and `replies`. Codex doesn't answer a line run by itself, so `replies` is false, the session is never `running` for it, and no `turn.end` follows. One run during a turn is taken in by that turn's reply, and has `replies: true`. In history it's a `user` item with `shell: true` and an `output` item, as for Claude Code.
+
 `plan.updated` is Codex's plan as it stands, whole each time: `explanation`, and `plan`, a list of `{step, status}` with a status of `pending`, `inProgress` or `completed`.
 
 **Requests.** Codex asks every client of a thread, and takes the first answer. Answered somewhere else, a request closes with `by: "terminal"`.
@@ -289,7 +291,7 @@ Everything else Codex does is a `tool.start` and a `tool.end`, named after the k
 | `permission`, `toolName` `permissions` | Codex asking for more room than its sandbox gives. `input.permissions` is what it wants. | `allow` grants it for the turn, and with `option: "session"` for the session. `deny` grants nothing, and the turn goes on. |
 | `question` | Codex's questions, in the shape Claude Code's have: `input.questions`, each with `question`, `header`, `options` and `multiSelect: false`, and Codex's own `id`, `isOther` and `isSecret` | `allow` with `answers` by each question's text, as for Claude Code |
 
-**What it doesn't do yet.** Slash commands, lines run with `!`, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
+**What it doesn't do yet.** Slash commands, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
 
 ### Notifications
 

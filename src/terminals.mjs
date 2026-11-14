@@ -6,8 +6,10 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { checkedFolder } from './folders.mjs';
+import { gitState } from './gitstate.mjs';
 import { capped, outputBody, plain, styleBefore, trimEnd, vtLines, withoutPrompt } from './output.mjs';
 import * as rex from './rex.mjs';
 import { runsOf, screenCells } from './screen.mjs';
@@ -32,7 +34,14 @@ const START_LIMIT_MS = 20_000;
 const START_CHECK_MS = 150;
 // The prompt follows the hook that says a command is done, so it's waited for a moment.
 const PROMPT_WAIT_MS = 1500;
-const PASTE_SETTLE_MS = 100;
+// A shell reads what's pasted and the Enter after it in the order they come, so this is only for a
+// program that takes its time over a paste.
+const PASTE_SETTLE_MS = 30;
+// A shell runs a command the moment Enter reaches it, which its hooks then say. It's looked for at once,
+// for a client that shows the command only once it's told of it, and no longer than a look would take to
+// come round anyway.
+const SOON_LIMIT_MS = 300;
+const SOON_CHECK_MS = 15;
 // As much of one output as a client is sent, from its end, as a terminal's scrollback keeps it.
 const MAX_LINES = 2000;
 const MAX_CHARS = 200_000;
@@ -70,6 +79,12 @@ const clamp = (value, [low, high], fallback) => (Number.isInteger(value) ? Math.
 
 export function sizeOf({ columns, rows } = {}, fallback = DEFAULT_SIZE) {
   return { columns: clamp(columns, SIZE_RANGE.columns, fallback.columns), rows: clamp(rows, SIZE_RANGE.rows, fallback.rows) };
+}
+
+// A path as a shell reads it: as it is when nothing in it means anything to a shell, and in single
+// quotes otherwise.
+export function shellQuoted(text) {
+  return /^[A-Za-z0-9_./@%+=:,-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
 // The output from line `from` on, in the colours it starts in, and no longer than a client is sent.
@@ -124,6 +139,7 @@ export class Terminals {
   #env;
   #tickMs;
   #liveCheckMs;
+  #git;
   #timer;
   #ticking = false;
   #terminals = new Map();
@@ -131,7 +147,7 @@ export class Terminals {
   constructor({
     store, root, shellDir, backends = { rex, tmux }, env = process.env,
     useRex = () => (env.VENES_TERMINAL ? env.VENES_TERMINAL === 'rex' : rex.isInstalled()), tickMs = TICK_MS,
-    liveCheckMs = LIVE_CHECK_MS,
+    liveCheckMs = LIVE_CHECK_MS, git = gitState,
   }) {
     this.#store = store;
     this.#root = root;
@@ -141,6 +157,7 @@ export class Terminals {
     this.#env = env;
     this.#tickMs = tickMs;
     this.#liveCheckMs = liveCheckMs;
+    this.#git = git;
   }
 
   has(id) { return typeof id === 'string' && this.#terminals.has(id); }
@@ -153,6 +170,7 @@ export class Terminals {
       const meta = readJSON(path.join(this.#root, id, META));
       if (!meta?.id || meta.id !== id) continue;
       const t = { ...meta, pending: [], fullScreen: false, checkedAt: Date.now() };
+      t.folder = this.#cwdOf(t);
       const alive = !meta.ended && meta.target && (await this.#backend(t).isSessionOpen(meta.name, meta.target).catch(() => false));
       t.ended = !alive;
       t.status = t.ended ? 'ended' : t.running ? 'running' : 'idle';
@@ -176,7 +194,7 @@ export class Terminals {
     const id = crypto.randomUUID();
     const now = Date.now();
     const t = {
-      id, name: `${NAME_PREFIX}${id.slice(0, 8)}`, cwd: folder, startedAt: now, lastActiveAt: now, size: sizeOf({ columns, rows }),
+      id, name: `${NAME_PREFIX}${id.slice(0, 8)}`, cwd: folder, folder, startedAt: now, lastActiveAt: now, size: sizeOf({ columns, rows }),
       pending: [], fullScreen: false, checkedAt: now, status: 'idle',
     };
     fs.mkdirSync(this.#dir(t), { recursive: true, mode: 0o700 });
@@ -203,10 +221,7 @@ export class Terminals {
     const t = this.#get(id);
     if (typeof text !== 'string' || !text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
     return this.#exclusive(t, async () => {
-      // One closed at the Mac since it was last looked at has ended, like any other.
-      if (!t.ended && Date.now() - t.checkedAt >= LIVE_FRESH_MS && !(await this.#isOpen(t))) this.#end(t);
-      if (t.ended) await this.#relaunch(t);
-      else await this.#follow(t);
+      await this.#ready(t);
       await this.#fit(t, { columns, rows });
       if (t.running) {
         const reply = await this.#input(t, { text, clientId });
@@ -214,8 +229,31 @@ export class Terminals {
       }
       t.pending = [...t.pending.filter(sent => Date.now() - sent.at < PENDING_LIFETIME_MS), { clientId, text, at: Date.now() }].slice(-MAX_PENDING);
       await this.#type(t, text);
+      await this.#followSoon(t);
       return { queued: false };
     });
+  }
+
+  // Moves the shell to another folder, by typing `cd` at its prompt, so it shows as the command it is.
+  // A command that's running would take the line for itself, so it has to end first.
+  async cd(id, { path: folder } = {}) {
+    const t = this.#get(id);
+    const target = checkedFolder(folder);
+    return this.#exclusive(t, async () => {
+      await this.#ready(t);
+      if (t.running) throw new HelperError('terminal_busy', 'A command is running. Wait for it to end, or stop it.');
+      await this.#type(t, `cd ${shellQuoted(target)}`);
+      await this.#followSoon(t);
+      return {};
+    });
+  }
+
+  // Where its shell is, and what git says of that folder, as a shell's prompt would.
+  async status(id) {
+    const t = this.#get(id);
+    const cwd = this.#cwdOf(t);
+    const git = await this.#git(cwd);
+    return { status: { cwd, home: this.#env.HOME || os.homedir(), running: Boolean(t.running), ...(git && { git }) } };
   }
 
   // Ctrl-C, as at the terminal.
@@ -288,6 +326,14 @@ export class Terminals {
     return {};
   }
 
+  // Its shell at hand, and what it's doing known: one closed at the Mac since it was last looked at
+  // has ended, like any other, and one that has ended is started again.
+  async #ready(t) {
+    if (!t.ended && Date.now() - t.checkedAt >= LIVE_FRESH_MS && !(await this.#isOpen(t))) this.#end(t);
+    if (t.ended) await this.#relaunch(t);
+    else await this.#follow(t);
+  }
+
   #get(id) {
     const t = this.has(id) ? this.#terminals.get(id) : undefined;
     if (!t) throw new HelperError('unknown_session', `No terminal session ${id}`);
@@ -315,9 +361,10 @@ export class Terminals {
   #cwdOf(t) { return readText(path.join(this.#dir(t), 'cwd')) || t.cwd; }
 
   #save(t) {
-    const { id, name, cwd, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running } = t;
+    const { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running } = t;
     const kept = running && { ...running, tail: undefined };
-    fs.writeFileSync(path.join(this.#dir(t), META), JSON.stringify({ id, name, cwd, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running: kept }), { mode: 0o600 });
+    const meta = { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running: kept };
+    fs.writeFileSync(path.join(this.#dir(t), META), JSON.stringify(meta), { mode: 0o600 });
   }
 
   // A shell with the hooks, in a terminal of its own, once it's at its first prompt.
@@ -349,6 +396,7 @@ export class Terminals {
     const last = this.#cwdOf(t);
     await this.#launch(t, last && fs.existsSync(last) ? last : t.cwd);
     t.status = 'idle';
+    this.#noteFolder(t);
     this.#store.report(t.id, 'session.attached', { pane: t.target.pane }, { fields: { pane: t.target.pane } });
     this.#store.report(t.id, 'session.status', { status: 'idle' });
     this.#save(t);
@@ -367,6 +415,21 @@ export class Terminals {
     await backend.paste(t.target, text);
     await pause(PASTE_SETTLE_MS);
     await backend.pressKey(t.target, 'Enter');
+  }
+
+  // What was just typed is said as soon as the shell runs it, without waiting for the next look. A
+  // command can take its terminal with it, as `exit` does, and the line was still sent: the next look
+  // finds that the shell has gone.
+  async #followSoon(t) {
+    const before = t.seen;
+    for (const deadline = Date.now() + SOON_LIMIT_MS; Date.now() < deadline && !t.running && t.seen === before;) {
+      await pause(SOON_CHECK_MS);
+      try {
+        await this.#follow(t);
+      } catch {
+        return;
+      }
+    }
   }
 
   async #isFullScreen(t) {
@@ -391,7 +454,11 @@ export class Terminals {
           return;
         }
         await this.#follow(t);
-      }).catch(error => console.error(`terminal ${t.id}: ${error.message}`))));
+      }).catch(error => {
+        // Most likely its terminal has gone, which the next look checks first.
+        t.checkedAt = 0;
+        console.error(`terminal ${t.id}: ${error.message}`);
+      })));
     } finally {
       this.#ticking = false;
     }
@@ -564,8 +631,17 @@ export class Terminals {
     t.seen = running.key;
     t.running = undefined;
     t.lastActiveAt = now;
-    if (status) this.#setStatus(t, status, { cwd: this.#cwdOf(t) });
+    this.#noteFolder(t);
+    if (status) this.#setStatus(t, status);
     this.#save(t);
+  }
+
+  // Where the shell is now, said when it has moved, as after a `cd`.
+  #noteFolder(t) {
+    const cwd = this.#cwdOf(t);
+    if (cwd === t.folder) return;
+    t.folder = cwd;
+    this.#store.report(t.id, 'session.cwd', { cwd }, { fields: { cwd } });
   }
 
   // A line for the program that's running, which starts a part of its output. One the program reads

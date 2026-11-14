@@ -6,7 +6,8 @@ import path from 'node:path';
 import { capped, outputBody, plain, styleBefore, vtLines, withoutPrompt } from '../../src/output.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 import { ZSH_FILES, installShellFiles, shellCommand } from '../../src/shell.mjs';
-import { HIDDEN_TEXT, Terminals, historyPage, parseState, partFrom, partStarts, partTexts, sizeOf, tailOf } from '../../src/terminals.mjs';
+import { parseStatus } from '../../src/gitstate.mjs';
+import { HIDDEN_TEXT, Terminals, historyPage, parseState, partFrom, partStarts, partTexts, shellQuoted, sizeOf, tailOf } from '../../src/terminals.mjs';
 
 const ESC = '\u001b';
 
@@ -79,6 +80,29 @@ test('a line sent to a running program starts a part of its output where the lin
   assert.deepEqual(partTexts(['new'], [undefined, { index: 5, text: 'gone' }]), ['new', '']);
 });
 
+test('git\'s status reads as a prompt would say it', () => {
+  const status = [
+    '# branch.oid 4f25ac1d0c0c4b6e9d8f1a2b3c4d5e6f70819293', '# branch.head 1.1.0', '# branch.upstream origin/1.1.0', '# branch.ab +2 -1',
+    '1 M. N... 100644 100644 100644 aaa bbb staged.swift', '1 .M N... 100644 100644 100644 aaa bbb changed.swift',
+    '1 MM N... 100644 100644 100644 aaa bbb both.swift', '2 R. N... 100644 100644 100644 aaa bbb R100 new.swift\told.swift',
+    'u UU N... 100644 100644 100644 100644 aaa bbb ccc fought.swift', '? new file.txt', '? other.txt', '',
+  ].join('\n');
+  assert.deepEqual(parseStatus(status), {
+    branch: '1.1.0', upstream: 'origin/1.1.0', ahead: 2, behind: 1, staged: 3, modified: 2, untracked: 2, conflicted: 1,
+  });
+  // With no branch checked out, the commit stands in for one. A new repository has neither yet.
+  assert.deepEqual(parseStatus('# branch.oid 4f25ac1d0c0c4b6e\n# branch.head (detached)\n'), {
+    branch: '4f25ac1', detached: true, ahead: 0, behind: 0, staged: 0, modified: 0, untracked: 0, conflicted: 0,
+  });
+  assert.equal(parseStatus('# branch.oid (initial)\n# branch.head main\n').branch, 'main');
+});
+
+test('a path is typed as a shell reads it', () => {
+  assert.equal(shellQuoted('/Users/me/Apps/venes-cli_2.0'), '/Users/me/Apps/venes-cli_2.0');
+  assert.equal(shellQuoted('/Users/me/My Folder'), '\'/Users/me/My Folder\'');
+  assert.equal(shellQuoted('/tmp/it\'s $HOME'), '\'/tmp/it\'\\\'\'s $HOME\'');
+});
+
 test('a page of what was done starts where a line does', () => {
   const items = [
     { role: 'user', text: 'a' }, { role: 'output', stdout: '1' }, { role: 'user', text: 'b' }, { role: 'output', stdout: '2' },
@@ -117,10 +141,10 @@ function setUp(t, { prompt = '~ % ' } = {}) {
   const events = [];
   store.on('event', event => events.push(event));
   const calls = [];
-  const shell = { dir: undefined, screen: '', open: true, fullScreen: false, hidden: false, pid: 100, seq: 0 };
+  const shell = { dir: undefined, screen: '', open: true, fullScreen: false, hidden: false, pid: 100, seq: 0, cwd: '/Users/me' };
   const write = (name, text) => fs.writeFileSync(path.join(shell.dir, name), text);
   shell.prompt = (code = 0) => {
-    write('cwd', '/Users/me');
+    write('cwd', shell.cwd);
     write('prompt', prompt);
     write('state', `idle ${shell.pid} ${shell.seq} ${code}`);
   };
@@ -142,9 +166,17 @@ function setUp(t, { prompt = '~ % ' } = {}) {
     },
     isSessionOpen: async () => shell.open,
     resize: async (_, size) => { calls.push(['resize', size]); },
-    paste: async (_, text) => { calls.push(['paste', text]); },
-    pressKey: async (_, key) => { calls.push(['key', key]); },
-    readOutput: async () => ({ text: shell.screen, cut: false }),
+    paste: async (_, text) => { calls.push(['paste', text]); shell.pasted = text; },
+    // With `prompt`, the shell runs what was pasted the moment Enter comes, as a real one does.
+    pressKey: async (_, key) => {
+      calls.push(['key', key]);
+      if (key === 'Enter' && shell.runsAtOnce && !shell.busy) shell.run(shell.pasted);
+    },
+    // With `gone`, its terminal has closed under it, and there's nothing to read.
+    readOutput: async () => {
+      if (shell.gone) throw new Error('can\'t find pane');
+      return { text: shell.screen, cut: false };
+    },
     readStyledScreen: async () => shell.screen,
     isFullScreen: async () => shell.fullScreen,
     hidesInput: async () => shell.hidden,
@@ -153,6 +185,7 @@ function setUp(t, { prompt = '~ % ' } = {}) {
   const make = () => new Terminals({
     store, root, shellDir: path.join(root, 'shell'), backends: { tmux: backend, rex: backend }, useRex: () => false,
     env: { HOME: '/Users/me', PATH: '/bin' }, tickMs: 5, liveCheckMs: 50,
+    git: async cwd => (cwd === shell.cwd && shell.git ? shell.git : undefined),
   });
   const terminals = make();
   t.after(() => terminals.stop());
@@ -206,6 +239,28 @@ test('a command shows as its line, then its output as it comes, then all of it w
     { role: 'user', text: 'ls', stdout: undefined, exitCode: undefined },
     { role: 'output', text: undefined, stdout: `${ESC}[34mbin${ESC}[0m\netc`, exitCode: 0 },
   ]);
+});
+
+test('a command is said as soon as the shell runs it, before the send that typed it is answered', async t => {
+  const { terminals, shell, of } = setUp(t);
+  const { sessionId } = await terminals.start({ cwd: os.tmpdir() });
+  shell.runsAtOnce = true;
+  await terminals.send(sessionId, { text: 'make', clientId: 'c1' });
+  assert.deepEqual(of('message.user').map(event => [event.text, event.clientId]), [['make', 'c1']]);
+  assert.equal(of('session.status').at(-1).status, 'running');
+});
+
+test('a command that takes its terminal with it was still sent', async t => {
+  const { terminals, shell, of, calls } = setUp(t);
+  const { sessionId } = await terminals.start({ cwd: os.tmpdir() });
+  shell.runsAtOnce = true;
+  const read = calls.length;
+  shell.gone = true;
+  assert.deepEqual(await terminals.send(sessionId, { text: 'exit', clientId: 'c1' }), { queued: false });
+  assert.ok(calls.length > read);
+  assert.deepEqual(of('message.user').map(event => event.text), ['exit']);
+  shell.open = false;
+  await until(() => of('session.ended').length, 'its end');
 });
 
 test('a command typed at the Mac shows too, and one that printed nothing says only how it ended', async t => {
@@ -281,6 +336,40 @@ test('a program that has the screen to itself is a page, worked with keys', asyn
   await assert.rejects(terminals.pageKey(sessionId, 'F1'), { code: 'bad_key' });
   await terminals.interrupt(sessionId);
   assert.deepEqual(calls.at(-1), ['key', 'C-c']);
+});
+
+test('a shell that moves says where it is, and can be moved from here while nothing runs', async t => {
+  const { terminals, shell, of, calls, store } = setUp(t);
+  const there = fs.mkdtempSync(path.join(os.tmpdir(), 'venes there '));
+  t.after(() => fs.rmSync(there, { recursive: true, force: true }));
+  const { sessionId } = await terminals.start({ cwd: os.tmpdir() });
+  assert.deepEqual(await terminals.status(sessionId), { status: { cwd: '/Users/me', home: '/Users/me', running: false } });
+
+  assert.deepEqual(await terminals.cd(sessionId, { path: there }), {});
+  const typed = `cd '${fs.realpathSync(there)}'`.replace(fs.realpathSync(there), path.resolve(there));
+  assert.deepEqual(calls.slice(-2), [['paste', typed], ['key', 'Enter']]);
+  shell.run(typed);
+  shell.cwd = there;
+  shell.git = { root: there, branch: 'main', ahead: 0, behind: 0, staged: 0, modified: 1, untracked: 0, conflicted: 0 };
+  shell.screen += `${there} % `;
+  shell.prompt(0);
+  await until(() => of('session.cwd').length, 'where it went');
+  assert.deepEqual(of('session.cwd').map(event => event.cwd), [there]);
+  assert.equal(store.find(sessionId).cwd, there);
+  assert.equal(of('message.user').at(-1).text, typed, 'which shows as the command it was');
+  assert.deepEqual((await terminals.status(sessionId)).status.git, shell.git);
+
+  // A command that changes nothing about where it is says nothing of it.
+  shell.run('true');
+  shell.screen += `${there} % `;
+  shell.prompt(0);
+  await until(() => of('message.user').length === 2 && of('session.status').at(-1).status === 'idle', 'the second');
+  assert.equal(of('session.cwd').length, 1);
+
+  shell.run('sleep 100');
+  await until(() => of('session.status').at(-1).status === 'running', 'it to run');
+  await assert.rejects(terminals.cd(sessionId, { path: there }), { code: 'terminal_busy' });
+  await assert.rejects(terminals.cd(sessionId, { path: '/no/such/folder' }), { code: 'no_folder' });
 });
 
 test('a shell that has gone ends its session, and a command starts it again where it was', async t => {

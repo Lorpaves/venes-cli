@@ -2039,12 +2039,61 @@ async function comesBackAfterARestart(r) {
   client.close();
 }
 
+async function movesBetweenFolders(r) {
+  const repo = path.join(fs.realpathSync(WS), 'repo of e2e');
+  fs.rmSync(repo, { recursive: true, force: true });
+  const { sessionId } = await r.client.request('startTerminal', { cwd: WS });
+  const movedTo = (where, ms = 10000) => r.wait(e => e.kind === 'session.cwd' && e.sessionId === sessionId && e.cwd === where, ms, `session.cwd ${where}`);
+  try {
+    const before = (await r.client.request('terminalStatus', { sessionId })).status;
+    assert.deepEqual([before.cwd, before.home, before.running, before.git], [fs.realpathSync(WS), os.homedir(), false, undefined]);
+
+    // A `cd` typed as any command says where the shell went, and git says what's there.
+    await r.client.request('send', { sessionId, text: 'mkdir "repo of e2e" && cd "repo of e2e" && git init -q -b main . && touch new.txt', clientId: 'c1' });
+    await movedTo(repo);
+    const { sessions } = await r.client.request('sessions');
+    assert.equal(sessions.find(s => s.id === sessionId).cwd, repo);
+    const inRepo = (await r.client.request('terminalStatus', { sessionId })).status;
+    assert.equal(inRepo.cwd, repo);
+    assert.deepEqual([fs.realpathSync(inRepo.git.root), inRepo.git.branch, inRepo.git.untracked, inRepo.git.staged, inRepo.git.modified], [repo, 'main', 1, 0, 0]);
+
+    // Moved from here, with a path a shell would take apart if it weren't quoted.
+    const ended = () => r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'idle', 10000, 'the cd to end');
+    r.mark();
+    await r.client.request('terminalCd', { sessionId, path: fs.realpathSync(WS) });
+    await movedTo(fs.realpathSync(WS));
+    await ended();
+    r.mark();
+    await r.client.request('terminalCd', { sessionId, path: repo });
+    await movedTo(repo);
+    await ended();
+    assert.equal(r.events.findLast(e => e.kind === 'message.user').text, `cd '${repo}'`, 'which shows as the command it was');
+    r.mark();
+    await r.client.request('terminalCd', { sessionId, path: repo });
+    await ended();
+    assert.ok(!r.events.some(e => e.kind === 'session.cwd'), 'and says nothing when it went nowhere');
+    assert.equal((await r.client.request('terminalStatus', { sessionId })).status.cwd, repo);
+
+    r.mark();
+    await r.client.request('send', { sessionId, text: 'sleep 30', clientId: 'c2' });
+    await r.wait(e => e.kind === 'message.user' && e.clientId === 'c2', 10000, 'sleep');
+    await assert.rejects(r.client.request('terminalCd', { sessionId, path: fs.realpathSync(WS) }), { code: 'terminal_busy' });
+    await assert.rejects(r.client.request('terminalCd', { sessionId, path: '/no/such/folder' }), { code: 'no_folder' });
+    await r.client.request('interrupt', { sessionId });
+  } finally {
+    await r.client.request('delete', { sessionId }).catch(() => {});
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+}
+
 T('terminal_runs_commands_one_by_one', { noClaude: true }, runsCommandsOneByOne);
+T('terminal_moves_between_folders', { noClaude: true }, movesBetweenFolders);
 T('terminal_takes_a_line_and_ctrl_c', { noClaude: true }, takesALineAndCtrlC);
 T('terminal_shows_a_full_screen_program', { noClaude: true }, showsAFullScreenProgram);
 T('terminal_comes_back_after_a_restart', { noClaude: true }, comesBackAfterARestart);
 if (hasRex) {
   T('in_rex_terminal_runs_commands_one_by_one', { noClaude: true, rex: true }, runsCommandsOneByOne);
+  T('in_rex_terminal_moves_between_folders', { noClaude: true, rex: true }, movesBetweenFolders);
   T('in_rex_terminal_takes_a_line_and_ctrl_c', { noClaude: true, rex: true }, takesALineAndCtrlC);
   T('in_rex_terminal_shows_a_full_screen_program', { noClaude: true, rex: true }, showsAFullScreenProgram);
   T('in_rex_terminal_comes_back_after_a_restart', { noClaude: true, rex: true }, comesBackAfterARestart);

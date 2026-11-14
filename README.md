@@ -148,6 +148,8 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `pushUnregister` | `deviceId` | That phone doesn't want them any more |
 | `start` | `cwd`, `trust` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). |
 | `startTerminal` | `cwd`, `columns`, `rows` | Starts a shell of your own in that folder, with no Claude Code in it, and replies with its `sessionId` once its first prompt is up. See [Terminal sessions](#terminal-sessions). |
+| `terminalStatus` | `sessionId` | `status`: where a terminal session's shell is, as `cwd`, with your `home` folder, whether a command is `running`, and what `git` says of that folder. See [Terminal sessions](#terminal-sessions). |
+| `terminalCd` | `sessionId`, `path` | Moves a terminal session's shell to that folder, by typing `cd` at its prompt. Refused with `terminal_busy` while a command runs. |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -258,6 +260,8 @@ Each `send` is typed at the prompt as a command, or, while one runs, as a line f
 To do that, the shell runs hooks of the helper's own after your startup files. They clear the terminal and its scrollback before each command, so at the Mac it shows the latest command alone, and they put back a plain prompt of the folder's path before each one, which is how the end of a command's output is found.
 
 A program that takes the whole screen, such as an editor or a pager, sends `terminal.screen` with `fullScreen: true`, and `false` once it has gone. What it shows meanwhile is none of the command's output. Meanwhile `page` gives the screen as a page, and `pageKey` and `pageText` work it, as for Claude Code's pages, and a line sent to it replies with `page: true`, for a client to show it again. `pageClose` leaves it running, as only the program knows how it's left without losing anything. `interrupt` presses Ctrl-C.
+
+A shell that has moved to another folder, as after a `cd`, says so with `session.cwd` once the command that moved it is over, and `cwd` in `sessions` follows it. `terminalStatus` gives that folder and what a prompt would say of it: `git` is there inside a repository, with its `root`, the `branch` checked out, or the start of the commit with `detached: true` when there's none, the `upstream` it follows with how many commits it's `ahead` and `behind`, and how many files are `staged`, `modified`, `untracked` and `conflicted`. It's left out outside a repository, and when git takes more than three seconds to say. `terminalCd` moves the shell from afar: it types `cd` and the path, in quotes when a shell would otherwise take it apart, so it shows as the command it is.
 
 `join` and `history` give what it has done as `user` items, with `shell: true` and `input: true` as the events have them, and `output` items with `stdout`, `stderr`, `replies` and `exitCode`, each under its line, with a command still running as far as it has got, its last output with `running: true`. A shell that exits, with `exit` or when its terminal is closed, ends the session, with `session.ended` and a `reason` of `exited`, and the next `send` starts a new one where the last one was. `delete` closes its terminal and forgets what it did. `capabilities` lists nothing, `statusLine` has no `status`, and `configure` is refused with `terminal_session`.
 
@@ -371,6 +375,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`, or a terminal session's), `input` (only for a line sent to a terminal session's running command) |
 | `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed. A terminal session's also has `running` and `exitCode`. |
 | `terminal.screen` | `fullScreen`: a terminal session's program took the whole screen, or gave it back |
+| `session.cwd` | `cwd`: a terminal session's shell is in another folder now |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
@@ -414,6 +419,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `needs_trust` | Claude Code asks first whether to trust the folder. Ask the reader, and send `start` again with `trust: true`. |
 | `start_failed` | Claude Code quit, or took too long, starting a new session, or a terminal session's shell did |
 | `terminal_session` | `configure` was sent for a terminal session, which has no model |
+| `terminal_busy` | `terminalCd` was sent while a command runs in the terminal session, which would take the line for itself |
 | `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |
 | `unreadable_folder` | `folders` couldn't read what's in that folder |

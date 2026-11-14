@@ -341,6 +341,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const wanted = Number.isInteger(limit) ? Math.max(limit, 1) : MENTION_LIMIT;
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
     },
+    // Where a terminal session's shell is, with what git says of it, and moving it somewhere else.
+    terminalStatus: ({ sessionId }) => {
+      if (!terminal(sessionId)) throw new HelperError('unknown_session', `No terminal session ${sessionId}`);
+      return terminals.status(sessionId);
+    },
+    terminalCd: ({ sessionId, path: folder }) => {
+      if (!terminal(sessionId)) throw new HelperError('unknown_session', `No terminal session ${sessionId}`);
+      return terminals.cd(sessionId, { path: folder });
+    },
     capabilities: async msg => {
       if (terminal(msg.sessionId)) return { commands: [], models: [] };
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;

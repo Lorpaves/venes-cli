@@ -158,6 +158,7 @@ function setUp(t, { prompt = '~ % ' } = {}) {
     startSession: async request => {
       calls.push(['start', request]);
       shell.dir = request.env.VENES_TERMINAL_DIR;
+      shell.size = { ...request.size };
       shell.open = true;
       shell.seq = 0;
       shell.screen = prompt;
@@ -165,7 +166,12 @@ function setUp(t, { prompt = '~ % ' } = {}) {
       return { pane: '%7' };
     },
     isSessionOpen: async () => shell.open,
-    resize: async (_, size) => { calls.push(['resize', size]); },
+    // With `owned`, someone has it open in a window at the Mac, and it stays that window's size.
+    resize: async (_, size) => {
+      calls.push(['resize', size]);
+      if (!shell.owned) shell.size = { ...size };
+    },
+    size: async () => ({ ...shell.size }),
     paste: async (_, text) => { calls.push(['paste', text]); shell.pasted = text; },
     // With `prompt`, the shell runs what was pasted the moment Enter comes, as a real one does.
     pressKey: async (_, key) => {
@@ -234,11 +240,34 @@ test('a command shows as its line, then its output as it comes, then all of it w
   assert.equal(outputs.length, 1, 'an output that\'s been read again takes the place of what came before');
   assert.deepEqual({ stdout: outputs[0].stdout, clientId: outputs[0].clientId, exitCode: outputs[0].exitCode, replies: outputs[0].replies },
     { stdout: `${ESC}[34mbin${ESC}[0m\netc`, clientId: 'c1', exitCode: 0, replies: false });
+  assert.equal(outputs[0].columns, 60, 'as wide as the terminal was');
+  assert.equal(terminals.history(sessionId, {}).items[1].columns, 60);
   assert.equal(of('session.status').at(-1).status, 'idle');
   assert.deepEqual(terminals.history(sessionId, {}).items.map(({ role, text, stdout, exitCode }) => ({ role, text, stdout, exitCode })), [
     { role: 'user', text: 'ls', stdout: undefined, exitCode: undefined },
     { role: 'output', text: undefined, stdout: `${ESC}[34mbin${ESC}[0m\netc`, exitCode: 0 },
   ]);
+});
+
+test('a terminal someone has open at the Mac stays its window\'s size, and its output says how wide it was', async t => {
+  const { terminals, shell, of, calls } = setUp(t);
+  const { sessionId } = await terminals.start({ cwd: os.tmpdir(), columns: 47, rows: 30 });
+  shell.owned = true;
+  shell.size = { columns: 156, rows: 70 };
+  shell.runsAtOnce = true;
+  await terminals.send(sessionId, { text: 'ls', clientId: 'c1', columns: 47, rows: 30 });
+  assert.deepEqual(calls.filter(([name]) => name === 'resize').map(([, size]) => size), [{ columns: 47, rows: 30 }, { columns: 47, rows: 30 }], 'asked for all the same');
+  shell.screen += 'a   b   c\r\n~ % ';
+  shell.prompt(0);
+  await until(() => of('message.output').some(event => event.running === false), 'the end');
+  assert.equal(of('message.output').at(-1).columns, 156);
+  // Once it's let go, the next line sent makes it the client's size again.
+  shell.owned = false;
+  await terminals.send(sessionId, { text: 'ls', clientId: 'c2', columns: 47, rows: 30 });
+  shell.screen += 'a\r\nb\r\n~ % ';
+  shell.prompt(0);
+  await until(() => of('message.output').some(event => event.clientId === 'c2' && event.running === false), 'the second');
+  assert.equal(of('message.output').at(-1).columns, 47);
 });
 
 test('a command is said as soon as the shell runs it, before the send that typed it is answered', async t => {

@@ -173,6 +173,8 @@ export class Terminals {
       t.folder = this.#cwdOf(t);
       const alive = !meta.ended && meta.target && (await this.#backend(t).isSessionOpen(meta.name, meta.target).catch(() => false));
       t.ended = !alive;
+      // One started before the terminal's own width was kept, or sized since by whoever has it open.
+      if (alive) t.columns = (await this.#backend(t).size(t.target).catch(() => undefined))?.columns ?? t.columns;
       t.status = t.ended ? 'ended' : t.running ? 'running' : 'idle';
       this.#terminals.set(id, t);
       this.#adopt(t);
@@ -363,7 +365,7 @@ export class Terminals {
   #save(t) {
     const { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running } = t;
     const kept = running && { ...running, tail: undefined };
-    const meta = { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running: kept };
+    const meta = { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, columns: t.columns, running: kept };
     fs.writeFileSync(path.join(this.#dir(t), META), JSON.stringify(meta), { mode: 0o600 });
   }
 
@@ -376,7 +378,9 @@ export class Terminals {
     const backend = this.#backend(t);
     const socket = this.#env.VENES_TMUX_SOCKET;
     t.target = await backend.startSession({ name: t.name, cwd, command, env: { ...env, ...(socket && { VENES_TMUX_SOCKET: socket }) }, size: t.size });
+    // In Rex it starts at Rex's own size, and is this one's only if no one has its window open.
     await backend.resize(t.target, t.size).catch(() => {});
+    t.columns = (await backend.size(t.target).catch(() => undefined))?.columns ?? t.size.columns;
     for (const deadline = Date.now() + START_LIMIT_MS; Date.now() < deadline; await pause(START_CHECK_MS)) {
       const state = parseState(readText(path.join(this.#dir(t), 'state')));
       if (state) {
@@ -402,12 +406,19 @@ export class Terminals {
     this.#save(t);
   }
 
-  // The client's size, so that what a program lays out fits where it's read.
+  // The client's size, so that what a program lays out fits where it's read. The terminal is asked what
+  // size it really is, before and after: one that someone has open in a window is that window's size
+  // whatever is asked of it, and its output is as wide as it is.
   async #fit(t, size) {
     const wanted = sizeOf(size, t.size);
-    if (wanted.columns === t.size.columns && wanted.rows === t.size.rows) return;
+    const backend = this.#backend(t);
     t.size = wanted;
-    await this.#backend(t).resize(t.target, wanted).catch(() => {});
+    let real = await backend.size(t.target).catch(() => undefined);
+    if (!real || real.columns !== wanted.columns || real.rows !== wanted.rows) {
+      await backend.resize(t.target, wanted).catch(() => {});
+      real = await backend.size(t.target).catch(() => real);
+    }
+    t.columns = real?.columns ?? wanted.columns;
   }
 
   async #type(t, text) {
@@ -579,11 +590,16 @@ export class Terminals {
       changed = true;
       this.#store.report(
         t.id, 'message.output',
-        { stdout: text, stderr: '', replies: false, clientId: segment.line, running, ...(ends && code !== undefined && { exitCode: code }) },
+        { stdout: text, stderr: '', replies: false, clientId: segment.line, running, ...this.#width(t), ...(ends && code !== undefined && { exitCode: code }) },
         { supersedes: event => event.kind === 'message.output' && event.clientId === segment.line },
       );
     });
     return changed;
+  }
+
+  // How wide the terminal was when its output was read, which is where its lines broke.
+  #width(t) {
+    return t.columns ? { columns: t.columns } : {};
   }
 
   // Done once the prompt is back, as everything the command printed comes before it.
@@ -606,7 +622,7 @@ export class Terminals {
     if (last.sent?.running) {
       last.sent.running = false;
       this.#store.report(
-        t.id, 'message.output', { stdout: last.sent.text, stderr: '', replies: false, clientId: last.line, running: false },
+        t.id, 'message.output', { stdout: last.sent.text, stderr: '', replies: false, clientId: last.line, running: false, ...this.#width(t) },
         { supersedes: event => event.kind === 'message.output' && event.clientId === last.line },
       );
     }
@@ -622,7 +638,7 @@ export class Terminals {
       if (index > 0) this.#append(t, { role: 'user', text: segment.shown, shell: true, input: true, at: segment.at ?? now });
       const text = segment.sent?.text ?? '';
       const exitCode = isLast ? code : undefined;
-      if (text || exitCode) this.#append(t, { role: 'output', stdout: text, stderr: '', replies: false, at: now, ...(exitCode !== undefined && { exitCode }) });
+      if (text || exitCode) this.#append(t, { role: 'output', stdout: text, stderr: '', replies: false, at: now, ...this.#width(t), ...(exitCode !== undefined && { exitCode }) });
     });
     if (t.fullScreen) {
       t.fullScreen = false;
@@ -696,7 +712,7 @@ export class Terminals {
     (t.running?.segments ?? []).forEach((segment, index, segments) => {
       if (index > 0) items.push({ role: 'user', text: segment.shown, shell: true, input: true, at: segment.at });
       const text = segment.sent?.text;
-      if (text) items.push({ role: 'output', stdout: text, stderr: '', replies: false, at: t.running.readAt, ...(index === segments.length - 1 && { running: true }) });
+      if (text) items.push({ role: 'output', stdout: text, stderr: '', replies: false, at: t.running.readAt, ...this.#width(t), ...(index === segments.length - 1 && { running: true }) });
     });
     return items;
   }

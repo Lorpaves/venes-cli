@@ -87,9 +87,16 @@ export async function hidesInput(session) {
   return mode.canonical === true && mode.echo === false;
 }
 
-// It applies once no one at the Mac is looking at the terminal in a window of their own size.
+// It applies when no client owns the terminal. One in a window that Rex's app has open is that window's
+// size, whatever is asked here.
 export async function resize(session, { columns, rows }) {
   await callBlock(session, 'resize', { columns, rows });
+}
+
+// The size the terminal really has, whoever asked for what.
+export async function size(session) {
+  const { columns, rows } = await callBlock(session, 'size', {});
+  return { columns, rows };
 }
 
 export async function closeSession(_, target) {

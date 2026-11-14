@@ -56,6 +56,12 @@ export async function resize({ pane, tmuxSocket }, { columns, rows }) {
   await tmux(tmuxSocket, ['resize-window', '-t', pane, '-x', String(columns), '-y', String(rows)]);
 }
 
+// The size the pane really has, which a client attached to its session can change.
+export async function size(target) {
+  const [columns, rows] = (await paneFormat(target, '#{pane_width} #{pane_height}')).split(' ').map(Number);
+  return { columns, rows };
+}
+
 export async function closeSession(name, { tmuxSocket }) {
   await tmux(tmuxSocket, ['kill-session', '-t', `=${name}`]);
 }

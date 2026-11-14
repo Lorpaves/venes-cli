@@ -38,7 +38,8 @@ const CLAUDE_CONFIG = process.env.VENES_E2E_CLAUDE_CONFIG_DIR;
 if (CLAUDE_CONFIG) process.env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG;
 const configEnv = CLAUDE_CONFIG ? [`CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG}`] : [];
 const CLAUDE = execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim();
-const SOCK = 'venes-e2e';
+// Its own tmux server, by name. Another name lets a second run go on beside this one.
+const SOCK = process.env.VENES_E2E_SOCK || 'venes-e2e';
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(PLUGIN, 'cli/venes.mjs');
 const paths = helperPaths(HOME);
@@ -78,6 +79,9 @@ await new Promise(resolve => { pushServer.listen(0, '127.0.0.1', resolve); });
 const PUSH_URL = `http://127.0.0.1:${pushServer.address().port}/push`;
 
 const REX_SOCKET = `${HOME}-rex.sock`;
+// Where the same server answers over the network, for a client that isn't on this Mac. Another port,
+// with VENES_E2E_HOME and VENES_E2E_SOCK, lets a second run go on beside this one.
+const REX_PORT = process.env.VENES_E2E_REX_PORT || '18744';
 const REX_SERVER = `unix://${REX_SOCKET}`;
 const barerEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(CLAUDE|REX_)/.test(key)));
 const rexEnv = { ...barerEnv, REX_SERVER };
@@ -91,7 +95,7 @@ async function startRexServer() {
   if (rexServerProcess) return;
   fs.rmSync(REX_SOCKET, { force: true });
   rexServerProcess = spawn('rex', [
-    'server', 'run', '--listen', REX_SERVER, '--extra-listen', 'http://127.0.0.1:18744', '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
+    'server', 'run', '--listen', REX_SERVER, '--extra-listen', `http://127.0.0.1:${REX_PORT}`, '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
   ], { env: rexEnv, stdio: 'ignore' });
   for (let i = 0; i < 100 && !fs.existsSync(REX_SOCKET); i++) await delay(50);
   await delay(200);
@@ -1611,7 +1615,7 @@ T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, a
 });
 
 // A plain address here, since a tailnet is only another way of reaching the same listener.
-const REX_URL = 'ws://127.0.0.1:18744';
+const REX_URL = `ws://127.0.0.1:${REX_PORT}`;
 const awaitLine = (pipe, test, ms = 5000) => new Promise((resolve, reject) => {
   const found = pipe.stream.lines.find(test);
   if (found) { resolve(found); return; }
@@ -1943,9 +1947,12 @@ async function runsCommandsOneByOne(r) {
   const session = sessions.find(s => s.id === sessionId);
   assert.deepEqual([session.terminal, session.status, session.cwd], [true, 'idle', fs.realpathSync(WS)]);
 
-  await r.client.request('send', { sessionId, text: 'echo hello', clientId: 'c1' });
+  await r.client.request('send', { sessionId, text: 'echo hello', clientId: 'c1', columns: 47, rows: 30 });
   const hello = await finished(r, 'c1');
-  assert.deepEqual([hello.stdout, hello.exitCode, hello.replies], ['hello', 0, false]);
+  assert.deepEqual([hello.stdout, hello.exitCode, hello.replies, hello.columns], ['hello', 0, false, 47]);
+  // What a program lays out is laid out for the client's width.
+  await r.client.request('send', { sessionId, text: 'tput cols', clientId: 'c0', columns: 47, rows: 30 });
+  assert.equal((await finished(r, 'c0')).stdout, '47');
   const line = r.events.find(e => e.kind === 'message.user' && e.clientId === 'c1');
   assert.deepEqual([line.text, line.shell], ['echo hello', true]);
 
@@ -1966,7 +1973,8 @@ async function runsCommandsOneByOne(r) {
 
   const opened = await r.client.request('join', { sessionId, limit: 50 });
   assert.deepEqual(opened.items.filter(i => i.role === 'user').map(i => i.text),
-    ['echo hello', 'cd /tmp && pwd', "printf 'a\\nb'", 'false', 'printf "\\033[31mred\\033[0m\\n"', 'seq 1 3000']);
+    ['echo hello', 'tput cols', 'cd /tmp && pwd', "printf 'a\\nb'", 'false', 'printf "\\033[31mred\\033[0m\\n"', 'seq 1 3000']);
+  assert.ok(opened.items.filter(i => i.role === 'output').every(i => i.columns === 47), 'each as wide as the terminal was');
   assert.equal(opened.sessions[0].terminal, true);
   await r.client.request('delete', { sessionId });
   await r.wait(e => e.kind === 'session.deleted' && e.sessionId === sessionId, 5000, 'session.deleted');

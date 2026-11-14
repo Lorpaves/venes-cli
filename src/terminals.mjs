@@ -71,6 +71,9 @@ const CLAUDE = 'claude';
 // A mirrored terminal's session id: its block's own, without what says it's a block.
 export const mirrorId = pane => pane.replace(/^block:/, '');
 
+// The program in front of a mirrored terminal's shell, by name: none while the shell is at its prompt.
+const frontOf = program => (!program || SHELLS.has(program) ? undefined : program);
+
 const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
 function readText(file) {
@@ -265,24 +268,32 @@ export class Terminals {
 
   #addMirror(id, { pane, rexSession, label, program, cwd }) {
     const now = Date.now();
+    const front = frontOf(program);
     const t = {
       id, mirror: true, name: label, cwd, folder: cwd, startedAt: now, lastActiveAt: now, backend: 'rex', target: { pane, rexSession },
-      status: SHELLS.has(program) ? 'idle' : 'running', size: { ...DEFAULT_SIZE }, pending: [], fullScreen: false, checkedAt: now,
+      status: front ? 'running' : 'idle', front, lastCommand: front, size: { ...DEFAULT_SIZE }, pending: [], fullScreen: false, checkedAt: now,
     };
     this.#terminals.set(id, t);
     this.#adopt(t);
-    this.#store.report(id, 'session.discovered', { cwd, terminal: true, mirror: true });
+    this.#store.report(id, 'session.discovered', { cwd, terminal: true, mirror: true, ...(front && { program: front }) });
     this.#store.report(id, 'session.attached', { pane });
   }
 
-  // Where it is, and whether a program is in front, as Rex now has them.
+  // Where it is, and what's in front of its shell, as Rex now has them. The program in front is what a
+  // list has to say of a mirrored terminal, which has no command of its own to go by.
   #updateMirror(t, { program, cwd }) {
     if (cwd && cwd !== t.folder) {
       t.cwd = cwd;
       t.folder = cwd;
       this.#store.report(t.id, 'session.cwd', { cwd }, { fields: { cwd } });
     }
-    const status = SHELLS.has(program) ? 'idle' : 'running';
+    const front = frontOf(program);
+    if (front !== t.front) {
+      t.front = front;
+      t.lastCommand = front;
+      this.#store.report(t.id, 'terminal.program', front ? { program: front } : {}, { fields: { lastPrompt: front } });
+    }
+    const status = front ? 'running' : 'idle';
     if (status !== t.status) this.#setStatus(t, status);
   }
 
@@ -420,6 +431,8 @@ export class Terminals {
     // A mirrored terminal is read now, as no one may have been looking, and answered once it has been.
     if (t.mirror) {
       return this.#exclusive(t, async () => {
+        // How wide it is goes with what's read, from the first time, before any page has had it open.
+        t.columns ??= (await this.#backend(t).size(t.target).catch(() => undefined))?.columns;
         await this.#readMirror(t).catch(() => {});
         return {
           ...historyPage(this.#items(t), { limit }), turn: [], queued: [], seq: this.#store.seq, requests: [],

@@ -2184,6 +2184,7 @@ async function mirrorsATerminalOpenInRex(r) {
     assert.equal(opened.items.length, 1);
     assert.match(plainOf(opened.items[0].stdout), /echo typed-at-the-mac\ntyped-at-the-mac/);
     assert.deepEqual([opened.items[0].role, opened.hasMore, opened.sessions[0].mirror], ['output', false, true]);
+    assert.ok(opened.items[0].columns > 0, 'with how wide it is');
 
     // With its page open it's the page's size, and a line sent shows as the terminal shows it.
     assert.equal((await r.client.request('terminalView', { sessionId: id, columns: 47, rows: 30 })).columns, 47);
@@ -2201,10 +2202,13 @@ async function mirrorsATerminalOpenInRex(r) {
     // A program in front is running, and takes Ctrl-C.
     await r.client.request('send', { sessionId: id, text: 'sleep 30' });
     await status('running');
+    assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, 'sleep');
+    assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).lastPrompt, 'sleep', 'which a list names it by');
     await assert.rejects(r.client.request('terminalCd', { sessionId: id, path: WS }), { code: 'terminal_busy' });
     r.mark();
     await r.client.request('interrupt', { sessionId: id });
     await status('idle');
+    assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, undefined);
 
     // Claude Code isn't mirrored, and neither is what the helper starts.
     assert.ok(sessions.every(s => !s.mirror || s.id === id));

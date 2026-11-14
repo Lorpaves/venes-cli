@@ -542,9 +542,10 @@ test('the terminals open in Rex are sessions, for as long as they are open and t
   await terminals.restore();
   await until(() => store.sessions().some(session => session.mirror), 'the first look at Rex');
   const mirrors = store.sessions().filter(session => session.mirror);
-  assert.deepEqual(mirrors.map(session => [session.id, session.terminal, session.status, session.cwd, session.pane]), [
-    ['a', true, 'idle', '/Users/me/app', 'block:a'], ['b', true, 'running', '/Users/me/notes', 'block:b'],
+  assert.deepEqual(mirrors.map(session => [session.id, session.terminal, session.status, session.cwd, session.pane, session.lastPrompt]), [
+    ['a', true, 'idle', '/Users/me/app', 'block:a', undefined], ['b', true, 'running', '/Users/me/notes', 'block:b', 'vim'],
   ], 'not the one Claude Code is in, the helper\'s own, or one a session already has');
+  assert.equal(of('session.discovered').find(event => event.sessionId === 'b').program, 'vim', 'with the program in front, for a list to say');
   assert.deepEqual(of('session.discovered').filter(event => event.mirror).map(event => [event.sessionId, event.cwd, event.terminal]), [
     ['a', '/Users/me/app', true], ['b', '/Users/me/notes', true],
   ]);
@@ -564,7 +565,13 @@ test('the terminals open in Rex are sessions, for as long as they are open and t
   rex.open = [shell('a', '/Users/me/other', { program: 'claude' }), shell('f', '/tmp', { program: 'make' })];
   rex.changed();
   await until(() => of('session.deleted').length === 2, 'it to go');
-  assert.deepEqual(store.sessions().filter(session => session.mirror).map(session => [session.id, session.status]), [['f', 'running']]);
+  assert.deepEqual(store.sessions().filter(session => session.mirror).map(session => [session.id, session.status, session.lastPrompt]), [['f', 'running', 'make']]);
+  assert.deepEqual(of('terminal.program').map(event => [event.sessionId, event.program]), [['f', 'make']]);
+  // Back at its prompt, there's no program to name.
+  rex.open = [shell('f', '/tmp')];
+  rex.changed();
+  await until(() => of('terminal.program').length === 2, 'the program to go');
+  assert.deepEqual([of('terminal.program').at(-1).program, store.find('f').lastPrompt, store.find('f').status], [undefined, undefined, 'idle']);
 });
 
 test('a mirrored terminal\'s page is its screen, read while someone has it open, and typed into', async t => {
@@ -577,7 +584,9 @@ test('a mirrored terminal\'s page is its screen, read while someone has it open,
   assert.equal(of('message.output').length, 0, 'not read with no one looking');
 
   const opened = await terminals.join('a', { limit: 60 });
-  assert.deepEqual(opened.items.map(item => [item.role, item.stdout, item.clientId, item.running]), [['output', '~/app ❯ ls\nbin  src\n~/app ❯', SCREEN_LINE, false]]);
+  assert.deepEqual(opened.items.map(item => [item.role, item.stdout, item.clientId, item.running, item.columns]), [
+    ['output', '~/app ❯ ls\nbin  src\n~/app ❯', SCREEN_LINE, false, 156],
+  ], 'as wide as it is, before any page has had it open');
   assert.deepEqual([opened.hasMore, opened.sessions[0].mirror, opened.turn, opened.queued], [false, true, [], []]);
 
   const phone = {};

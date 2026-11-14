@@ -59,7 +59,7 @@ test('a long one is only read from the end, where the screen is', async t => {
   assert.equal(await readScreen(SESSION), 'the end');
   const read = calls().at(-1).args;
   assert.equal(read[7], 'blob_read');
-  assert.deepEqual(JSON.parse(read[8]), { id: 4, offset: 1_000_000 - 32 * 1024, max_bytes: 32 * 1024 });
+  assert.deepEqual(JSON.parse(read[8]), { id: 4, offset: 1_000_000 - 32 * 1024, max_bytes: 960 * 1024 });
 });
 
 // Rex sends less than was asked for when it's a lot to put in its reply.
@@ -88,7 +88,7 @@ else {
   assert.equal(await readScreen(SESSION), `${first}the end`);
   const reads = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(args => args.includes('blob_read'));
   assert.equal(reads.length, 2);
-  assert.deepEqual(JSON.parse(reads[1].at(-1)), { id: 4, offset: total - 32 * 1024 + 20, max_bytes: 32 * 1024 - 20 });
+  assert.deepEqual(JSON.parse(reads[1].at(-1)), { id: 4, offset: total - 32 * 1024 + 20, max_bytes: 960 * 1024 });
   const [format] = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.equal(JSON.parse(format.at(-1)).format, 'text');
 });

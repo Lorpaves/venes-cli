@@ -17,7 +17,11 @@ const OUTPUT_BYTES = 8 * 1024 * 1024;
 // A terminal can hold 64 MiB of scrollback, and only the end of it is the screen.
 const SCREEN_BYTES = 32 * 1024;
 // A read can come back with less than it asked for, which is more reads to the end.
-const SCREEN_READS = 8;
+const SCREEN_READS = 16;
+// The most Rex gives in one reply. It measures a reply as the JSON it sends, where an escape sequence
+// or a line's end takes more room than in the text, so asking for just what's left gets less than that
+// each time, and the last few characters never come.
+const BLOB_READ_BYTES = 960 * 1024;
 const KEYS = {
   Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p', Tab: 'tab', BTab: 'shift+tab',
   Space: 'space', BSpace: 'backspace', 'C-c': 'ctrl+c',
@@ -65,19 +69,23 @@ async function callTerminal(session, method, args) {
 }
 
 // The end of what the terminal holds, up to `bytes` of it, and whether there was more before that.
+// `end` is where what was read ends, in bytes from the start of all the terminal holds.
 async function readFormatted(session, format, { bytes = SCREEN_BYTES, unwrap = false, call = callBlock } = {}) {
   const start = await call(session, 'format', { format, trim: true, unwrap, max_bytes: bytes });
-  if (start.id === undefined) return { content: start.content, cut: false };
+  if (start.id === undefined) return { content: start.content, cut: false, end: start.total };
   const first = Math.max(0, start.total - bytes);
   let offset = first;
   let screen = '';
   for (let reads = 0; reads < SCREEN_READS && offset < start.total; reads++) {
-    const { data = '', eof } = await call(session, 'blob_read', { id: start.id, offset, max_bytes: start.total - offset });
+    const { data = '', eof } = await call(session, 'blob_read', { id: start.id, offset, max_bytes: BLOB_READ_BYTES });
     screen += data;
-    offset += Buffer.byteLength(data);
+    // A read that starts in the middle of a character has a replacement character, of three bytes,
+    // for each byte of it that was left.
+    const broken = reads === 0 ? /^\uFFFD*/.exec(data)[0].length : 0;
+    offset += Buffer.byteLength(data) - 2 * broken;
     if (eof || !data) break;
   }
-  return { content: screen, cut: first > 0 };
+  return { content: screen, cut: first > 0, end: offset };
 }
 
 export const readScreen = async session => (await readFormatted(session, 'text')).content;
@@ -85,10 +93,20 @@ export const readScreen = async session => (await readFormatted(session, 'text')
 export const readStyledScreen = async session => (await readFormatted(session, 'vt')).content;
 
 // Everything a terminal session's shell has printed since its screen was last cleared, coloured, with
-// the lines the terminal wrapped joined again. `cut` when the start didn't fit.
+// the lines the terminal wrapped joined again. `cut` when the start didn't fit. `end` is where it ends,
+// in bytes from the start of all the terminal holds: a line is as far from that start however much is
+// printed under it, which is how one is found again in a later read.
 export async function readOutput(session) {
-  const { content, cut } = await readFormatted(session, 'vt', { bytes: OUTPUT_READ_BYTES, unwrap: true, call: callTerminal });
-  return { text: content, cut };
+  const { content, cut, end } = await readFormatted(session, 'vt', { bytes: OUTPUT_READ_BYTES, unwrap: true, call: callTerminal });
+  return { text: content, cut, end };
+}
+
+// What's in front in one terminal now, by name, and the folder it's in: the shell at its prompt, or
+// the command it's running.
+export async function front(session) {
+  const running = await callTerminal(session, 'process', {});
+  const process = running.foreground ?? running.child;
+  return { program: process?.name, cwd: process?.cwd };
 }
 
 // Whether a program has the screen to itself, as an editor or a pager does.

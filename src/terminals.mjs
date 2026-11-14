@@ -3,6 +3,13 @@
 // (shell.mjs) clear the screen before each command and leave what it's doing in files, so a command's
 // output is the screen under its own line until the prompt comes back. Output streams while a command
 // runs. A line sent while it runs goes to it, and what it prints after that is that line's.
+//
+// A terminal the reader opened in Rex themselves is a session too, a mirrored one. Its shell has none of
+// the hooks and its screen is never cleared, so a command sent to it is found by where it was typed:
+// the line the prompt was on. That line stays as far from the start of all the terminal holds while
+// more is printed under it, until the terminal is full and lets go of its oldest lines, and then it's
+// known by what it says and what's above it. The command's output is what's under that line, until the
+// shell is in front again with its prompt drawn. What's typed at the Mac isn't followed.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -10,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { checkedFolder } from './folders.mjs';
 import { gitState } from './gitstate.mjs';
-import { capped, outputBody, plain, styleBefore, trimEnd, vtLines, withoutPrompt } from './output.mjs';
+import { capped, outputBody, plain, squashed, styleBefore, trimEnd, vtLines, withoutPrompt } from './output.mjs';
 import * as rex from './rex.mjs';
 import { runsOf, screenCells } from './screen.mjs';
 import { HelperError } from './sessions.mjs';
@@ -55,9 +62,23 @@ const SIZE_RANGE = { columns: [20, 400], rows: [5, 200] };
 export const HIDDEN_TEXT = '••••••';
 const META = 'session.json';
 const HISTORY = 'history.jsonl';
-// A terminal the reader opened in Rex themselves is mirrored: its screen is its one output, under no
-// line, which this names.
-export const SCREEN_LINE = 'screen';
+// A mirrored terminal's prompt is learned: Ctrl-C at it draws it again underneath, and how far down the
+// last line went is how many lines it takes. It's drawn at once, and waited for in case it isn't.
+const MEASURE_LIMIT_MS = 1000;
+const MEASURE_CHECK_MS = 40;
+// A command just typed there is read at every look for a moment, as most are over at once, and one is
+// over only once it has been read twice the same.
+const EAGER_FOR_MS = 1500;
+// A shell draws its prompt again when its terminal changes size, which is waited for before a command's
+// place is noted.
+const RESIZE_SETTLE_MS = 150;
+// A line sent right after a command may find it over, but not yet seen to be: it's looked at this many
+// times first, so that the line is the command it is, and not a line for the one before.
+const SETTLE_READS = 3;
+const SETTLE_CHECK_MS = 120;
+// How many lines above a line it's known by, and how far up from the end a prompt is looked for.
+const CONTEXT_LINES = 3;
+const TAIL_LINES = 64;
 // How long after Rex says its terminals changed they're looked at, so that a burst is one look.
 const MIRROR_SETTLE_MS = 300;
 // And how often anyway, in case a change was missed while the connection to Rex was down.
@@ -139,6 +160,89 @@ export function partTexts(lines, marks) {
   return starts.map((from, index) => partFrom(lines.slice(0, starts[index + 1] ?? lines.length), from));
 }
 
+// Where each line of what was read starts, in bytes from the start of all the terminal holds: a line
+// stays there as more is printed under it, which is how it's found again in a later read. Counted back
+// from where the read ends, since one that's cut may start in the middle of a character. Empty when the
+// lines aren't the text's own, so that nothing is found by it.
+export function lineStarts(text, lineCount, end = Buffer.byteLength(text)) {
+  const raw = text.split('\n');
+  if (raw.length !== lineCount) return [];
+  const starts = new Array(raw.length);
+  let at = end;
+  for (let i = raw.length - 1; i >= 0; i--) {
+    at -= Buffer.byteLength(raw[i]);
+    starts[i] = at;
+    at -= 1;
+  }
+  return starts;
+}
+
+const lastWord = text => text.trim().split(/\s+/).at(-1) ?? '';
+
+// Whether a line is the shell's prompt with nothing typed at it: what the prompt last said, or a line
+// that ends as it did, since a prompt may name a folder or a branch, which change.
+export function promptLike(text, known) {
+  if (known === undefined) return false;
+  if (text === known) return true;
+  const end = lastWord(known);
+  return end !== '' && text.endsWith(end);
+}
+
+// The last lines of what a terminal holds, as they read, with none that show nothing at the end.
+export const tailLines = lines => trimEnd(lines).slice(-TAIL_LINES).map(plain);
+
+// How many lines have come under what was the last one, going by the lines above it, which stay as
+// they were: the fewest that put those lines where they are now. A terminal that's full lets go of its
+// oldest lines as new ones come, so counting from the top wouldn't do. Zero when they aren't there.
+export function linesAdded(before, after) {
+  const context = before.slice(-(CONTEXT_LINES + 1), -1);
+  if (!context.length) return Math.max(after.length - before.length, 0);
+  for (let added = 1; added + context.length < after.length; added++) {
+    const from = after.length - 1 - added - context.length;
+    if (context.every((line, index) => after[from + index] === line)) return added;
+  }
+  return 0;
+}
+
+// How many of the lines a prompt was drawn on are counted as the prompt: those from the first that shows
+// anything. An empty line above them is only there under output that ended with a line's end: after
+// output that didn't, the shell goes on to the next line by filling the one it's on, which is then one
+// line with it. And what's empty at the end of an output is taken off it anyway.
+export function promptHeight(tail, added) {
+  const first = tail.slice(-added).findIndex(line => line.trim() !== '');
+  return Math.max(added - Math.max(first, 0), 1);
+}
+
+// The lines above line `index`, as they read, which it's known by when it isn't where it was.
+export const contextOf = (lines, index) => lines.slice(Math.max(index - CONTEXT_LINES, 0), Math.max(index, 0)).map(plain);
+
+// Where the line a mirrored terminal's command was typed on is, in what's read now. It's where it was,
+// by `starts`, when the command is on it under the lines that were above it. Failing that, as when the
+// terminal was cleared since or has let go of older lines, it's the last line that's the prompt with
+// the command after it, or the last one with the command on it under those lines. Undefined when it's
+// nowhere to be found. With no command, as for a program that was already running, it's the line that
+// was the last one then, known by where it was or by the lines above it.
+export function anchorLine(lines, starts, { offset, text, typed, context = [] }) {
+  const hasCommand = at => typed === undefined || squashed(plain(lines[at])).includes(typed);
+  const isUnder = at => context.every((line, index) => {
+    const above = at - context.length + index;
+    return above < 0 || plain(lines[above]) === line;
+  });
+  const at = offset === undefined ? -1 : starts.indexOf(offset);
+  if (at >= 0 && hasCommand(at) && isUnder(at)) return at;
+  if (typed !== undefined) {
+    const whole = squashed(text) + typed;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (squashed(plain(lines[i])) === whole) return i;
+    }
+  }
+  if (!context.length) return undefined;
+  for (let i = lines.length - 1; i >= context.length; i--) {
+    if (hasCommand(i) && isUnder(i)) return i;
+  }
+  return undefined;
+}
+
 // A page of what a terminal session did, as `history` gives Claude Code's: it starts where a command
 // or a line sent to one does, so that an output never comes without the line it's under.
 export function historyPage(items, { limit = 60, before } = {}) {
@@ -162,6 +266,8 @@ export class Terminals {
   #syncing;
   #settling;
   #syncedAt = 0;
+  // What's kept of mirrored terminals from before a restart, until Rex says which are still open.
+  #strays = new Set();
   #timer;
   #ticking = false;
   #terminals = new Map();
@@ -191,6 +297,8 @@ export class Terminals {
     fs.mkdirSync(this.#root, { recursive: true, mode: 0o700 });
     for (const id of fs.readdirSync(this.#root)) {
       const meta = readJSON(path.join(this.#root, id, META));
+      // What a mirrored terminal did is kept with no record of the terminal, which is Rex's to give.
+      if (!fs.existsSync(path.join(this.#root, id, META))) this.#strays.add(id);
       if (!meta?.id || meta.id !== id) continue;
       const t = { ...meta, pending: [], fullScreen: false, checkedAt: Date.now() };
       t.folder = this.#cwdOf(t);
@@ -257,6 +365,11 @@ export class Terminals {
         .filter(found => !taken.has(found.pane) && found.program !== CLAUDE && !OWN_LABEL.test(found.label ?? ''))
         .map(found => [mirrorId(found.pane), found]));
       for (const t of [...this.#terminals.values()].filter(t => t.mirror && !open.has(t.id))) this.#dropMirror(t);
+      // One that closed while the helper was away has nothing to keep either.
+      for (const id of this.#strays) {
+        if (!open.has(id)) fs.rmSync(path.join(this.#root, id), { recursive: true, force: true });
+      }
+      this.#strays.clear();
       for (const [id, found] of open) {
         const known = this.#terminals.get(id);
         if (known) this.#updateMirror(known, found);
@@ -271,7 +384,8 @@ export class Terminals {
     const front = frontOf(program);
     const t = {
       id, mirror: true, name: label, cwd, folder: cwd, startedAt: now, lastActiveAt: now, backend: 'rex', target: { pane, rexSession },
-      status: front ? 'running' : 'idle', front, lastCommand: front, size: { ...DEFAULT_SIZE }, pending: [], fullScreen: false, checkedAt: now,
+      status: front ? 'running' : 'idle', front, saidFront: front, lastCommand: front, size: { ...DEFAULT_SIZE }, pending: [], fullScreen: false,
+      checkedAt: now,
     };
     this.#terminals.set(id, t);
     this.#adopt(t);
@@ -279,28 +393,44 @@ export class Terminals {
     this.#store.report(id, 'session.attached', { pane });
   }
 
-  // Where it is, and what's in front of its shell, as Rex now has them. The program in front is what a
-  // list has to say of a mirrored terminal, which has no command of its own to go by.
+  // Where its shell is, and what's in front of it, as Rex now has them. The folder is the shell's own,
+  // and not that of a program it's running, which may work somewhere else.
   #updateMirror(t, { program, cwd }) {
-    if (cwd && cwd !== t.folder) {
+    const front = frontOf(program);
+    if (cwd && cwd !== t.folder && !front) {
       t.cwd = cwd;
       t.folder = cwd;
       this.#store.report(t.id, 'session.cwd', { cwd }, { fields: { cwd } });
     }
-    const front = frontOf(program);
-    if (front !== t.front) {
-      t.front = front;
-      t.lastCommand = front;
-      this.#store.report(t.id, 'terminal.program', front ? { program: front } : {}, { fields: { lastPrompt: front } });
-    }
-    const status = front ? 'running' : 'idle';
+    t.front = front;
+    this.#sayFront(t);
+    const status = t.running || front ? 'running' : 'idle';
     if (status !== t.status) this.#setStatus(t, status);
+  }
+
+  // The program in front is what a list has to say of a mirrored terminal that was sent no command. One
+  // that a command sent from here started is that command's, which the list already has.
+  #sayFront(t) {
+    if (t.running?.command || t.front === t.saidFront) return;
+    t.saidFront = t.front;
+    t.lastCommand = t.front;
+    this.#store.report(t.id, 'terminal.program', t.front ? { program: t.front } : {}, { fields: { lastPrompt: t.front } });
+  }
+
+  // What's in front of a mirrored terminal's shell, asked now: what Rex said last may be a moment old,
+  // which is long enough for a command to have started or ended.
+  async #frontNow(t) {
+    const found = await this.#backend(t).front?.(t.target)?.catch(() => undefined);
+    if (found) this.#updateMirror(t, found);
+    return t.front;
   }
 
   // It has closed in Rex, or isn't the reader's own any more, so it's no session.
   #dropMirror(t) {
+    if (t.running) this.#finishUnseen(t, null);
     t.ended = true;
     this.#terminals.delete(t.id);
+    fs.rmSync(this.#dir(t), { recursive: true, force: true });
     this.#store.report(t.id, 'session.ended', { reason: 'exited' });
     this.#store.forget(t.id);
   }
@@ -339,16 +469,28 @@ export class Terminals {
     if (typeof text !== 'string' || !text.trim()) throw new HelperError('bad_text', 'Nothing to send.');
     return this.#exclusive(t, async () => {
       await this.#ready(t);
-      await this.#fit(t, { columns, rows });
-      // A mirrored terminal is typed into, and what comes of it is on its screen.
+      const hasResized = await this.#fit(t, { columns, rows });
       if (t.mirror) {
-        await this.#type(t, text);
-        t.changedAt = Date.now();
-        return { queued: false, ...((await this.#isFullScreen(t)) && { page: true }) };
+        if (hasResized) await pause(RESIZE_SETTLE_MS);
+        const front = await this.#frontNow(t);
+        if (t.running && !front) await this.#settle(t);
+        // At its shell's prompt, a line is a command. With a program in front that was started at the
+        // Mac, it's a line for that program, which is followed from here on.
+        if (!t.running && !front) {
+          await this.#run(t, { text, clientId });
+          return { queued: false };
+        }
+        if (!t.running) await this.#attach(t);
       }
       if (t.running) {
-        const reply = await this.#input(t, { text, clientId });
-        return { ...reply, ...((await this.#isFullScreen(t)) && { page: true }) };
+        try {
+          const reply = await this.#input(t, { text, clientId });
+          return { ...reply, ...((await this.#isFullScreen(t)) && { page: true }) };
+        } catch (error) {
+          // A program at the Mac that the line never reached isn't followed.
+          if (t.mirror && !t.running.segments.length) t.running = undefined;
+          throw error;
+        }
       }
       t.pending = [...t.pending.filter(sent => Date.now() - sent.at < PENDING_LIFETIME_MS), { clientId, text, at: Date.now() }].slice(-MAX_PENDING);
       await this.#type(t, text);
@@ -364,10 +506,15 @@ export class Terminals {
     const target = checkedFolder(folder);
     return this.#exclusive(t, async () => {
       await this.#ready(t);
-      if (this.#isBusy(t)) throw new HelperError('terminal_busy', 'A command is running. Wait for it to end, or stop it.');
-      await this.#type(t, `cd ${shellQuoted(target)}`);
-      if (t.mirror) t.changedAt = Date.now();
-      else await this.#followSoon(t);
+      const isBusy = t.mirror ? Boolean((await this.#frontNow(t)) || t.running) : this.#isBusy(t);
+      if (isBusy) throw new HelperError('terminal_busy', 'A command is running. Wait for it to end, or stop it.');
+      const command = `cd ${shellQuoted(target)}`;
+      if (t.mirror) {
+        await this.#run(t, { text: command });
+      } else {
+        await this.#type(t, command);
+        await this.#followSoon(t);
+      }
       return {};
     });
   }
@@ -388,8 +535,6 @@ export class Terminals {
       t.viewers ??= new Map();
       t.viewers.delete(viewer);
       t.viewers.set(viewer, sizeOf({ columns, rows }, t.size));
-      // Someone's looking now, so a mirrored terminal is read at once, and often for a while.
-      t.changedAt = Date.now();
       if (!t.ended) await this.#fit(t, { columns, rows });
       return { columns: t.columns ?? t.size.columns, rows: t.size.rows };
     });
@@ -428,18 +573,6 @@ export class Terminals {
   // event after `seq` follows on the wire.
   join(id, { limit } = {}) {
     const t = this.#get(id);
-    // A mirrored terminal is read now, as no one may have been looking, and answered once it has been.
-    if (t.mirror) {
-      return this.#exclusive(t, async () => {
-        // How wide it is goes with what's read, from the first time, before any page has had it open.
-        t.columns ??= (await this.#backend(t).size(t.target).catch(() => undefined))?.columns;
-        await this.#readMirror(t).catch(() => {});
-        return {
-          ...historyPage(this.#items(t), { limit }), turn: [], queued: [], seq: this.#store.seq, requests: [],
-          sessions: this.#store.sessions().filter(session => session.id === id),
-        };
-      });
-    }
     const page = historyPage(this.#items(t), { limit });
     return {
       ...page, turn: [], queued: [], seq: this.#store.seq, requests: [],
@@ -492,8 +625,7 @@ export class Terminals {
       t.ended = true;
     });
     this.#terminals.delete(id);
-    // A mirrored terminal keeps nothing here: closing it in Rex is all there is to it.
-    if (!t.mirror) fs.rmSync(this.#dir(t), { recursive: true, force: true });
+    fs.rmSync(this.#dir(t), { recursive: true, force: true });
     this.#store.forget(id);
     return {};
   }
@@ -585,13 +717,14 @@ export class Terminals {
 
   // The client's size, so that what a program lays out fits where it's read. The terminal is asked what
   // size it really is, before and after: one that someone has open in a window is that window's size
-  // whatever is asked of it, and its output is as wide as it is.
+  // whatever is asked of it, and its output is as wide as it is. True when it had to change.
   async #fit(t, size) {
     const wanted = sizeOf(size, t.size);
     const backend = this.#backend(t);
     t.size = wanted;
     let real = await backend.size(t.target).catch(() => undefined);
-    if (!real || real.columns !== wanted.columns || real.rows !== wanted.rows) {
+    const fits = Boolean(real) && real.columns === wanted.columns && real.rows === wanted.rows;
+    if (!fits) {
       // For a client with its page open, the terminal is taken from whoever has it. Otherwise it's only
       // asked, which someone with it open at the Mac overrules.
       const taken = t.viewers?.size && backend.takeSize ? await backend.takeSize(t.target, wanted).then(() => true, () => false) : false;
@@ -599,6 +732,7 @@ export class Terminals {
       real = await backend.size(t.target).catch(() => real);
     }
     t.columns = real?.columns ?? wanted.columns;
+    return !fits;
   }
 
   async #type(t, text) {
@@ -641,9 +775,9 @@ export class Terminals {
       if (this.#mirrors && Date.now() - this.#syncedAt >= MIRROR_SYNC_MS && this.#backends.rex?.listTerminals && this.#useRex()) this.syncMirrors();
       await Promise.all([...this.#terminals.values()].filter(t => !t.ended).map(t => this.#exclusive(t, async () => {
         if (t.ended) return;
-        // A mirrored terminal is read while someone has its page open, and Rex says when it closes.
+        // A mirrored terminal is read while what was sent to it runs, and Rex says when it closes.
         if (t.mirror) {
-          if (t.viewers?.size && Date.now() - (t.readAt ?? 0) >= this.#readEvery({ changedAt: t.changedAt, at: t.startedAt })) await this.#readMirror(t);
+          if (t.running && Date.now() - t.running.readAt >= this.#readEvery(t.running)) await this.#readMirror(t);
           return;
         }
         if (Date.now() - t.checkedAt >= this.#liveCheckMs && !(await this.#isOpen(t))) {
@@ -730,6 +864,7 @@ export class Terminals {
   }
 
   async #readBody(t) {
+    if (t.mirror) return this.#bodyOf(t, await this.#look(t));
     const { text, cut } = await this.#backend(t).readOutput(t.target);
     const lines = vtLines(text);
     // The start of what was read is the middle of a line, and the command's own is long gone.
@@ -737,6 +872,7 @@ export class Terminals {
   }
 
   #readEvery(running) {
+    if (running.anchor && Date.now() - running.at < EAGER_FOR_MS) return 0;
     return Date.now() - (running.changedAt ?? running.at) < QUIET_AFTER_MS ? READ_EVERY_MS : QUIET_READ_EVERY_MS;
   }
 
@@ -783,28 +919,133 @@ export class Terminals {
     return changed;
   }
 
-  // A mirrored terminal's screen, with what's above it, is its one output: sent again whole when it has
-  // changed, as a running command's is. What a program with the screen to itself shows is a page's.
+  // What a mirrored terminal holds now, and where each of its lines starts among all it has held.
+  async #look(t) {
+    const { text, cut, end } = await this.#backend(t).readOutput(t.target);
+    const lines = vtLines(text);
+    return { text, cut, lines, starts: lineStarts(text, lines.length, end) };
+  }
+
+  // What's under a mirrored terminal's running command, in what's read of the terminal now. When its
+  // own line can't be found, as when more has been printed since than is read, all that's read is its,
+  // and can't be parted. A program that had the screen to itself when it was first sent a line has
+  // nowhere to start from, and what it prints then is no line's.
+  #bodyOf(t, look) {
+    const { anchor } = t.running;
+    if (anchor.offset === undefined && anchor.typed === undefined) return { lines: [], cut: false, isPlaceless: true };
+    const at = anchorLine(look.lines, look.starts, anchor);
+    if (at === undefined) return { lines: look.cut ? look.lines.slice(1) : look.lines, cut: true };
+    return { lines: look.lines.slice(at + anchor.span), cut: false };
+  }
+
+  // The shell's prompt, which only the shell knows: Ctrl-C at it draws it again under itself, and how
+  // far down the last line has gone is how many lines it takes, of which those that show something
+  // count. Its last line is what the shell says while it waits. Ctrl-C also takes away anything typed
+  // there, which a command would be added to.
+  async #measure(t, before) {
+    const was = tailLines(before.lines);
+    await this.#backend(t).pressKey(t.target, 'C-c');
+    let last;
+    for (const deadline = Date.now() + MEASURE_LIMIT_MS; ;) {
+      await pause(MEASURE_CHECK_MS);
+      const look = await this.#look(t);
+      const now = tailLines(look.lines);
+      const added = linesAdded(was, now);
+      // Drawn, once it's there and has stopped changing.
+      if ((added > 0 && look.text === last?.text) || Date.now() >= deadline) {
+        t.prompt = { height: promptHeight(now, Math.max(added, 1)), text: tailOf(look.lines).text };
+        return look;
+      }
+      last = look;
+    }
+  }
+
+  // A command for a mirrored terminal's shell, typed at its prompt. Where the prompt's line is, is noted
+  // first, as what the command prints is what comes under it. It's said at once, as nothing in the shell
+  // says when it runs.
+  async #run(t, { text, clientId }) {
+    let look = await this.#look(t);
+    // A prompt that isn't known yet, or has something typed at it, is drawn afresh.
+    if (!promptLike(tailOf(look.lines).text, t.prompt?.text)) look = await this.#measure(t, look);
+    const tail = tailOf(look.lines);
+    const command = text.trim();
+    const anchor = {
+      offset: look.starts[Math.max(tail.index, 0)], text: tail.text, context: contextOf(look.lines, tail.index),
+      typed: squashed(command.split('\n')[0]), span: text.replace(/\n+$/, '').split('\n').length,
+    };
+    await this.#type(t, text);
+    const now = Date.now();
+    const line = clientId ?? `${t.id.slice(0, 8)}-${now.toString(36)}`;
+    t.running = { command, at: now, readAt: 0, segments: [{ line }], before: look.text, anchor };
+    t.lastCommand = command;
+    t.lastActiveAt = now;
+    this.#append(t, { role: 'user', text: command, shell: true, at: now });
+    this.#store.report(t.id, 'message.user', { text: command, shell: true, clientId: line }, { fields: { lastPrompt: command } });
+    if (t.status !== 'running') this.#setStatus(t, 'running');
+  }
+
+  // A program that was started at the Mac is in front of a mirrored terminal's shell, and a line is on
+  // its way to it. What it prints from here on is followed as a command's is, under the lines sent to
+  // it: from the last line it has printed on, which the line sent may show on.
+  async #attach(t) {
+    const look = (await this.#isFullScreen(t)) ? undefined : await this.#look(t);
+    const tail = look && tailOf(look.lines);
+    t.running = {
+      at: Date.now(), readAt: 0, segments: [], before: look?.text,
+      anchor: { offset: look?.starts[Math.max(tail.index, 0)], text: tail?.text ?? '', context: look ? contextOf(look.lines, tail.index) : [], span: 0 },
+    };
+  }
+
+  // The command before may be over without having been seen to be.
+  async #settle(t) {
+    for (let reads = 0; reads < SETTLE_READS && t.running; reads++) {
+      if (reads) await pause(SETTLE_CHECK_MS);
+      await this.#readMirror(t).catch(() => {});
+    }
+  }
+
+  // What a mirrored terminal's command has printed, as far as it has got, and whether it's over. No
+  // hook says so here: it's over once the shell is in front again, a whole prompt is under what the
+  // command printed, and nothing has changed since the last look. A prompt that reads as it did before
+  // is taken at once, and one that doesn't, as it may after a `cd`, once it has stayed a while.
   async #readMirror(t) {
-    t.readAt = Date.now();
+    const running = t.running;
+    running.readAt = Date.now();
     const full = await this.#isFullScreen(t);
     if (full !== t.fullScreen) {
       t.fullScreen = full;
-      t.changedAt = Date.now();
+      running.changedAt = Date.now();
       this.#store.report(t.id, 'terminal.screen', { fullScreen: full });
     }
-    if (full) return;
-    const { text, cut } = await this.#backend(t).readOutput(t.target);
-    const lines = vtLines(text);
-    const shown = partFrom(cut ? lines.slice(1) : lines, 0);
-    if (shown === (t.shown ?? '')) return;
-    t.shown = shown;
-    t.changedAt = Date.now();
-    t.lastActiveAt = t.changedAt;
-    this.#store.report(
-      t.id, 'message.output', { stdout: shown, stderr: '', replies: false, clientId: SCREEN_LINE, running: t.status === 'running', ...this.#width(t) },
-      { supersedes: event => event.kind === 'message.output' },
-    );
+    // What a program that has the screen to itself shows is a page's, and none of its output.
+    if (full) {
+      running.screen = undefined;
+      return;
+    }
+    const look = await this.#look(t);
+    // Nothing has come of what was typed yet.
+    if (look.text === running.before) return;
+    const isStill = look.text === running.screen;
+    running.screen = look.text;
+    if (!isStill) running.stillSince = Date.now();
+    const body = this.#bodyOf(t, look);
+    const lines = trimEnd(body.lines);
+    const tail = tailOf(look.lines);
+    const height = t.prompt?.height ?? 1;
+    const isPrompted = promptLike(tail.text, t.prompt?.text);
+    const hasPrompt = body.isPlaceless || lines.length >= height;
+    const output = lines.slice(0, Math.max(lines.length - height, 0));
+    const hasWaited = Date.now() - running.stillSince >= PROMPT_WAIT_MS;
+    if (isStill && hasPrompt && (isPrompted || hasWaited) && !(await this.#frontNow(t))) {
+      if (t.prompt) t.prompt.text = tail.text;
+      this.#sendParts(t, output, body.cut, { done: true });
+      this.#finish(t, undefined);
+      return;
+    }
+    running.tail = body.cut ? undefined : tailOf(body.lines);
+    // A prompt under the output is the shell's, back already, and none of what the command printed.
+    const shown = isPrompted && hasPrompt && !t.front ? output : lines;
+    if (this.#sendParts(t, shown, body.cut, {})) running.changedAt = Date.now();
   }
 
   // How wide the terminal was when its output was read, which is where its lines broke.
@@ -829,7 +1070,7 @@ export class Terminals {
   // of it is all there is. A `status` of null leaves the session's as it is, for whoever ends it.
   #finishUnseen(t, status) {
     const last = t.running.segments.at(-1);
-    if (last.sent?.running) {
+    if (last?.sent?.running) {
       last.sent.running = false;
       this.#store.report(
         t.id, 'message.output', { stdout: last.sent.text, stderr: '', replies: false, clientId: last.line, running: false, ...this.#width(t) },
@@ -845,7 +1086,7 @@ export class Terminals {
     const now = Date.now();
     running.segments.forEach((segment, index) => {
       const isLast = index === running.segments.length - 1;
-      if (index > 0) this.#append(t, { role: 'user', text: segment.shown, shell: true, input: true, at: segment.at ?? now });
+      if (segment.shown !== undefined) this.#append(t, { role: 'user', text: segment.shown, shell: true, input: true, at: segment.at ?? now });
       const text = segment.sent?.text ?? '';
       const exitCode = isLast ? code : undefined;
       if (text || exitCode) this.#append(t, { role: 'output', stdout: text, stderr: '', replies: false, at: now, ...this.#width(t), ...(exitCode !== undefined && { exitCode }) });
@@ -858,7 +1099,9 @@ export class Terminals {
     t.running = undefined;
     t.lastActiveAt = now;
     this.#noteFolder(t);
-    if (status) this.#setStatus(t, status);
+    // A mirrored terminal's shell may have something else in front by now, started at the Mac.
+    if (status) this.#setStatus(t, t.mirror && t.front ? 'running' : status);
+    if (t.mirror) this.#sayFront(t);
     this.#save(t);
   }
 
@@ -882,7 +1125,8 @@ export class Terminals {
       const { lines, cut } = await this.#readBody(t);
       mark = cut ? undefined : tailOf(lines);
     }
-    const line = clientId ?? `${t.id.slice(0, 8)}-${running.pid}-${running.seq}-${running.segments.length}`;
+    const of = running.key ? `${running.pid}-${running.seq}` : running.at.toString(36);
+    const line = clientId ?? `${t.id.slice(0, 8)}-${of}-${running.segments.length}`;
     const shown = hidden ? HIDDEN_TEXT : text;
     running.segments.push({ line, shown, at: Date.now(), mark: mark ?? { index: -1, text: '' } });
     // Its answer is on its way, so it's read as often as a command just started.
@@ -900,6 +1144,8 @@ export class Terminals {
 
   #append(t, item) {
     const file = path.join(this.#dir(t), HISTORY);
+    // A mirrored terminal has no folder here until it has done something to keep.
+    if (t.mirror) fs.mkdirSync(this.#dir(t), { recursive: true, mode: 0o700 });
     fs.appendFileSync(file, `${JSON.stringify(item)}\n`, { mode: 0o600 });
     try {
       if (fs.statSync(file).size > HISTORY_LIMIT_BYTES) this.#shorten(file);
@@ -916,15 +1162,11 @@ export class Terminals {
 
   // What it did, with a running command's output and the lines sent to it as far as they've got.
   #items(t) {
-    if (t.mirror) {
-      const item = { role: 'output', stdout: t.shown, stderr: '', replies: false, at: t.readAt, clientId: SCREEN_LINE, running: t.status === 'running', ...this.#width(t) };
-      return t.shown ? [item] : [];
-    }
     const items = (readText(path.join(this.#dir(t), HISTORY)) ?? '').split('\n').filter(Boolean).flatMap(line => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
     (t.running?.segments ?? []).forEach((segment, index, segments) => {
-      if (index > 0) items.push({ role: 'user', text: segment.shown, shell: true, input: true, at: segment.at });
+      if (segment.shown !== undefined) items.push({ role: 'user', text: segment.shown, shell: true, input: true, at: segment.at });
       const text = segment.sent?.text;
       if (text) items.push({ role: 'output', stdout: text, stderr: '', replies: false, at: t.running.readAt, ...this.#width(t), ...(index === segments.length - 1 && { running: true }) });
     });

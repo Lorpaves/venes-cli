@@ -2163,13 +2163,22 @@ async function isThePagesSizeWhoeverHasItOpen(r) {
   }
 }
 
-// A terminal the reader opened in Rex themselves, with none of the helper's hooks in its shell.
+// A terminal the reader opened in Rex themselves, with none of the helper's hooks in its shell, and a
+// prompt of three lines, as a framework draws one.
 async function mirrorsATerminalOpenInRex(r) {
-  const made = JSON.parse(rex('new', 'run', '--json', '--cwd', WS, '--shell=none', '--', '/bin/zsh', '-f'));
+  const made = JSON.parse(rex('new', 'run', '--json', '--cwd', WS, '--shell=none', '--', '/usr/bin/env', 'PS1=\n%~\n❯ ', '/bin/zsh', '-f'));
   const pane = made.initial_windows[0].block_ids[0];
   const id = pane.replace(/^block:/, '');
   const typeAtTheMac = text => rex('send', '-s', made.session_id, '-b', pane, text);
   const status = wanted => r.wait(e => e.kind === 'session.status' && e.sessionId === id && e.status === wanted, 10000, `${wanted}`);
+  const said = line => r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === line && !e.running, 15000, `what ${line} printed`);
+  const send = async (text, clientId) => {
+    r.mark();
+    await r.client.request('send', { sessionId: id, text, clientId });
+    const line = await r.wait(e => e.kind === 'message.user' && e.sessionId === id && e.clientId === clientId, 5000, `the line ${clientId}`);
+    assert.deepEqual([line.text, line.shell], [text, true]);
+    return line;
+  };
   try {
     const found = await r.wait(e => e.kind === 'session.discovered' && e.sessionId === id, 10000, 'the mirror');
     assert.deepEqual([found.terminal, found.mirror, found.cwd], [true, true, fs.realpathSync(WS)]);
@@ -2177,38 +2186,95 @@ async function mirrorsATerminalOpenInRex(r) {
     const session = sessions.find(s => s.id === id);
     assert.deepEqual([session.terminal, session.mirror, session.status, session.pane], [true, true, 'idle', pane]);
 
-    // Its page is its screen, with what was typed at the Mac, read when it's opened.
+    // What's typed at the Mac isn't followed, so its page starts with nothing on it.
     typeAtTheMac('echo typed-at-the-mac\n');
     await delay(600);
     const opened = await r.client.request('join', { sessionId: id, limit: 60 });
-    assert.equal(opened.items.length, 1);
-    assert.match(plainOf(opened.items[0].stdout), /echo typed-at-the-mac\ntyped-at-the-mac/);
-    assert.deepEqual([opened.items[0].role, opened.hasMore, opened.sessions[0].mirror], ['output', false, true]);
-    assert.ok(opened.items[0].columns > 0, 'with how wide it is');
+    assert.deepEqual([opened.items, opened.hasMore, opened.sessions[0].mirror], [[], false, true]);
 
-    // With its page open it's the page's size, and a line sent shows as the terminal shows it.
+    // With its page open it's the page's size. A command sent is a line of its own, and what it printed
+    // is under it: none of the prompt, and not the line it was typed on.
     assert.equal((await r.client.request('terminalView', { sessionId: id, columns: 47, rows: 30 })).columns, 47);
-    await r.client.request('send', { sessionId: id, text: 'echo from-the-phone; tput cols' });
-    const shown = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && /from-the-phone\n47/.test(plainOf(e.stdout)), 10000, 'its screen');
-    assert.deepEqual([shown.clientId, shown.columns, shown.replies], ['screen', 47, false]);
-    assert.ok(!r.events.some(e => e.kind === 'message.user' && e.sessionId === id), 'with no line of its own');
+    assert.equal((await send('echo from-the-phone; tput cols', 'p1')).input, undefined);
+    const first = await said('p1');
+    assert.deepEqual([plainOf(first.stdout), first.columns, first.replies, first.exitCode], ['from-the-phone\n47', 47, false, undefined]);
+    await status('idle');
 
-    // It says where its shell goes, and what git says there is asked the same way.
+    // The same thing as was typed at the Mac: only what this one printed is its.
+    await send('echo typed-at-the-mac', 'p2');
+    assert.equal(plainOf((await said('p2')).stdout), 'typed-at-the-mac');
+    await status('idle');
+
+    // Output that ends without a line's end is kept, with the mark the shell leaves after it.
+    await send('printf no-line-end', 'p9');
+    assert.equal(plainOf((await said('p9')).stdout), 'no-line-end%');
+    await status('idle');
+
+    // Something left at the prompt at the Mac goes first, or the command would be added to it.
+    typeAtTheMac('echo left-at-the-prompt');
+    await delay(300);
+    await send('echo sent-after', 'p3');
+    assert.equal(plainOf((await said('p3')).stdout), 'sent-after');
+    await status('idle');
+
+    // It says where its shell goes, as the command it is, and what git says there is asked the same way.
+    r.mark();
     await r.client.request('terminalCd', { sessionId: id, path: '/tmp' });
+    assert.equal((await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'the cd')).text, 'cd /tmp');
     const moved = await r.wait(e => e.kind === 'session.cwd' && e.sessionId === id, 10000, 'session.cwd');
     assert.match(moved.cwd, /^\/(private\/)?tmp$/);
+    await status('idle');
     assert.equal((await r.client.request('terminalStatus', { sessionId: id })).status.cwd, moved.cwd);
+    assert.ok(!r.events.some(e => e.kind === 'message.output' && e.sessionId === id), 'with nothing printed');
 
-    // A program in front is running, and takes Ctrl-C.
-    await r.client.request('send', { sessionId: id, text: 'sleep 30' });
+    // One that prints more than is read at once: the end of it, without the prompt. The next one is
+    // still found, in a terminal that holds more than is read.
+    await send('seq 1 150000', 'p4');
+    const flood = plainOf((await said('p4')).stdout).split('\n');
+    assert.deepEqual([flood.at(-1), flood.every(text => /^\d+$/.test(text)), flood.length > 100], ['150000', true, true]);
+    await status('idle');
+    await send('echo after-the-flood', 'p5');
+    assert.equal(plainOf((await said('p5')).stdout), 'after-the-flood');
+    await status('idle');
+
+    // A program in front is running, and takes a line and Ctrl-C. It's the command's own, so nothing
+    // more is said of it.
+    await send('cat', 'p6');
     await status('running');
-    assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, 'sleep');
-    assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).lastPrompt, 'sleep', 'which a list names it by');
+    await delay(800);
+    assert.ok(!r.events.some(e => e.kind === 'terminal.program' && e.sessionId === id));
+    assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).lastPrompt, 'cat');
     await assert.rejects(r.client.request('terminalCd', { sessionId: id, path: WS }), { code: 'terminal_busy' });
+    assert.equal((await send('to-the-program', 'p7')).input, true);
+    const echoed = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p7' && /to-the-program\nto-the-program/.test(plainOf(e.stdout)), 10000, 'its answer');
+    assert.equal(echoed.running, true);
     r.mark();
     await r.client.request('interrupt', { sessionId: id });
     await status('idle');
+    assert.match(plainOf((await said('p7')).stdout), /^to-the-program\nto-the-program/);
+    assert.ok(!/❯/.test(plainOf((await said('p7')).stdout)), 'without the prompt that came back');
+
+    // A program started at the Mac is named, and a line for it is followed from where it was.
+    r.mark();
+    typeAtTheMac('cat\n');
+    await status('running');
+    assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, 'cat');
+    assert.equal((await send('from-the-phone', 'p8')).input, true);
+    await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p8' && /from-the-phone\nfrom-the-phone/.test(plainOf(e.stdout)), 10000, 'its answer');
+    r.mark();
+    await r.client.request('interrupt', { sessionId: id });
+    await status('idle');
+    assert.match(plainOf((await said('p8')).stdout), /^from-the-phone\nfrom-the-phone/);
     assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, undefined);
+
+    // What it did is there for a client that comes later.
+    const again = await r.client.request('join', { sessionId: id, limit: 60 });
+    assert.deepEqual(again.items.filter(item => item.role === 'user').map(item => [item.text, item.input]), [
+      ['echo from-the-phone; tput cols', undefined], ['echo typed-at-the-mac', undefined], ['printf no-line-end', undefined],
+      ['echo sent-after', undefined], ['cd /tmp', undefined],
+      ['seq 1 150000', undefined], ['echo after-the-flood', undefined], ['cat', undefined], ['to-the-program', true], ['from-the-phone', true],
+    ]);
+    assert.ok(again.items.filter(item => item.role === 'output').every(item => !/❯/.test(plainOf(item.stdout))));
 
     // Claude Code isn't mirrored, and neither is what the helper starts.
     assert.ok(sessions.every(s => !s.mirror || s.id === id));

@@ -57,7 +57,8 @@ export function vtLines(vt) {
 // The text of a line, as it reads.
 export const plain = line => line.replace(/\u001b\[[0-9;:]*m/g, '');
 
-const squashed = text => text.replace(/\s+/g, '');
+// A line without its spaces, which a terminal may add or take away where it joins what it wrapped.
+export const squashed = text => text.replace(/\s+/g, '');
 
 // The colours in force where line `index` starts, which the lines above it set, to start a part of the
 // output that begins there.

@@ -9,7 +9,8 @@ import { ZSH_FILES, installShellFiles, shellCommand } from '../../src/shell.mjs'
 import { parseStatus } from '../../src/gitstate.mjs';
 import { changesTerminals } from '../../src/rex.mjs';
 import {
-  HIDDEN_TEXT, SCREEN_LINE, Terminals, historyPage, mirrorId, parseState, partFrom, partStarts, partTexts, shellQuoted, sizeOf, tailOf,
+  HIDDEN_TEXT, Terminals, anchorLine, contextOf, historyPage, lineStarts, linesAdded, mirrorId, parseState, partFrom, partStarts, partTexts, promptHeight,
+  promptLike, shellQuoted, sizeOf, tailOf,
 } from '../../src/terminals.mjs';
 
 const ESC = '\u001b';
@@ -492,14 +493,23 @@ function setUpRex(t) {
   const events = [];
   store.on('event', event => events.push(event));
   const calls = [];
-  const rex = { open: [], screens: new Map(), sizes: new Map(), fullScreen: false, changed: undefined };
+  const rex = { open: [], screens: new Map(), shells: new Map(), sizes: new Map(), fullScreen: false, changed: undefined, limit: undefined };
   const backend = {
     listTerminals: async () => rex.open.map(terminal => ({ ...terminal })),
     watchTerminals: listener => { rex.changed = listener; },
     closeLink: async () => {},
-    paste: async (target, text) => { calls.push(['paste', target.pane, text]); },
-    pressKey: async (target, key) => { calls.push(['key', target.pane, key]); },
-    readOutput: async target => ({ text: rex.screens.get(target.pane) ?? '', cut: false }),
+    front: async target => {
+      const { program, cwd } = rex.open.find(terminal => terminal.pane === target.pane);
+      return { program, cwd };
+    },
+    paste: async (target, text) => { calls.push(['paste', target.pane, text]); rex.shells.get(target.pane)?.paste(text); },
+    pressKey: async (target, key) => { calls.push(['key', target.pane, key]); rex.shells.get(target.pane)?.key(key); },
+    // As Rex reads it: the end of what the terminal holds, when that's more than is read at once.
+    readOutput: async target => {
+      const whole = Buffer.from(rex.screens.get(target.pane) ?? '');
+      const cut = Boolean(rex.limit) && whole.length > rex.limit;
+      return { text: (cut ? whole.subarray(whole.length - rex.limit) : whole).toString('utf8'), cut, end: whole.length };
+    },
     readStyledScreen: async target => rex.screens.get(target.pane) ?? '',
     isFullScreen: async () => rex.fullScreen,
     hidesInput: async () => false,
@@ -517,7 +527,77 @@ function setUpRex(t) {
   t.after(() => terminals.stop());
   const of = kind => events.filter(event => event.kind === kind);
   const shell = (pane, cwd, more = {}) => ({ pane: `block:${pane}`, rexSession: 'session:1', label: 'shell', program: 'zsh', cwd, ...more });
-  return { store, events, calls, rex, terminals, of, shell };
+  return { store, events, calls, rex, terminals, of, shell, root };
+}
+
+// A shell in one of the fake Rex's terminals, with none of the helper's hooks. Its prompt takes three
+// lines, as a framework's does: an empty one, the folder, and the one that's typed on. `runs` says what
+// a command prints: its lines, or `{ lines, stays }` for a program that stays in front until `ends`.
+function fakeShell(rex, pane, { folder = '~/app', runs = () => [], before = [] } = {}) {
+  const lines = [...before];
+  const state = { folder, typed: '', program: undefined, base: '', takes: undefined };
+  const show = () => { rex.screens.set(pane, lines.join('\r\n')); };
+  const inFront = (program, cwd) => {
+    rex.open = rex.open.map(terminal => (terminal.pane === pane ? { ...terminal, program, ...(cwd && { cwd }) } : terminal));
+  };
+  // Under output that didn't end with a line's end, the empty line isn't there: the shell filled that
+  // line to get to the next, and the terminal has the two as one.
+  const prompt = ({ isPartial = false } = {}) => {
+    lines.push(...(isPartial ? [] : ['']), state.folder, '❯');
+    state.typed = '';
+    show();
+  };
+  const shell = {
+    state,
+    // Typed, here or at the Mac: on the prompt's line, or on the last line of the program in front.
+    paste(text) {
+      state.typed += text;
+      lines[lines.length - 1] = state.program ? `${state.base}${state.base && ' '}${state.typed}` : `❯ ${state.typed}`;
+      show();
+    },
+    key(key) {
+      if (key === 'C-c') {
+        if (state.program) shell.ends(['^C']);
+        else prompt();
+      } else if (key === 'Enter') {
+        const { typed } = state;
+        state.typed = '';
+        if (state.program) {
+          shell.prints(state.takes?.(typed) ?? []);
+          return;
+        }
+        const result = runs(typed, shell);
+        const { lines: printed = [], stays, isPartial } = Array.isArray(result) ? { lines: result } : result;
+        if (stays) shell.starts(stays, printed);
+        else shell.ends(printed, { isPartial });
+      }
+    },
+    starts(program, printed = []) {
+      state.program = program;
+      state.typed = '';
+      inFront(program);
+      shell.prints(printed);
+    },
+    prints(printed) {
+      lines.push(...printed);
+      state.base = lines.at(-1) ?? '';
+      show();
+    },
+    ends(printed = [], how) {
+      lines.push(...printed);
+      state.program = undefined;
+      inFront('zsh');
+      prompt(how);
+    },
+    // The shell is somewhere else, which its prompt says.
+    moves(to, cwd) {
+      state.folder = to;
+      inFront('zsh', cwd);
+    },
+  };
+  rex.shells.set(pane, shell);
+  prompt();
+  return shell;
 }
 
 test('what Rex says of its terminals is a change when one opens, closes, or does something else', () => {
@@ -574,55 +654,252 @@ test('the terminals open in Rex are sessions, for as long as they are open and t
   assert.deepEqual([of('terminal.program').at(-1).program, store.find('f').lastPrompt, store.find('f').status], [undefined, undefined, 'idle']);
 });
 
-test('a mirrored terminal\'s page is its screen, read while someone has it open, and typed into', async t => {
-  const { terminals, rex, calls, of, shell } = setUpRex(t);
+test('a line in what a terminal holds is found again by how far it is from the start', () => {
+  assert.deepEqual(lineStarts('a\r\nbé\r\nc', 3), [0, 3, 8]);
+  assert.deepEqual(lineStarts('é\r\nc', 2, 108), [103, 107], 'counted back from the end of a read that starts somewhere in the middle');
+  assert.deepEqual(lineStarts('a\nb', 3), [], 'not when the lines aren\'t the text\'s own');
+});
+
+test('a prompt reads as it did, or ends as it did when it names something that changes', () => {
+  assert.equal(promptLike('❯', '❯'), true);
+  assert.equal(promptLike('me@mac tmp %', 'me@mac app %'), true);
+  assert.equal(promptLike('❯ half typed', '❯'), false);
+  assert.equal(promptLike('bin  src', '❯'), false);
+  assert.equal(promptLike('❯', undefined), false, 'not before it\'s known');
+});
+
+test('a prompt is as many lines as come under the last one when it\'s drawn again', () => {
+  const before = ['bin  src', '', '~/app', '❯'];
+  assert.equal(linesAdded(before, [...before, '', '~/app', '❯']), 3);
+  // One that was drawn again before, with nothing between: it's still three.
+  const twice = [...before, '', '~/app', '❯'];
+  assert.equal(linesAdded(twice, [...twice, '', '~/app', '❯']), 3);
+  // Something typed on the last line stays there, and isn't what the lines are known by.
+  assert.equal(linesAdded(['bin  src', '', '~/app', '❯ half'], ['bin  src', '', '~/app', '❯ half', '', '~/app', '❯']), 3);
+  assert.equal(linesAdded(['a', 'me@mac app %'], ['a', 'me@mac app %', 'me@mac app %']), 1);
+  // A terminal that's full has let go of its oldest lines, so what's read starts further on.
+  assert.equal(linesAdded(['old', 'bin  src', '', '~/app', '❯'], ['bin  src', '', '~/app', '❯', '', '~/app', '❯']), 3);
+  assert.equal(linesAdded(before, before), 0, 'nothing has come yet');
+  assert.equal(linesAdded(['❯'], ['❯', '', '~/app', '❯']), 3, 'with nothing above it, by how many lines there are');
+  // The empty line it starts with isn't always there, so it's the ones that show something that count.
+  assert.equal(promptHeight(['bin  src', '', '~/app', '❯', '', '~/app', '❯'], 3), 2);
+  assert.equal(promptHeight(['a', 'me@mac app %', 'me@mac app %'], 1), 1);
+  assert.equal(promptHeight(['', '', ''], 2), 2);
+});
+
+test('the line a command was typed on is where it was, or where the prompt has the command after it', () => {
+  const lines = ['old', '', '~/app', '❯ ls', 'bin  src', '', '~/app', '❯'];
+  const starts = [0, 10, 20, 30, 40, 50, 60, 70];
+  const typed = { offset: 30, text: '❯', typed: 'ls', context: contextOf(lines, 3) };
+  assert.deepEqual(typed.context, ['old', '', '~/app']);
+  assert.equal(anchorLine(lines, starts, typed), 3);
+  // More has been printed than is read, so what's read starts further on.
+  assert.equal(anchorLine(lines.slice(2), starts.slice(2), typed), 1);
+  // Cleared since, or older lines let go of, so nothing is where it was.
+  assert.equal(anchorLine(['❯ ls', 'bin  src'], [900, 910], typed), 0);
+  assert.equal(anchorLine(lines, starts.map(start => start - 7), typed), 3);
+  assert.equal(anchorLine(['bin  src', 'ls.txt'], [900, 910], typed), undefined);
+  // Another line that starts where it did isn't it.
+  assert.equal(anchorLine(['x', 'y', 'tools  ls.txt'], [10, 20, 30], typed), undefined);
+  // A prompt with more on its line than the command, as one with the time at its end: by what's above.
+  const timed = ['old', '', '~/app', '❯ ls      12:00', 'bin  src'];
+  assert.equal(anchorLine(timed, [900, 910, 920, 930, 940], { ...typed, text: '❯      11:59' }), 3);
+  // A program that was already running has no command to go by, only where it had got to.
+  const running = { offset: 40, text: 'bin  src', context: contextOf(lines, 4) };
+  assert.equal(anchorLine(lines, starts, running), 4);
+  assert.equal(anchorLine(lines, starts.map(start => start + 5), running), 4, 'by the lines above it');
+  assert.equal(anchorLine(['other', 'lines'], [0, 10], running), undefined);
+});
+
+const ended = (of, line) => of('message.output').find(event => event.clientId === line && !event.running);
+
+test('a command sent to a mirrored terminal is a line of its own, with what it printed under it', async t => {
+  const { terminals, rex, calls, of, shell, store, root } = setUpRex(t);
   rex.open = [shell('a', '/Users/me/app')];
-  rex.screens.set('block:a', '~/app ❯ ls\r\nbin  src\r\n~/app ❯ ');
+  const zsh = fakeShell(rex, 'block:a', {
+    before: ['❯ ls', 'bin  src'],
+    runs: (command, at) => {
+      if (command.startsWith('cd ')) at.moves('/tmp', os.tmpdir());
+      if (command === 'printf hi') return { lines: ['hi%'], isPartial: true };
+      return { 'echo hi': ['hi'], ls: ['bin  src'] }[command] ?? [];
+    },
+  });
   await terminals.restore();
   await until(() => terminals.has('a'), 'the first look at Rex');
-  await new Promise(resolve => { setTimeout(resolve, 40); });
-  assert.equal(of('message.output').length, 0, 'not read with no one looking');
-
   const opened = await terminals.join('a', { limit: 60 });
-  assert.deepEqual(opened.items.map(item => [item.role, item.stdout, item.clientId, item.running, item.columns]), [
-    ['output', '~/app ❯ ls\nbin  src\n~/app ❯', SCREEN_LINE, false, 156],
-  ], 'as wide as it is, before any page has had it open');
-  assert.deepEqual([opened.hasMore, opened.sessions[0].mirror, opened.turn, opened.queued], [false, true, [], []]);
+  assert.deepEqual([opened.items, opened.hasMore, opened.sessions[0].mirror, opened.turn, opened.queued], [[], false, true, [], []], 'what was typed at the Mac isn\'t there');
 
   const phone = {};
   assert.equal((await terminals.view('a', { columns: 47, rows: 30 }, phone)).columns, 47);
   assert.deepEqual(calls.at(-1), ['take', 'block:a', { columns: 47, rows: 30 }]);
-  assert.deepEqual(await terminals.send('a', { text: 'make', clientId: 'c1' }), { queued: false });
-  assert.deepEqual(calls.slice(-2), [['paste', 'block:a', 'make'], ['key', 'block:a', 'Enter']]);
-  assert.equal(of('message.user').length, 0, 'a line shows only as the terminal shows it');
-  rex.screens.set('block:a', '~/app ❯ make\r\ncc main.c\r\n');
-  await until(() => of('message.output').some(event => /cc main/.test(event.stdout)), 'the screen');
-  const shown = of('message.output').at(-1);
-  assert.deepEqual([shown.stdout, shown.clientId, shown.columns, shown.replies], ['~/app ❯ make\ncc main.c', SCREEN_LINE, 47, false]);
 
-  // What's running takes Ctrl-C, and a folder can't be changed under it.
-  rex.open = [shell('a', '/Users/me/app', { program: 'make' })];
-  rex.changed();
-  await until(() => of('session.status').at(-1)?.status === 'running', 'it to run');
-  await assert.rejects(terminals.cd('a', { path: os.tmpdir() }), { code: 'terminal_busy' });
-  await terminals.interrupt('a');
-  assert.deepEqual(calls.at(-1), ['key', 'block:a', 'C-c']);
-  rex.open = [shell('a', '/Users/me/app')];
-  rex.changed();
-  await until(() => of('session.status').at(-1)?.status === 'idle', 'it to end');
-  await assert.rejects(terminals.interrupt('a'), { code: 'not_running' });
-  assert.deepEqual((await terminals.status('a')).status, { cwd: '/Users/me/app', home: '/Users/me', running: false });
+  // The first one finds out how many lines the prompt takes, with Ctrl-C at it.
+  assert.deepEqual(await terminals.send('a', { text: 'echo hi', clientId: 'c1' }), { queued: false });
+  assert.deepEqual(calls.slice(-3), [['key', 'block:a', 'C-c'], ['paste', 'block:a', 'echo hi'], ['key', 'block:a', 'Enter']]);
+  assert.deepEqual(of('message.user').map(event => [event.text, event.shell, event.clientId, event.input]), [['echo hi', true, 'c1', undefined]]);
+  await until(() => ended(of, 'c1'), 'it to end');
+  const said = ended(of, 'c1');
+  assert.deepEqual([said.stdout, said.columns, said.replies, said.exitCode], ['hi', 47, false, undefined], 'without the prompt, or the line it was typed on');
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'the shell to be back');
+  assert.deepEqual(of('session.status').map(event => event.status), ['running', 'idle']);
+  assert.equal(store.find('a').lastPrompt, 'echo hi');
 
-  // No one looking: it's given back, and read no more.
+  // The same thing as was typed at the Mac before: only what this one printed is its.
+  await terminals.send('a', { text: 'ls', clientId: 'c2' });
+  await until(() => ended(of, 'c2'), 'it to end');
+  assert.equal(ended(of, 'c2').stdout, 'bin  src');
+  assert.equal(calls.filter(([, , key]) => key === 'C-c').length, 1, 'the prompt is known by now');
+
+  // One that prints nothing has no output, and where the shell went is said.
+  const outputs = of('message.output').length;
+  await terminals.cd('a', { path: os.tmpdir() });
+  const moved = `cd ${os.tmpdir()}`;
+  assert.deepEqual([of('message.user').at(-1).text, of('message.user').at(-1).shell], [moved, true]);
+  await until(() => of('session.cwd').length, 'session.cwd');
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'the shell to be back');
+  assert.deepEqual([of('session.cwd').at(-1).cwd, of('message.output').length], [os.tmpdir(), outputs]);
+  assert.equal((await terminals.status('a')).status.cwd, os.tmpdir());
+
+  // Something typed at the Mac and left at the prompt goes first, or the command would be added to it.
+  zsh.paste('half typed');
+  await terminals.send('a', { text: 'echo hi', clientId: 'c3' });
+  assert.deepEqual(calls.slice(-3), [['key', 'block:a', 'C-c'], ['paste', 'block:a', 'echo hi'], ['key', 'block:a', 'Enter']]);
+  await until(() => ended(of, 'c3'), 'it to end');
+  assert.equal(ended(of, 'c3').stdout, 'hi');
+
+  // Output that ends without a line's end has the prompt right under it, with no empty line between.
+  await terminals.send('a', { text: 'printf hi', clientId: 'c4' });
+  await until(() => ended(of, 'c4'), 'it to end');
+  assert.equal(ended(of, 'c4').stdout, 'hi%');
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'the shell to be back');
+
+  // It's all there for a client that comes later.
+  const again = await terminals.join('a', { limit: 60 });
+  assert.deepEqual(again.items.map(item => [item.role, item.text ?? item.stdout]), [
+    ['user', 'echo hi'], ['output', 'hi'], ['user', 'ls'], ['output', 'bin  src'], ['user', moved], ['user', 'echo hi'], ['output', 'hi'],
+    ['user', 'printf hi'], ['output', 'hi%'],
+  ]);
+
+  // No one looking: it's given back. Deleting it closes it in Rex, and nothing of it is kept.
   await terminals.leave('a', phone);
   assert.deepEqual(calls.at(-1), ['give', 'block:a']);
-  const before = of('message.output').length;
-  rex.screens.set('block:a', 'something else');
-  await new Promise(resolve => { setTimeout(resolve, 40); });
-  assert.equal(of('message.output').length, before);
-
-  // Deleting it closes it in Rex.
   await terminals.remove('a');
   assert.deepEqual(calls.at(-1), ['close', 'block:a']);
   assert.equal(of('session.deleted').length, 1);
+  assert.equal(fs.existsSync(path.join(root, 'a')), false);
+});
+
+test('a command that goes on in a mirrored terminal is followed until its shell is back', async t => {
+  const { terminals, rex, calls, of, shell, root } = setUpRex(t);
+  rex.open = [shell('a', '/Users/me/app')];
+  const zsh = fakeShell(rex, 'block:a', { runs: command => (command === 'make' ? { lines: ['cc main.c', 'Continue?'], stays: 'make' } : []) });
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  await terminals.send('a', { text: 'make', clientId: 'c1' });
+  await until(() => of('message.output').some(event => /Continue/.test(event.stdout)), 'what it has printed');
+  const first = of('message.output').at(-1);
+  assert.deepEqual([first.stdout, first.running, first.clientId], ['cc main.c\nContinue?', true, 'c1']);
+  rex.changed();
+  await new Promise(resolve => { setTimeout(resolve, 400); });
+  assert.deepEqual([of('terminal.program').length, of('session.status').at(-1).status], [0, 'running'], 'the program is the command\'s, which is already said');
+  await assert.rejects(terminals.cd('a', { path: os.tmpdir() }), { code: 'terminal_busy' });
+
+  // A line for it shows where it was typed, with what came of it.
+  zsh.state.takes = line => (line === 'yes' ? ['linking'] : []);
+  assert.deepEqual(await terminals.send('a', { text: 'yes', clientId: 'c2' }), { queued: false });
+  assert.deepEqual(calls.slice(-2), [['paste', 'block:a', 'yes'], ['key', 'block:a', 'Enter']]);
+  const line = of('message.user').at(-1);
+  assert.deepEqual([line.text, line.shell, line.clientId, line.input], ['yes', true, 'c2', true]);
+  await until(() => of('message.output').some(event => event.clientId === 'c2' && /linking/.test(event.stdout)), 'its answer');
+  assert.deepEqual([of('message.output').at(-1).stdout, of('message.output').at(-1).running], ['Continue? yes\nlinking', true]);
+  assert.deepEqual([ended(of, 'c1').stdout, of('message.output').filter(event => event.clientId === 'c1').at(-1).running], ['cc main.c', false]);
+
+  // Ctrl-C ends it, and the shell is back.
+  await terminals.interrupt('a');
+  assert.deepEqual(calls.at(-1), ['key', 'block:a', 'C-c']);
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'it to end');
+  assert.equal(ended(of, 'c2').stdout, 'Continue? yes\nlinking\n^C');
+  await assert.rejects(terminals.interrupt('a'), { code: 'not_running' });
+  assert.deepEqual((await terminals.status('a')).status, { cwd: '/Users/me/app', home: '/Users/me', running: false });
+  assert.deepEqual(terminals.history('a').items.map(item => [item.role, item.text ?? item.stdout, item.input]), [
+    ['user', 'make', undefined], ['output', 'cc main.c', undefined], ['user', 'yes', true], ['output', 'Continue? yes\nlinking\n^C', undefined],
+  ]);
+
+  // Closed in Rex while a command runs, it goes, with what was kept of it.
+  await terminals.send('a', { text: 'make', clientId: 'c3' });
+  await until(() => of('message.output').some(event => event.clientId === 'c3'), 'what it has printed');
+  assert.ok(fs.existsSync(path.join(root, 'a', 'history.jsonl')));
+  rex.open = [];
+  rex.changed();
+  await until(() => of('session.deleted').length, 'it to go');
+  assert.equal(of('message.output').filter(event => event.clientId === 'c3').at(-1).running, false);
+  assert.equal(fs.existsSync(path.join(root, 'a')), false);
+});
+
+test('a line for a program started at the Mac is followed from where that program was', async t => {
+  const { terminals, rex, of, shell } = setUpRex(t);
+  rex.open = [shell('a', '/Users/me/app')];
+  const zsh = fakeShell(rex, 'block:a');
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  await terminals.send('a', { text: 'true', clientId: 'c0' });
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'it to end');
+
+  zsh.paste('python3');
+  zsh.starts('python3', ['Python 3.12', '>>>']);
+  rex.changed();
+  await until(() => of('terminal.program').at(-1)?.program === 'python3', 'Rex to say so');
+  assert.equal(of('session.status').at(-1).status, 'running');
+  zsh.state.takes = line => (line === '1+1' ? ['2', '>>>'] : []);
+  assert.deepEqual(await terminals.send('a', { text: '1+1', clientId: 'c1' }), { queued: false });
+  const line = of('message.user').at(-1);
+  assert.deepEqual([line.text, line.shell, line.clientId, line.input], ['1+1', true, 'c1', true]);
+  await until(() => of('message.output').some(event => event.clientId === 'c1' && /2/.test(event.stdout)), 'its answer');
+  assert.deepEqual([of('message.output').at(-1).stdout, of('message.output').at(-1).running], ['>>> 1+1\n2\n>>>', true], 'and none of what it said before');
+
+  // It's left at the Mac.
+  zsh.paste('exit()');
+  zsh.ends();
+  rex.changed();
+  await until(() => ended(of, 'c1'), 'it to end');
+  assert.equal(ended(of, 'c1').stdout, '>>> 1+1\n2\n>>> exit()');
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'the shell to be back');
+  assert.equal(of('terminal.program').at(-1).program, undefined);
+  assert.deepEqual(terminals.history('a').items.map(item => [item.role, item.text ?? item.stdout, item.input]), [
+    ['user', 'true', undefined], ['user', '1+1', true], ['output', '>>> 1+1\n2\n>>> exit()', undefined],
+  ]);
+});
+
+test('a command is found in a terminal that holds more than is read at once', async t => {
+  const { terminals, rex, of, shell } = setUpRex(t);
+  rex.open = [shell('a', '/Users/me/app')];
+  rex.limit = 600;
+  fakeShell(rex, 'block:a', {
+    before: Array.from({ length: 200 }, (_, index) => `earlier line ${index}`),
+    runs: command => ({ 'echo hi': ['hi'], flood: Array.from({ length: 100 }, (_, index) => `flood ${index}`) }[command] ?? []),
+  });
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  await terminals.send('a', { text: 'echo hi', clientId: 'c1' });
+  await until(() => ended(of, 'c1'), 'it to end');
+  assert.equal(ended(of, 'c1').stdout, 'hi');
+
+  // One that printed more than is read: what's read is all its own, but for the prompt under it.
+  await terminals.send('a', { text: 'flood', clientId: 'c2' });
+  await until(() => ended(of, 'c2'), 'it to end');
+  const flood = ended(of, 'c2').stdout.split('\n');
+  assert.deepEqual([flood.at(-1), flood.every(text => /^flood \d+$/.test(text)), flood.length > 20], ['flood 99', true, true]);
+});
+
+test('what a mirrored terminal did is kept across a restart, for as long as the terminal is open', async t => {
+  const { terminals, rex, shell, root } = setUpRex(t);
+  for (const id of ['a', 'gone']) {
+    fs.mkdirSync(path.join(root, id));
+    fs.writeFileSync(path.join(root, id, 'history.jsonl'), `${JSON.stringify({ role: 'user', text: 'ls', shell: true, at: 1 })}\n`);
+  }
+  rex.open = [shell('a', '/Users/me/app')];
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  await until(() => !fs.existsSync(path.join(root, 'gone')), 'what a closed one kept to go');
+  assert.deepEqual((await terminals.join('a', {})).items.map(item => item.text), ['ls']);
 });

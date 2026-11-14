@@ -2122,6 +2122,39 @@ T('codex_asks_before_it_runs_a_command_and_can_be_stopped', { codex: { sandbox: 
   await r.client.request('delete', { sessionId });
 });
 
+// A session's folder is looked at from a client: what's in it, one of its files, and what git says of it.
+T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissions' }, async r => {
+  const { id: sessionId } = await r.session();
+  const root = fs.realpathSync(WS);
+  fs.writeFileSync(path.join(WS, 'e2e-look.txt'), 'first line\nsecond line\n');
+  fs.writeFileSync(path.join(WS, 'e2e-look.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
+  const listed = await r.client.request('files', { sessionId });
+  assert.deepEqual([fs.realpathSync(listed.root), fs.realpathSync(listed.path)], [root, root]);
+  const text = listed.entries.find(entry => entry.name === 'e2e-look.txt');
+  assert.deepEqual([text.kind, text.size, fs.realpathSync(text.path)], ['file', 23, path.join(root, 'e2e-look.txt')]);
+  assert.ok(!listed.entries.some(entry => entry.name === '.git'), 'git\'s own folder isn\'t listed');
+  const folders = listed.entries.filter(entry => entry.kind === 'dir').length;
+  assert.ok(listed.entries.slice(0, folders).every(entry => entry.kind === 'dir'), 'folders come first');
+
+  const read = await r.client.request('fileRead', { sessionId, path: 'e2e-look.txt' });
+  assert.deepEqual([read.name, read.size, read.text, read.data], ['e2e-look.txt', 23, 'first line\nsecond line\n', undefined]);
+  const picture = await r.client.request('fileRead', { sessionId, path: text.path.replace('e2e-look.txt', 'e2e-look.png') });
+  assert.deepEqual([picture.mediaType, picture.text, Buffer.from(picture.data, 'base64').length], ['image/png', undefined, 8]);
+  await assert.rejects(r.client.request('files', { sessionId, path: '..' }), { code: 'bad_path' });
+  await assert.rejects(r.client.request('fileRead', { sessionId, path: '/etc/hosts' }), { code: 'bad_path' });
+  await assert.rejects(r.client.request('fileRead', { sessionId, path: 'e2e-not-there.txt' }), { code: 'no_file' });
+  await assert.rejects(r.client.request('files', { sessionId: 'no-such-session' }), { code: 'unknown_session' });
+
+  // The workspace is in no repository, unless whoever runs this put it in one: either way git has an answer.
+  const { git } = await r.client.request('git', { sessionId });
+  if (git === null) {
+    await assert.rejects(r.client.request('gitLog', { sessionId }), { code: 'no_repository' });
+  } else {
+    assert.ok(typeof git.root === 'string' && Array.isArray(git.changes) && Array.isArray(git.staged));
+    assert.ok(Array.isArray((await r.client.request('gitLog', { sessionId, limit: 3 })).commits));
+  }
+});
+
 Run.prototype.waitForPane = async function waitForPane(re, ms) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (re.test(this.pane())) return; await delay(150); }

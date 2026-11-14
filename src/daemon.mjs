@@ -10,6 +10,8 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
+import { listFolder, readFile } from './files.mjs';
+import { branches as gitBranches, commit as gitCommit, diff as gitDiff, log as gitLog, status as gitStatus } from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
@@ -291,6 +293,16 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const isCodex = async sessionId => (await codex?.owns(sessionId)) === true;
   const forCodex = (name, otherwise) => async (msg, socket) => ((await isCodex(msg.sessionId)) ? codex[name](msg) : otherwise(msg, socket));
 
+  // The folder a session works in, which is where its files and its git are looked at: a session the
+  // helper follows says where it is now, and a stored one where it ran.
+  const folderOf = async sessionId => {
+    if (typeof sessionId !== 'string') throw new HelperError('unknown_session', 'No such session.');
+    const cwd = store.find(sessionId)?.cwd
+      ?? ((await isCodex(sessionId)) ? await codex.folderOf(sessionId) : (await library.info(sessionId).catch(() => undefined))?.cwd);
+    if (!cwd) throw new HelperError('unknown_session', `No session ${sessionId}`);
+    return checkedFolder(cwd);
+  };
+
   // Codex's stored threads come with the first page, which is where what's running comes too.
   const listLibrary = async ({ limit, offset }, socket) => {
     const [page, threads] = await Promise.all([
@@ -375,6 +387,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const wanted = Number.isInteger(limit) ? Math.max(limit, 1) : MENTION_LIMIT;
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
     },
+    // What's in the session's folder, a level at a time, and what's in one of its files.
+    files: async ({ sessionId, path: named }) => listFolder(await folderOf(sessionId), named),
+    fileRead: async ({ sessionId, path: named }) => readFile(await folderOf(sessionId), named),
+    // What git says of the session's folder, all of it read and none of it changed: null outside a repository.
+    git: async ({ sessionId }) => ({ git: (await gitStatus(await folderOf(sessionId))) ?? null }),
+    gitDiff: async ({ sessionId, path: file, staged, commit }) => gitDiff(await folderOf(sessionId), { path: file, staged: staged === true, commit }),
+    gitLog: async ({ sessionId, limit, skip }) => gitLog(await folderOf(sessionId), { limit, skip }),
+    gitCommit: async ({ sessionId, commit }) => gitCommit(await folderOf(sessionId), { commit }),
+    gitBranches: async ({ sessionId }) => gitBranches(await folderOf(sessionId)),
     capabilities: forCodex('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);

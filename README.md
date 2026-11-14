@@ -149,6 +149,13 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac`, `agents` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
 | `pushUnregister` | `deviceId` | That phone doesn't want them any more |
 | `start` | `cwd`, `trust`, `agent` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). With `agent: "codex"` it starts a Codex session there. See [Codex sessions](#codex-sessions). |
+| `files` | `sessionId`, `path` (optional) | What's in the session's folder, or in a folder inside it: `entries`, each a `dir` or a `file`. See [Files and git](#files-and-git). |
+| `fileRead` | `sessionId`, `path` | One of its files: its `text`, or for anything else its bytes in `data`. See [Files and git](#files-and-git). |
+| `git` | `sessionId` | `git`: the branch and what has changed in the session's folder, or null outside a repository. See [Files and git](#files-and-git). |
+| `gitDiff` | `sessionId`, `path`, `staged`, `commit` | `diff`: one file's change, from its first hunk on |
+| `gitLog` | `sessionId`, `limit`, `skip` | `commits`, newest first, and `hasMore` |
+| `gitCommit` | `sessionId`, `commit` | `commit`, with all it says, and the `files` it changed |
+| `gitBranches` | `sessionId` | `branches`, the one last committed to first |
 | `subscribe` | `since`, `bootId` (both optional), `agents` | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. `agents` lists the sessions other than Claude Code's that the client can show: `["codex"]`. See [Codex sessions](#codex-sessions). |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -294,6 +301,20 @@ A line that starts with `!` is your own command, as in Codex's terminal: `send` 
 | `question` | Codex's questions, in the shape Claude Code's have: `input.questions`, each with `question`, `header`, `options` and `multiSelect: false`, and Codex's own `id`, `isOther` and `isSecret` | `allow` with `answers` by each question's text, as for Claude Code |
 
 **What it doesn't do yet.** Slash commands, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
+
+### Files and git
+
+A session's folder can be looked at from afar, for a Claude Code session and a Codex one alike: a session the helper follows by where it is now, and a stored one by where it ran. Everything here is read. Nothing changes the folder or its repository.
+
+`files` lists a folder: the session's own with no `path`, or one inside it, named whole or from the session's folder. A path that leads out of the session's folder is refused with `bad_path`. The reply has `root`, the session's folder, the `path` and `name` of the one listed, and `entries`: folders first, then files, each by name as Finder sorts them, up to 2,000 with `truncated` past that. An entry has its `name`, its `path`, its `kind`, `dir` or `file`, and a file's `size`. A link is what it leads to. `.git` and `.DS_Store` are left out, and other hidden files are there. Inside a git repository an entry that has changed has `change`: a file what happened to it, as in `git` below, and a folder `changed` when something inside it has.
+
+`fileRead` gives a file's `path`, `name` and `size`, and what's in it. A text file comes as `text`, up to 512 KB of it, cut at a line's end with `truncated` when it's longer. Anything else comes with its `mediaType`, by its name, and its bytes in base64 as `data`, for a client to show as the picture or document it is, or with `tooLarge` and no `data` past 8 MB.
+
+`git` is null for a folder that's in no repository. In one, it has the repository's `root`, the `branch`, or the start of the commit with `detached: true` when none is checked out, the `upstream` it follows with how many commits it's `ahead` and `behind`, and two lists of files: `staged`, what the next commit would take, and `changes`, what's only in the folder. Each file has its `path` from the repository's top, a `status` of `modified`, `added`, `deleted`, `renamed` (with `from`), `copied`, `untracked` or `conflicted`, and the lines it gained and lost as `added` and `removed`, or `binary`. A file can be in both lists. Each lists up to 500, with `truncated` past that. The helper asks git without taking the index's lock, so it never gets in the way of the session's own git.
+
+`gitDiff` gives one file's change as `diff`: what `git diff` prints from the first `@@` line on, without git's own header. With `staged` it's what's staged, with `commit` what that commit did to the file, and otherwise what's only in the folder, which for a file git doesn't follow yet is all of it. A file that isn't text has `binary` and an empty `diff`. Past 512 KB it's cut at a line's end, with `truncated`.
+
+`gitLog` lists the commits that lead to where the folder is: each `hash`, its `short` form, `subject`, `author`, `at` and `refs`, the branches and tags that point at it. `limit` is 30 unless given, up to 200, and `skip` and `hasMore` page through them. `gitCommit` gives one, by its hash or the start of it: the same with its `body`, the author's `email` and its `parents`, and the `files` it changed, as `git` lists them. A merge is told against its first parent. `gitBranches` lists the local `branches`: each `name`, whether it's the `current` one, its `upstream` with `ahead` and `behind`, and the `at` and `subject` of its last commit.
 
 ### Notifications
 
@@ -450,6 +471,10 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `session_elsewhere` | The Codex session is open in a terminal of its own at the Mac, which has to close it first |
 | `send_failed` | Codex didn't take a message |
 | `bad_agent` | `start` was asked for something other than Claude Code or Codex |
+| `bad_path` | `files`, `fileRead` or `gitDiff` was given a path that leads out of the session's folder, or out of its repository |
+| `no_file`, `unreadable_file` | `fileRead` was asked for a file that has gone, or one that can't be read |
+| `no_repository` | A git command was sent for a session whose folder is in no repository |
+| `bad_commit` | `gitCommit` or `gitDiff` was given something that isn't a commit of the repository |
 | `start_failed` | Claude Code quit, or took too long, starting a new session |
 | `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |

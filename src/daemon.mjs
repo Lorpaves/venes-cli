@@ -9,6 +9,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
+import { AGENT as CODEX, Codex } from './codex.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
@@ -148,7 +149,7 @@ async function reofferPromptRows(store, request) {
   if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined) {
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -167,6 +168,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   // A client that can show a page, which it says with `pages`, has one a command opens left open
   // for it, and is told. Otherwise it goes, as the next message would act on it.
   const deliver = (session, { clientId, text, attachments = [], pages = false }) => typing(session.id, async () => {
+    // A Codex session takes it through Codex's own server, and says nothing of a page.
+    if (session.agent === CODEX) {
+      await codex.deliver(session, { clientId, text, attachments });
+      return false;
+    }
     if (clientId) store.expectEcho(session, clientId, text);
     const isBlocked = () => store.pendingFor(session)[0];
     try {
@@ -268,6 +274,19 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return { ...page, turn: [], queued: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, model, tasks: [], backgroundTasks: 0 }] };
   };
 
+  // A Codex session's commands go to Codex's server, and any other's the way they always did.
+  const isCodex = async sessionId => (await codex?.owns(sessionId)) === true;
+  const forCodex = (name, otherwise) => async (msg, socket) => ((await isCodex(msg.sessionId)) ? codex[name](msg) : otherwise(msg, socket));
+
+  // Codex's stored threads come with the first page, which is where what's running comes too.
+  const listLibrary = async ({ limit, offset }) => {
+    const [page, threads] = await Promise.all([
+      library.page({ limit, offset }),
+      offset ? [] : codex?.library().catch(error => { console.error(`codex library: ${error.message}`); return []; }) ?? [],
+    ]);
+    return threads.length ? { ...page, items: [...page.items, ...threads] } : page;
+  };
+
   const listSessions = async () => {
     const sessions = store.sessions();
     const sockets = new Set([undefined, ...sessions.map(s => s.tmuxSocket ?? undefined)]);
@@ -296,7 +315,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       subscribers.add(socket);
       return { gap: gap || !sameBoot };
     },
-    library: msg => library.page({ limit: msg.limit, offset: msg.offset }),
+    library: msg => listLibrary({ limit: msg.limit, offset: msg.offset }),
     // A phone that wants notifications while it isn't connected, and this connection is that phone's.
     pushRegister: (msg, socket) => {
       devices.register(msg);
@@ -323,31 +342,41 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const counts = runningIn(running, store.liveSessions());
       return { home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })) };
     },
-    start: msg => startNewSession({ store, terminal: resumeTerminal() }, msg),
+    start: msg => {
+      if (msg.agent === undefined || msg.agent === 'claude') return startNewSession({ store, terminal: resumeTerminal() }, msg);
+      if (msg.agent !== CODEX || !codex) throw new HelperError('bad_agent', `Nothing here starts ${msg.agent}.`);
+      return codex.start(msg);
+    },
     // What an @ in a message can name, from the session's folder: files, and folders ending in /.
     mentions: async ({ sessionId, query = '', limit = MENTION_LIMIT }) => {
       if (typeof query !== 'string' || query.length > 500) throw new HelperError('bad_query', 'That can\'t be looked for.');
-      const cwd = store.find(sessionId)?.cwd ?? (await library.info(sessionId).catch(() => undefined))?.cwd;
+      const cwd = store.find(sessionId)?.cwd
+        ?? ((await isCodex(sessionId)) ? await codex.folderOf(sessionId) : (await library.info(sessionId).catch(() => undefined))?.cwd);
       if (!cwd) return { items: [] };
       const wanted = Number.isInteger(limit) ? Math.max(limit, 1) : MENTION_LIMIT;
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
     },
-    capabilities: async msg => {
+    capabilities: forCodex('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);
-    },
-    configure,
+    }),
+    configure: forCodex('configure', configure),
     delete: async ({ sessionId }) => {
+      if (await isCodex(sessionId)) {
+        await codex.remove({ sessionId });
+        removeUploads(uploads, sessionId);
+        return {};
+      }
       await resuming.get(sessionId)?.catch(() => {});
       await typing(sessionId, () => removeSession({ store, library }, sessionId));
       chosenForResume.delete(sessionId);
       removeUploads(uploads, sessionId);
       return {};
     },
-    history: msg => {
+    history: forCodex('history', msg => {
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);
-    },
+    }),
     // Empty when the account has no picture.
     avatar: async () => (await avatar()) ?? {},
     // `imageId`, because `id` is the request's own.
@@ -359,7 +388,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     },
     // Nothing here awaits for a session the helper knows, so every event is either in this
     // reply or follows it on the wire.
-    join: msg => {
+    join: async msg => {
+      if (await isCodex(msg.sessionId)) return codex.join(msg);
       const session = store.find(msg.sessionId);
       if (!session?.transcriptPath) return joinStored(msg);
       const turn = store.openTurn(session);
@@ -375,7 +405,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     respond: async msg => {
       const request = store.requestOf(msg.requestId);
       // A permission prompt's own rows are pressed in the terminal, which then answers Claude Code.
-      if (request?.kind === 'permission' && msg.option != null) {
+      // Codex's are answers its server takes, as any other.
+      if (request?.kind === 'permission' && msg.option != null && request.agent !== CODEX) {
         const row = store.choose(msg.requestId, msg.option);
         try {
           const session = sessionWithPane(request.sessionId);
@@ -413,6 +444,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const text = typeof msg.text === 'string' ? msg.text : '';
       if (!text.trim() && !attachments.length) throw new HelperError('bad_text', 'Nothing to send.');
       if (msg.lane !== undefined && msg.lane !== 'next' && msg.lane !== 'later') throw new HelperError('bad_lane', `Unknown lane: ${msg.lane}`);
+      if (await isCodex(msg.sessionId)) return codex.send({ ...msg, text, attachments });
       const change = attachments.length ? undefined : readSwitch(text);
       if (change) {
         await configure({ sessionId: msg.sessionId, ...change });
@@ -462,6 +494,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return readTail(task.outputFile, TASK_OUTPUT_BYTES);
     },
     interrupt: async msg => {
+      if (await isCodex(msg.sessionId)) return codex.interrupt(msg);
       const session = sessionWithPane(msg.sessionId);
       if (session.status !== 'running' && session.status !== 'waiting') throw new HelperError('not_running', 'Nothing to interrupt.');
       await sendEscape(session);
@@ -558,7 +591,10 @@ export async function startDaemon(paths) {
   pruneStatus(paths.statusDir);
   const rexAccount = cachedAccount();
   await rexAccount.refresh();
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current);
+  // Codex's sessions, if its server is running on this Mac. Nothing is started for it here.
+  const codex = new Codex({ store });
+  codex.restore().catch(error => console.error(`codex: ${error.message}`));
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex);
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -571,6 +607,7 @@ export async function startDaemon(paths) {
       const installing = library.stop();
       stopSaving();
       transcripts.stop();
+      codex.stop();
       updater.stop();
       clearInterval(heldTimer);
       for (const socket of subscribers) socket.destroy();

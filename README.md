@@ -72,7 +72,8 @@ Over SSH, the code holds this Mac's name, address and host key, and a one-time k
 - **It keeps what you attach.** A picture, video or file sent with a message from the app is saved in your Downloads folder, where Claude can read it and you can find it. They stay there when you delete the session. What the helper knows of them is in `~/.venes/uploads`, until the session is deleted, or for 30 days.
 - **It stands in as your status line.** A plugin can't set Claude Code's status line, and what Claude Code tells a status line is the only place a session's limits are, so the helper sets `statusLine` in `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) to `~/.venes/venes statusline`. That keeps what Claude Code sends in `~/.venes/status`, a file a session for a week, and runs the status line you had with the same input, so your terminal shows what it did. The one you had is kept in `~/.venes/statusline.json`. With none before, it shows nothing, and Claude Code then leaves out the key hints it shows under the box when there's no status line. `~/.venes/venes statusline off` puts yours back and keeps it there; `statusline on` stands in again. A settings file that isn't plain JSON is left alone.
 - **It can let your phone in over SSH.** The app asks to, to send files over SSH, and the helper adds the phone's own public key to `~/.ssh/authorized_keys`, as pairing over SSH does. That only works while Remote Login is on.
-- **It never touches your Claude credentials.**
+- **It talks to Codex, if you use it.** Codex keeps a server of its own on this Mac for its apps, and the helper connects to it over the socket in `~/.codex/app-server-control`, to list your Codex sessions and work them. It only starts that server, with `codex app-server daemon start`, when you start or open a Codex session from the app. See [Codex sessions](#codex-sessions).
+- **It never touches your Claude or Codex credentials.**
 
 If the helper isn't running, the hooks do nothing and Claude Code behaves as usual.
 
@@ -124,7 +125,8 @@ If `~/.venes/venes` isn't there, the helper never started, and `claude plugin un
 Claude Code ──hook──▶ hook.sock ┐
                                 ├─ helper ─▶ client.sock ◀─ ~/.venes/venes attach ◀─ SSH or Rex ◀─ app
 transcript ───── polled ────────┘     │
-                                      └─ Rex or tmux ─▶ sends text and keys to the terminal
+                                      ├─ Rex or tmux ─▶ sends text and keys to the terminal
+                                      └─ Codex's app server ◀──▶ Codex sessions, as its own messages
 ```
 
 ## Protocol
@@ -146,7 +148,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `folders` | `path`, `hidden` (both optional) | Where a new session can start. Without `path`: `home`, and `recent`, the folders sessions ran in lately. With it: that folder's `path`, `name` and `trusted`, its `entries`, and `truncated`. See [Starting a session](#starting-a-session). |
 | `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
 | `pushUnregister` | `deviceId` | That phone doesn't want them any more |
-| `start` | `cwd`, `trust` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). |
+| `start` | `cwd`, `trust`, `agent` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). With `agent: "codex"` it starts a Codex session there. See [Codex sessions](#codex-sessions). |
 | `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
@@ -246,6 +248,47 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 
 Claude Code asks before it works in a folder it doesn't trust yet, and runs no hooks, the helper's included, until that's answered. `trusted` reads its own rules from `~/.claude.json`. A folder is trusted when the folder, or one above it, has been accepted. Inside a git repository the search stops at the repository's top folder, and outside one it goes up to the top of the disk. The home folder is asked about every time. `start` for a folder that isn't trusted fails with `needs_trust` and starts nothing. With `trust: true`, the reader's word in the app, it answers Claude Code's question with "Yes, I trust this folder", as the keys at the Mac would. If Claude Code asks about a folder that looked trusted, `start` picks "No, exit", so nothing is left running, and fails with `needs_trust`.
 
+### Codex sessions
+
+Codex has a server for its own clients, which its desktop app, its editor extension and its remote control go through, and it keeps one running on this Mac as a daemon (`codex app-server daemon`). The helper is one more client of it, over the daemon's control socket, `~/.codex/app-server-control/app-server-control.sock`: a session here is a thread there, and everything comes and goes as that server's own messages. Nothing is typed into a terminal or read off one, and no hooks are installed in Codex.
+
+A Codex session is told with the events and commands a Claude Code session has, and says whose it is: `agent: "codex"` is in its entry in `sessions`, a snapshot and `join`, in its `session.discovered`, in its requests, and in its `library` item. A Claude Code session has no `agent`.
+
+**Which threads are sessions.** Every thread the daemon has in memory is a session going on, whoever started it: the helper, Codex's remote control, or a terminal at the Mac attached to the daemon with `codex --remote unix://`. The threads Codex made for itself, as a subagent's is, aren't. When the daemon lets a thread go, 30 minutes after its last client left, the session ends with `session.ended`, and it's still in the library. Codex's stored threads come with the first page of `library`, the 100 last worked on.
+
+**A thread open in a terminal of its own.** Plain `codex` at the Mac runs its thread in its own process, where the daemon doesn't have it. It's in the library, and `join` and `history` read it, but only one process can run a thread at a time, so `send` to it is refused with `session_elsewhere` until that terminal closes it. `codex --remote unix://` at the Mac is how a terminal and a phone share one: then both see every message, and either can answer a request.
+
+**What each command does.**
+
+| Command | For a Codex session |
+|---|---|
+| `start` | With `agent: "codex"`: a new thread in `cwd`, run as your own Codex settings say, as it would be in your terminal. Codex's server trusts the folder from then on without asking, where its terminal would ask, so a folder Codex doesn't trust yet (`[projects."…"]` in `~/.codex/config.toml`, for the folder or the repository it's in) fails with `needs_trust` until `trust: true`. It starts the daemon if it isn't running, and fails with `no_codex` when Codex isn't installed. |
+| `send` | Starts a turn, or, during one, goes into it for Codex to read between its steps (`lane: "next"`, or none). `later` is held by the helper until the turn ends. A stored session is loaded by its first message. A picture goes as an image, and any other file by its path at the head of the text. |
+| `interrupt` | Stops the turn |
+| `join`, `history` | The same replies, read from Codex's stored turns a few at a time, so a page is whole turns. `before` is a number the helper gives out, good until it restarts. |
+| `capabilities` | `models` from Codex's own list, each with its `effortLevels`. `commands` is empty: Codex's slash commands are its terminal's own. |
+| `configure` | `model` and `effort` take hold from the session's next turn, and `session.model` and `session.effort` say so at once |
+| `respond` | Answers Codex. See below. |
+| `delete` | Stops a turn going on, and has Codex delete the thread for good |
+
+`page`, `pageKey`, `pageText`, `pageClose`, `statusLine`, `image` and `taskOutput` have nothing for a Codex session: there's no terminal, and no status line.
+
+**Events.** `session.started` has `source: "startup"` for a new thread and `"resume"` for a stored one that's loaded. `message.user` has the send's `clientId`, and none for a message typed in Codex's own terminal. `message.assistant.delta` has Codex's `phase` beside the rest, `commentary` for what it says between steps and `final_answer` for its reply, and ends with one that has `final: true` and no text. `message.thinking` is a reasoning item's summary. A turn ends with `turn.end`, `turn.interrupted`, or `turn.error`, whose `error` is Codex's message and `details` its own code for it, such as `usageLimitExceeded`.
+
+Everything else Codex does is a `tool.start` and a `tool.end`, named after the kind of item it is in Codex's protocol: `commandExecution`, `fileChange`, `mcpToolCall`, `dynamicToolCall`, `webSearch`, `imageView`, `imageGeneration`, `collabAgentToolCall`, `sleep` and so on. `toolUseId` is the item's id, `input` is the item as Codex first gave it, and `response` is the item once it's done, with all it has by then: a command's `aggregatedOutput` and `exitCode`, a file change's `changes`. `isError` is set for one that `failed` or was `declined`. History's `tool` items have the stored item as both `input` and `result`.
+
+`plan.updated` is Codex's plan as it stands, whole each time: `explanation`, and `plan`, a list of `{step, status}` with a status of `pending`, `inProgress` or `completed`.
+
+**Requests.** Codex asks every client of a thread, and takes the first answer. Answered somewhere else, a request closes with `by: "terminal"`.
+
+| `request.kind` | From | To answer |
+|---|---|---|
+| `permission`, `toolName` `commandExecution` or `fileChange` | Codex asking to run a command or change files. `input` is what Codex sent: `command`, `cwd`, `reason`, `commandActions`, and for a file change its `changes`. `options` are its other ways of saying yes, in the words of its own terminal, such as "Yes, and don't ask again for commands that start with …". | `allow` is its plain yes, and `allow` with `option` one of those. `deny` stops the turn, as "No, and tell Codex what to do differently" does in its terminal, and a `message` with it is sent as the next message once the turn has stopped. |
+| `permission`, `toolName` `permissions` | Codex asking for more room than its sandbox gives. `input.permissions` is what it wants. | `allow` grants it for the turn, and with `option: "session"` for the session. `deny` grants nothing, and the turn goes on. |
+| `question` | Codex's questions, in the shape Claude Code's have: `input.questions`, each with `question`, `header`, `options` and `multiSelect: false`, and Codex's own `id`, `isOther` and `isSecret` | `allow` with `answers` by each question's text, as for Claude Code |
+
+**What it doesn't do yet.** Slash commands, lines run with `!`, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), a list of commands left running, and a status line.
+
 ### Notifications
 
 A phone that isn't connected hears when a session asks for something (`request.opened`) and when a turn ends (`turn.end`). A phone that's connected is left to show its own. The phone sends `pushRegister` with its own `deviceId`, its push `token` in hex, a `key` of 32 bytes in base64, `sandbox` for a development build, and `mac`, its own name for this Mac, which comes back in each notification. The connection it sends that on counts as that phone's, so while the connection is open, nothing is pushed to it. Phones are kept in `push.json` in the helper's folder, readable only by you.
@@ -344,7 +387,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 
 | `kind` | Fields |
 |---|---|
-| `session.discovered` | `cwd` |
+| `session.discovered` | `cwd`, and `agent` for a session that isn't Claude Code's: `codex` |
 | `session.started` | `source`, `model`, `cwd` |
 | `session.attached` | `pane` |
 | `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
@@ -355,7 +398,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.deleted` | |
 | `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`) |
 | `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed |
-| `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId` |
+| `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId`, and `phase` for a Codex session |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
 | `tool.end` | `toolUseId`, `name`, `response`, `durationMs`, `isError`, `interrupted`, `parentToolUseId` |
@@ -368,6 +411,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `turn.interrupted`, `turn.error` | `error`, `details` |
 | `agent.start`, `agent.stop` | `agentId`, `agentType`, `parentToolUseId` (on start) |
 | `task.created`, `task.completed` | `taskId`, `subject`: items on Claude's task list |
+| `plan.updated` | `explanation`, `plan`: a Codex session's plan as it stands |
 | `background.task` | `task`: a background command, agent or workflow changed. One Claude stopped is `killed`, and one still running when its session ended is `stopped` |
 | `task.notification` | `taskId`, `status`, `summary`: a background task finished and Claude is reading about it |
 | `notification` | `notificationType`, `message` |
@@ -395,7 +439,11 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
-| `needs_trust` | Claude Code asks first whether to trust the folder. Ask the reader, and send `start` again with `trust: true`. |
+| `needs_trust` | Claude Code asks first whether to trust the folder, or Codex would trust it without asking. Ask the reader, and send `start` again with `trust: true`. |
+| `no_codex` | Codex isn't installed, or its server wouldn't start, so a Codex session can't be started or opened |
+| `session_elsewhere` | The Codex session is open in a terminal of its own at the Mac, which has to close it first |
+| `send_failed` | Codex didn't take a message |
+| `bad_agent` | `start` was asked for something other than Claude Code or Codex |
 | `start_failed` | Claude Code quit, or took too long, starting a new session |
 | `bad_device` | `pushRegister` was given something other than a device id, a device token in hex, a 32-byte key or a Mac's name |
 | `bad_folder`, `no_folder` | `folders` or `start` was given something other than an absolute path, or a folder that isn't on this Mac |

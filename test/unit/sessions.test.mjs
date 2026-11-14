@@ -1589,3 +1589,75 @@ test('what is queued for Claude and not read yet is listed, with the send each c
   hook('Stop', {});
   assert.deepEqual(store.queuedFor(s), [], 'what was left starts the next turn');
 });
+
+test('a session followed without hooks is one from then on, and says whose it is', () => {
+  const { store, events } = setup();
+  const session = store.adopt('t1', { agent: 'codex', cwd: '/w', model: 'gpt-6' });
+  assert.equal(session.status, 'idle');
+  assert.deepEqual({ ...events[0], seq: 0, at: 0 }, { seq: 0, at: 0, sessionId: 't1', kind: 'session.discovered', cwd: '/w', agent: 'codex' });
+  assert.equal(store.sessions()[0].agent, 'codex');
+  // Adopted again, it's the same one, with what's new of it.
+  store.adopt('t1', { model: 'gpt-5' });
+  assert.equal(events.length, 1);
+  assert.equal(store.get('t1').model, 'gpt-5');
+  // It has no terminal, so a restart doesn't look for one.
+  assert.deepEqual(store.registry(), []);
+  // One from hooks says nothing of an agent.
+  store.handleHook({ session_id: 'a', cwd: '/w', hook_event_name: 'SessionStart' });
+  assert.equal('agent' in store.sessions().find(view => view.id === 'a'), false);
+});
+
+test('what\'s reported of one changes what\'s known of it, and a status is said once', () => {
+  const { store, events, kinds } = setup();
+  store.adopt('t1', { agent: 'codex', cwd: '/w' });
+  store.report('t1', 'session.status', { status: 'running' });
+  store.report('t1', 'session.status', { status: 'running' });
+  store.report('t1', 'message.user', { text: 'hi' }, { lastPrompt: 'hi' });
+  store.report('t1', 'session.model', { model: 'gpt-6' });
+  store.report('t1', 'session.model', { model: 'gpt-6' });
+  assert.deepEqual(kinds(), ['session.discovered', 'session.status', 'message.user', 'session.model']);
+  assert.deepEqual([store.get('t1').status, store.get('t1').lastPrompt, store.get('t1').model], ['running', 'hi', 'gpt-6']);
+  store.report('t1', 'session.ended', { reason: 'closed' });
+  store.report('t1', 'session.ended', { reason: 'closed' });
+  assert.deepEqual(kinds().slice(-2), ['session.status', 'session.ended']);
+  assert.equal(events.at(-1).reason, 'closed');
+  // One that ended and is adopted again goes on.
+  store.adopt('t1');
+  assert.equal(store.get('t1').status, 'idle');
+  // Nothing is said of a session there isn't.
+  store.report('nobody', 'message.user', { text: 'hi' });
+  assert.equal(events.at(-1).sessionId, 't1');
+});
+
+test('a request something else waits on is answered by what it decides', async () => {
+  const { store, events } = setup();
+  store.adopt('t1', { agent: 'codex', cwd: '/w' });
+  store.report('t1', 'session.status', { status: 'running' });
+  const { request, decision } = store.ask('t1', { kind: 'permission', agent: 'codex', toolName: 'commandExecution', input: { command: 'ls' }, options: [] },
+    answer => { if (answer.decision !== 'allow') throw new Error('no'); return { result: 'accepted' }; });
+  assert.equal(store.get('t1').status, 'waiting');
+  assert.deepEqual(Object.keys(request).sort(), ['agent', 'id', 'input', 'kind', 'openedAt', 'options', 'sessionId', 'toolName']);
+  assert.deepEqual(events.at(-1).request, request);
+  assert.throws(() => store.respond(request.id, { decision: 'deny' }), /no/);
+  assert.equal(store.requests().length, 1);
+  store.respond(request.id, { decision: 'allow' });
+  assert.deepEqual(await decision, { result: 'accepted' });
+  assert.equal(store.get('t1').status, 'running');
+  assert.deepEqual([events.at(-2).kind, events.at(-2).by], ['request.closed', 'client']);
+});
+
+test('one settled somewhere else closes with nothing to say back', async () => {
+  const { store, events } = setup();
+  store.adopt('t1', { agent: 'codex' });
+  const first = store.ask('t1', { kind: 'permission' }, () => ({}));
+  const second = store.ask('t1', { kind: 'question' }, () => ({}));
+  store.settle(first.request.id, { decision: 'unknown', by: 'terminal' });
+  assert.equal(await first.decision, undefined);
+  assert.equal(events.at(-1).by, 'terminal');
+  store.settleAll('t1', { decision: 'unknown', by: 'turn_end' });
+  assert.equal(await second.decision, undefined);
+  assert.equal(store.requests().length, 0);
+  // Settling what's gone, or a session there isn't, does nothing.
+  store.settle(first.request.id, { decision: 'unknown', by: 'terminal' });
+  store.settleAll('nobody', { decision: 'unknown', by: 'turn_end' });
+});

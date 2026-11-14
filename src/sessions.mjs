@@ -224,6 +224,61 @@ export class SessionStore extends EventEmitter {
     }
   }
 
+  // A session the helper follows through something other than hooks, as it does a Codex thread through
+  // Codex's own server. `agent` among its `fields` says which, and every view of it says so too.
+  adopt(id, fields = {}) {
+    let s = this.#sessions.get(id);
+    this.#deleted.delete(id);
+    if (!s) {
+      s = { ...blankSession(id), startedAt: Date.now(), ...fields };
+      this.#sessions.set(id, s);
+      this.#emit(s, 'session.discovered', { cwd: s.cwd, ...(s.agent && { agent: s.agent }) });
+    } else {
+      Object.assign(s, fields);
+      if (s.status === 'ended') this.#setStatus(s, 'idle');
+    }
+    s.lastEventAt = Date.now();
+    return s;
+  }
+
+  // An event for such a session, after `fields` change what's known of it. A status, a model and an
+  // end go the way a hook's would, so that each is said once and does all it should.
+  report(id, kind, data = {}, fields = undefined) {
+    const s = this.#sessions.get(id);
+    if (!s) return;
+    Object.assign(s, fields);
+    s.lastEventAt = Date.now();
+    if (kind === 'session.status') this.#setStatus(s, data.status);
+    else if (kind === 'session.model') this.#setModel(s, data.model);
+    else if (kind === 'session.ended') { if (s.status !== 'ended') this.#endSession(s, data.reason); }
+    else this.#emit(s, kind, data);
+  }
+
+  // A request that something other than a hook waits on. `decide` turns a client's answer into what
+  // that wants, and throws when the answer won't do. `decision` settles with it, or with nothing when
+  // the request closes some other way.
+  ask(sessionId, fields, decide) {
+    const s = this.get(sessionId);
+    let finish;
+    const decision = new Promise(resolve => { finish = resolve; });
+    const request = { id: randomUUID(), sessionId: s.id, openedAt: Date.now(), ...fields, finish, decide };
+    this.#requests.set(request.id, request);
+    this.#setStatus(s, 'waiting');
+    this.#emit(s, 'request.opened', { request: this.#requestView(request) });
+    return { request: this.#requestView(request), decision };
+  }
+
+  // A request answered somewhere else, or one nothing waits on any more.
+  settle(requestId, result) {
+    const request = this.#requests.get(requestId);
+    if (request) this.#closeRequest(request, result);
+  }
+
+  settleAll(sessionId, result) {
+    const s = this.#sessions.get(sessionId);
+    if (s) this.#closeRequests(s, result);
+  }
+
   // A session about to be resumed, so that it can expect messages before its first hook.
   reopen(id, { cwd, startedAt }) {
     let s = this.#sessions.get(id);
@@ -453,7 +508,7 @@ export class SessionStore extends EventEmitter {
   respond(requestId, answer) {
     const request = this.#requests.get(requestId);
     if (!request) throw new HelperError('request_closed', 'This request has already been answered or closed.');
-    const output = buildDecision(request, answer);
+    const output = request.decide ? request.decide(answer) : buildDecision(request, answer);
     this.#closeRequest(request, { decision: answer.decision, by: 'client', output });
   }
 
@@ -836,10 +891,11 @@ export class SessionStore extends EventEmitter {
       permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
       startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id),
+      ...(s.agent && { agent: s.agent }),
     };
   }
 
-  #requestView({ finish, choosing, ...request }) {
+  #requestView({ finish, choosing, decide, ...request }) {
     return request;
   }
 }

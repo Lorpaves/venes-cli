@@ -340,7 +340,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       }
       const [stored, running] = await Promise.all([library.recent(RECENT_SESSIONS).catch(() => []), library.running().catch(() => [])]);
       const counts = runningIn(running, store.liveSessions());
-      return { home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })) };
+      return {
+        home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })),
+        // A client offers Codex for a new session only where there is one.
+        ...(codex?.isAvailable() && { codex: true }),
+      };
     },
     start: msg => {
       if (msg.agent === undefined || msg.agent === 'claude') return startNewSession({ store, terminal: resumeTerminal() }, msg);

@@ -96,7 +96,7 @@ function setup({ threads = [], loaded = [], isRunning = true, trusts = () => tru
   const store = new SessionStore();
   const events = [];
   store.on('event', event => events.push(event));
-  const codex = new Codex({ store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, retryMs: 5, trusts });
+  const codex = new Codex({ store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, retryMs: 5, trusts, installed: () => isRunning });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
   return { server, store, events, codex, kinds, last };
@@ -276,6 +276,8 @@ test('the threads the daemon has in memory are sessions going on, and the rest a
 
 test('with no Codex running, there is nothing, and nothing is started to look', async () => {
   const { codex, store, server } = setup({ isRunning: false });
+  assert.equal(codex.isAvailable(), false);
+  assert.equal(setup().codex.isAvailable(), true);
   await codex.restore();
   assert.deepEqual(await codex.library(), []);
   assert.equal(await codex.owns('anything'), false);

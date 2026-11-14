@@ -35,6 +35,18 @@ const RECONNECT_TRIES = 5;
 // The kinds of thread a person started: Codex's terminal, its apps and editors, and clients such as this.
 const LISTED_SOURCES = ['cli', 'vscode', 'appServer', 'unknown'];
 
+// Whether Codex's command is on the PATH.
+export function isInstalled(env = process.env) {
+  return (env.PATH ?? '').split(':').some(dir => {
+    try {
+      fs.accessSync(path.join(dir, 'codex'), fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 // Where Codex's daemon listens, as Codex itself finds it.
 export function controlSocket(env = process.env) {
   return env.VENES_CODEX_SOCKET || path.join(codexHome(env), 'app-server-control', 'app-server-control.sock');
@@ -278,13 +290,17 @@ export class Codex {
   #retry;
   #retryMs;
   #trusts;
+  #installed;
   #isStopped = false;
 
   constructor({
     store, socketPath = controlSocket(), connect = CodexLink.connect,
     startDaemon = () => exec('codex', ['app-server', 'daemon', 'start'], { timeout: DAEMON_START_MS, cwd: os.homedir() }),
     retryMs = RECONNECT_MS, trusts = isTrustedByCodex,
+    // Told where to look, as a test run is, there's a Codex only if something listens there.
+    installed = () => !process.env.VENES_CODEX_SOCKET && isInstalled(),
   }) {
+    this.#installed = installed;
     this.#retryMs = retryMs;
     this.#trusts = trusts;
     this.#store = store;
@@ -302,6 +318,12 @@ export class Codex {
     this.#isStopped = true;
     clearTimeout(this.#retry);
     this.#link?.close();
+  }
+
+  // Whether there's a Codex on this Mac to start a session with: its daemon is up, or its command is there
+  // to start it.
+  isAvailable() {
+    return fs.existsSync(this.#socketPath) || this.#installed();
   }
 
   // Whether a session is Codex's. One the helper has heard from says so itself, and any other is asked

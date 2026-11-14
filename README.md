@@ -242,7 +242,7 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 
 ### Starting a session
 
-`folders` lists, newest first, the folders where the last 200 stored sessions ran, up to 20 of them, leaving out any that have gone. Each has its `path`, `name`, `running` (how many sessions are going in it now) and `trusted`. With `path`, it lists the folders in that one, as Claude Code's `@` lists a folder: hidden ones left out unless `hidden` is true, by name as Finder sorts them, up to 1,000 with `truncated` past that. Each entry has its `name` and `path`.
+`folders` lists, newest first, the folders where the last 200 stored sessions ran, up to 20 of them, leaving out any that have gone. Each has its `path`, `name`, `running` (how many sessions are going in it now) and `trusted`. Beside them is `codex: true` when Codex is on this Mac, for a client to offer a [Codex session](#codex-sessions) there. With `path`, it lists the folders in that one, as Claude Code's `@` lists a folder: hidden ones left out unless `hidden` is true, by name as Finder sorts them, up to 1,000 with `truncated` past that. Each entry has its `name` and `path`.
 
 `start` opens Claude Code in a new terminal session of its own in `cwd`, in Rex if it's on this Mac and otherwise in tmux, as a resumed session gets. It replies once the session's first hook arrives, and the session is in `sessions` by then. If it doesn't start within 30 seconds, `start` fails, and the terminal stays open when a dialog is waiting in it.
 

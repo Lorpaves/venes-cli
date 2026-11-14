@@ -23,8 +23,9 @@ function trimmedLine(line) {
   return line.slice(0, match.index) + (match[0].match(/\u001b\[[0-9;:]*m/g) ?? []).join('');
 }
 
-// Each line, with its colours. A cursor moved along is the spaces it passes over.
-export function vtLines(vt) {
+// The text with only the escape sequences that colour it. A cursor moved along is the spaces it passes
+// over.
+function coloursOnly(vt) {
   let out = '';
   for (let i = 0; i < vt.length;) {
     const char = vt[i];
@@ -51,7 +52,66 @@ export function vtLines(vt) {
     if (char !== '\r') out += char;
     i += 1;
   }
-  return out.split('\n').map(trimmedLine);
+  return out;
+}
+
+// Each line, with its colours.
+export function vtLines(vt) {
+  return coloursOnly(vt).split('\n').map(trimmedLine);
+}
+
+// What an escape sequence that sets the look does to whether a space shows: on a background, or with
+// the colours swapped, it does.
+function seenOnASpace({ background, inverse }, params) {
+  const codes = params.split(/[;:]/).map(code => Number(code) || 0);
+  for (let i = 0; i < codes.length; i++) {
+    const code = codes[i];
+    if (code === 0) {
+      background = false;
+      inverse = false;
+    } else if (code === 7) {
+      inverse = true;
+    } else if (code === 27) {
+      inverse = false;
+    } else if (code === 49) {
+      background = false;
+    } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+      background = true;
+    } else if (code === 38 || code === 48) {
+      if (code === 48) background = true;
+      // The colour itself comes after: `5;n`, or `2;r;g;b`.
+      if (codes[i + 1] === 5) i += 2;
+      else if (codes[i + 1] === 2) i += 4;
+    }
+  }
+  return { background, inverse };
+}
+
+// A screen that a program has to itself, a line each as `vtLines` gives output, but with the spaces at
+// a line's end that show something: a bar across such a screen is spaces on a background.
+export function screenLines(vt) {
+  let seen = { background: false, inverse: false };
+  return coloursOnly(vt).split('\n').map(line => {
+    let kept = '';
+    let pending = '';
+    for (const [token, params] of line.matchAll(/\u001b\[([0-9;:]*)m|[^\u001b]+|\u001b/g)) {
+      if (params !== undefined) {
+        seen = seenOnASpace(seen, params);
+        pending += token;
+        continue;
+      }
+      for (const char of token) {
+        if (char === ' ' && !seen.background && !seen.inverse) {
+          pending += char;
+        } else {
+          kept += pending + char;
+          pending = '';
+        }
+      }
+    }
+    // What set the look after the last thing that shows still counts for the lines under it.
+    return kept + (pending.match(/\u001b\[[0-9;:]*m/g) ?? []).join('');
+  });
 }
 
 // The text of a line, as it reads.

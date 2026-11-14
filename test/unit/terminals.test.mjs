@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { capped, outputBody, plain, styleBefore, vtLines, withoutPrompt } from '../../src/output.mjs';
+import { capped, outputBody, plain, screenLines, styleBefore, vtLines, withoutPrompt } from '../../src/output.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 import { ZSH_FILES, installShellFiles, shellCommand } from '../../src/shell.mjs';
 import { parseStatus } from '../../src/gitstate.mjs';
@@ -17,6 +17,16 @@ const ESC = '\u001b';
 
 test('the spaces at a line\'s end go, and the colours among them stay', () => {
   assert.deepEqual(vtLines(`b      \r\n${ESC}[31mred${ESC}[0m   \r\n  ${ESC}[44m  ${ESC}[0m`), ['b', `${ESC}[31mred${ESC}[0m`, `${ESC}[44m${ESC}[0m`]);
+});
+
+test('a screen a program has to itself keeps the spaces that show, as a bar across it is', () => {
+  const bar = `${ESC}[7m x (END)   ${ESC}[0m   `;
+  assert.deepEqual(screenLines(`one   \r\n${bar}\r\n${ESC}[44m  ${ESC}[49m  \r\nplain  `), [
+    'one', `${ESC}[7m x (END)   ${ESC}[0m`, `${ESC}[44m  ${ESC}[49m`, 'plain',
+  ]);
+  // A look set on one line is still there on the next, until something takes it away.
+  assert.deepEqual(screenLines(`${ESC}[48;5;236ma \r\n  \r\n${ESC}[0m  b  `), [`${ESC}[48;5;236ma `, '  ', `${ESC}[0m  b`]);
+  assert.deepEqual(vtLines(`${ESC}[7m x   ${ESC}[0m   `), [`${ESC}[7m x${ESC}[0m`], 'which output doesn\'t');
 });
 
 test('a screen in the vt format keeps its colours and nothing else', () => {
@@ -198,7 +208,8 @@ function setUp(t, { prompt = '~ % ' } = {}) {
       if (shell.gone) throw new Error('can\'t find pane');
       return { text: shell.screen, cut: false };
     },
-    readStyledScreen: async () => shell.screen,
+    // A program with the screen to itself shows on a screen of its own, which `alt` is.
+    readStyledScreen: async () => (shell.fullScreen ? shell.alt ?? shell.screen : shell.screen),
     isFullScreen: async () => shell.fullScreen,
     hidesInput: async () => shell.hidden,
     closeSession: async () => { calls.push(['close']); shell.open = false; },
@@ -394,25 +405,56 @@ test('a line sent while a command runs goes to it, and what it prints after is t
   ]);
 });
 
-test('a program that has the screen to itself is a page, worked with keys', async t => {
+test('what a program that has the screen to itself shows is its line\'s output, and it takes keys', async t => {
   const { terminals, shell, of, calls } = setUp(t);
   const { sessionId } = await terminals.start({ cwd: os.tmpdir(), columns: 40, rows: 3 });
+  const last = line => of('message.output').filter(event => event.clientId === line).at(-1);
   assert.deepEqual(await terminals.page(sessionId), { page: null });
   await assert.rejects(terminals.pageKey(sessionId, 'Down'), { code: 'no_page' });
   await terminals.send(sessionId, { text: 'less x', clientId: 'c1' });
   shell.run('less x');
+  const first = `one\r\n${ESC}[7mx (END)   ${ESC}[0m\r\n${ESC}[44m    ${ESC}[0m\r\n   \r\n`;
+  shell.alt = first;
   shell.fullScreen = true;
   await until(() => of('terminal.screen').length, 'the full screen');
   assert.equal(of('terminal.screen')[0].fullScreen, true);
-  shell.screen = `one\r\n${ESC}[7mx (END)${ESC}[0m\r\n`;
-  await new Promise(resolve => { setTimeout(resolve, 60); });
-  assert.equal(of('message.output').length, 0, 'what it shows is the page\'s, and none of its output');
+  await until(() => last('c1'), 'what it shows');
+  const bars = `one\n${ESC}[7mx (END)   ${ESC}[0m\n${ESC}[44m    ${ESC}[0m`;
+  assert.deepEqual([last('c1').stdout, last('c1').running], [bars, true], 'with its bars as wide as they are, and one of nothing but a background');
+
+  // Its keys are a page's, and what they did shows in the output.
   const { page } = await terminals.page(sessionId);
-  assert.deepEqual(page.lines.map(runs => runs.map(run => run.text).join('')), ['one', 'x (END)']);
+  assert.deepEqual(page.lines.map(runs => runs.map(run => run.text).join('')), ['one', 'x (END)   ', '    ']);
   await terminals.pageKey(sessionId, 'Down');
   await terminals.pageText(sessionId, 'q');
   assert.deepEqual(calls.slice(-2), [['key', 'Down'], ['paste', 'q']]);
   await assert.rejects(terminals.pageKey(sessionId, 'F1'), { code: 'bad_key' });
+  shell.alt = 'two\r\n';
+  await until(() => last('c1').stdout === 'two', 'what the keys did');
+
+  // It's one screen, under the last line sent: a line sent to the program takes it from the command.
+  assert.deepEqual(await terminals.send(sessionId, { text: '/three', clientId: 'c2' }), { queued: false, page: true });
+  assert.deepEqual([last('c2').stdout, last('c2').running, last('c1').stdout, last('c1').running], ['two', true, '', false], 'at once');
+  shell.alt = 'three\r\n';
+  await until(() => last('c2').stdout === 'three', 'what the line did');
+
+  // It gives the screen back: what it showed last stays, with what's printed after it underneath.
+  shell.fullScreen = false;
+  shell.screen += 'bye\r\n';
+  await until(() => of('terminal.screen').at(-1).fullScreen === false, 'the screen back');
+  shell.screen += '~ % ';
+  shell.prompt(0);
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'its end');
+  assert.deepEqual([last('c2').stdout, last('c2').running, last('c1').stdout], ['three\nbye', false, '']);
+  assert.deepEqual(terminals.history(sessionId).items.map(item => [item.role, item.text ?? item.stdout, item.input]), [
+    ['user', 'less x', undefined], ['user', '/three', true], ['output', 'three\nbye', undefined],
+  ]);
+
+  // One that's stopped while it has the screen.
+  await terminals.send(sessionId, { text: 'less y', clientId: 'c3' });
+  shell.run('less y');
+  shell.fullScreen = true;
+  await until(() => last('c3'), 'what it shows');
   await terminals.interrupt(sessionId);
   assert.deepEqual(calls.at(-1), ['key', 'C-c']);
 });

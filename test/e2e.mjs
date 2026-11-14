@@ -2012,13 +2012,19 @@ async function showsAFullScreenProgram(r) {
   const { sessionId } = await r.client.request('startTerminal', { cwd: WS, columns: 60, rows: 12 });
   await r.client.request('send', { sessionId, text: 'less /etc/hosts', clientId: 'c1' });
   await r.wait(e => e.kind === 'terminal.screen' && e.fullScreen === true, 10000, 'full screen');
+  // What it shows is the command's output, in the list, and its keys are a page's.
+  const shown = await r.wait(e => e.kind === 'message.output' && e.clientId === 'c1' && /localhost/.test(plainOf(e.stdout)), 10000, 'what the pager shows');
+  assert.deepEqual([shown.running, shown.columns], [true, 60]);
   const { page } = await r.client.request('page', { sessionId });
   assert.ok(page.lines.some(runs => runs.map(run => run.text).join('').includes('localhost')), 'what the pager shows');
   await r.client.request('pageText', { sessionId, text: 'q' });
   await r.wait(e => e.kind === 'terminal.screen' && e.fullScreen === false, 5000, 'the screen back');
   await r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'idle', 5000, 'its end');
   assert.deepEqual((await r.client.request('page', { sessionId })).page, null);
-  assert.ok(!r.events.some(e => e.kind === 'message.output' && e.clientId === 'c1'), 'what it showed was the page\'s, and none of its output');
+  // It stays where it was shown, once the pager has gone.
+  assert.match(plainOf((await finished(r, 'c1')).stdout), /localhost/);
+  const kept = (await r.client.request('history', { sessionId, limit: 10 })).items;
+  assert.deepEqual([kept.map(item => item.role), /localhost/.test(plainOf(kept[1].stdout))], [['user', 'output'], true]);
   await r.client.request('send', { sessionId, text: 'echo after', clientId: 'c2' });
   assert.equal((await finished(r, 'c2')).stdout, 'after');
   await r.client.request('delete', { sessionId });
@@ -2254,6 +2260,17 @@ async function mirrorsATerminalOpenInRex(r) {
     assert.match(plainOf((await said('p7')).stdout), /^to-the-program\nto-the-program/);
     assert.ok(!/❯/.test(plainOf((await said('p7')).stdout)), 'without the prompt that came back');
 
+    // A program that takes the screen for itself shows as the command's output, and stays when it goes.
+    await send('less /etc/hosts', 'p10');
+    await r.wait(e => e.kind === 'terminal.screen' && e.sessionId === id && e.fullScreen === true, 10000, 'full screen');
+    const paged = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p10' && /localhost/.test(plainOf(e.stdout)), 10000, 'what the pager shows');
+    assert.equal(paged.running, true);
+    r.mark();
+    await r.client.request('pageText', { sessionId: id, text: 'q' });
+    await status('idle');
+    assert.match(plainOf((await said('p10')).stdout), /localhost/);
+    assert.ok(!/❯/.test(plainOf((await said('p10')).stdout)), 'without the prompt that came back');
+
     // A program started at the Mac is named, and a line for it is followed from where it was.
     r.mark();
     typeAtTheMac('cat\n');
@@ -2272,7 +2289,8 @@ async function mirrorsATerminalOpenInRex(r) {
     assert.deepEqual(again.items.filter(item => item.role === 'user').map(item => [item.text, item.input]), [
       ['echo from-the-phone; tput cols', undefined], ['echo typed-at-the-mac', undefined], ['printf no-line-end', undefined],
       ['echo sent-after', undefined], ['cd /tmp', undefined],
-      ['seq 1 150000', undefined], ['echo after-the-flood', undefined], ['cat', undefined], ['to-the-program', true], ['from-the-phone', true],
+      ['seq 1 150000', undefined], ['echo after-the-flood', undefined], ['cat', undefined], ['to-the-program', true], ['less /etc/hosts', undefined],
+      ['from-the-phone', true],
     ]);
     assert.ok(again.items.filter(item => item.role === 'output').every(item => !/❯/.test(plainOf(item.stdout))));
 

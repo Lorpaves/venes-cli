@@ -4,6 +4,11 @@
 // output is the screen under its own line until the prompt comes back. Output streams while a command
 // runs. A line sent while it runs goes to it, and what it prints after that is that line's.
 //
+// A program that takes the screen for itself, as an editor or a pager does, shows on the terminal's
+// other screen, which has nothing above it. What it shows is the output of the last line sent, the
+// command's own or one sent to the program since, drawn again as it changes. It stays there when the
+// program gives the screen back, with what's printed after it underneath.
+//
 // A terminal the reader opened in Rex themselves is a session too, a mirrored one. Its shell has none of
 // the hooks and its screen is never cleared, so a command sent to it is found by where it was typed:
 // the line the prompt was on. That line stays as far from the start of all the terminal holds while
@@ -17,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { checkedFolder } from './folders.mjs';
 import { gitState } from './gitstate.mjs';
-import { capped, outputBody, plain, squashed, styleBefore, trimEnd, vtLines, withoutPrompt } from './output.mjs';
+import { capped, outputBody, plain, screenLines, squashed, styleBefore, trimEnd, vtLines, withoutPrompt } from './output.mjs';
 import * as rex from './rex.mjs';
 import { runsOf, screenCells } from './screen.mjs';
 import { HelperError } from './sessions.mjs';
@@ -602,13 +607,22 @@ export class Terminals {
     if (!PAGE_KEYS.includes(key)) throw new HelperError('bad_key', `${key} isn't a key a page takes.`);
     const t = await this.#fullScreen(id);
     await this.#backend(t).pressKey(t.target, key);
+    this.#readSoon(t);
     return {};
   }
 
   async pageText(id, text) {
     const t = await this.#fullScreen(id);
     await this.#backend(t).paste(t.target, text);
+    this.#readSoon(t);
     return {};
+  }
+
+  // What a key or some text did to the program that has the screen shows in its output at the next look.
+  #readSoon(t) {
+    if (!t.running) return;
+    t.running.changedAt = Date.now();
+    t.running.readAt = 0;
   }
 
   // The program goes on: only it knows how it's left, which may lose work, so that's for the reader.
@@ -673,7 +687,7 @@ export class Terminals {
   #save(t) {
     if (t.mirror) return;
     const { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, running } = t;
-    const kept = running && { ...running, tail: undefined };
+    const kept = running && { ...running, tail: undefined, main: undefined };
     const meta = { id, name, cwd, folder, startedAt, lastActiveAt, backend, target, ended, lastCommand, seen, size, columns: t.columns, running: kept };
     fs.writeFileSync(path.join(this.#dir(t), META), JSON.stringify(meta), { mode: 0o600 });
   }
@@ -876,7 +890,8 @@ export class Terminals {
     return Date.now() - (running.changedAt ?? running.at) < QUIET_AFTER_MS ? READ_EVERY_MS : QUIET_READ_EVERY_MS;
   }
 
-  // What a program that has the screen to itself shows is a page's, and none of its output.
+  // What a running command has printed, sent when it has changed. While a program it started has the
+  // screen to itself, what that shows is read in its place.
   async #readRunning(t) {
     const running = t.running;
     running.readAt = Date.now();
@@ -886,20 +901,49 @@ export class Terminals {
       running.changedAt = Date.now();
       this.#store.report(t.id, 'terminal.screen', { fullScreen: full });
     }
-    if (full) return;
+    if (full) {
+      await this.#readScreen(t);
+      return;
+    }
     const { lines, cut } = await this.#readBody(t);
     running.tail = cut ? undefined : tailOf(lines);
+    running.main = { lines, cut };
+    if (this.#sendParts(t, lines, cut, {})) running.changedAt = Date.now();
+  }
+
+  // What a program that has the screen to itself shows now, in the form a command's output is sent in.
+  // Only the lines at its foot that show nothing at all go: one of nothing but a background is a bar.
+  async #screenText(t) {
+    const lines = screenLines(await this.#backend(t).readStyledScreen(t.target));
+    let end = lines.length;
+    while (end > 0 && plain(lines[end - 1]) === '') end -= 1;
+    return capped(lines.slice(0, end), { maxLines: MAX_LINES, maxChars: MAX_CHARS });
+  }
+
+  // A program has the screen to itself. What it shows is the last line's to show, over what that line
+  // printed before: the command's own, or the last one sent to the program, which takes the screen
+  // from the line before it. What was printed is as it was last read, since nothing more is while the
+  // program has the screen.
+  async #readScreen(t) {
+    const running = t.running;
+    const last = running.segments.at(-1);
+    if (!last) return;
+    last.screen = await this.#screenText(t);
+    const { lines = [], cut = false } = running.main ?? {};
     if (this.#sendParts(t, lines, cut, {})) running.changedAt = Date.now();
   }
 
   // Each part of the running command's output that isn't what a client was last sent, sent again whole.
   // Only the last can still grow. With `done`, that one is over too, and says how the command ended.
   // Output too long to read from its start can't be parted, so all that's read is the last part's.
+  // What a program showed with the screen to itself comes first in its line's part, as it was shown
+  // before anything printed after it.
   #sendParts(t, lines, cut, { done = false, code } = {}) {
     const { segments } = t.running;
+    const withScreen = (segment, part) => [segment.screen, part].filter(Boolean).join('\n');
     const texts = cut
-      ? segments.map((segment, index) => (index === segments.length - 1 ? partFrom(lines, 0) : segment.sent?.text ?? ''))
-      : partTexts(lines, segments.map(segment => segment.mark));
+      ? segments.map((segment, index) => (index === segments.length - 1 ? withScreen(segment, partFrom(lines, 0)) : segment.sent?.text ?? ''))
+      : partTexts(lines, segments.map(segment => segment.mark)).map((part, index) => withScreen(segments[index], part));
     let changed = false;
     segments.forEach((segment, index) => {
       const isLast = index === segments.length - 1;
@@ -1017,16 +1061,17 @@ export class Terminals {
       running.changedAt = Date.now();
       this.#store.report(t.id, 'terminal.screen', { fullScreen: full });
     }
-    // What a program that has the screen to itself shows is a page's, and none of its output.
+    // What a program that has the screen to itself shows is read in place of what was printed.
     if (full) {
-      running.screen = undefined;
+      running.seen = undefined;
+      await this.#readScreen(t);
       return;
     }
     const look = await this.#look(t);
     // Nothing has come of what was typed yet.
     if (look.text === running.before) return;
-    const isStill = look.text === running.screen;
-    running.screen = look.text;
+    const isStill = look.text === running.seen;
+    running.seen = look.text;
     if (!isStill) running.stillSince = Date.now();
     const body = this.#bodyOf(t, look);
     const lines = trimEnd(body.lines);
@@ -1045,6 +1090,7 @@ export class Terminals {
     running.tail = body.cut ? undefined : tailOf(body.lines);
     // A prompt under the output is the shell's, back already, and none of what the command printed.
     const shown = isPrompted && hasPrompt && !t.front ? output : lines;
+    running.main = { lines: shown, cut: body.cut };
     if (this.#sendParts(t, shown, body.cut, {})) running.changedAt = Date.now();
   }
 
@@ -1115,23 +1161,34 @@ export class Terminals {
 
   // A line for the program that's running, which starts a part of its output. One the program reads
   // without showing is hidden here too. Where the output ended is read now, unless a program has the
-  // screen, which leaves the output where it was last read.
+  // screen, which leaves the output where it was last read: what the program shows from here on is
+  // this line's.
   async #input(t, { text, clientId }) {
     const running = t.running;
     const backend = this.#backend(t);
     const hidden = await backend.hidesInput(t.target).catch(() => false);
     let mark = running.tail;
-    if (!(await this.#isFullScreen(t))) {
+    const isFull = await this.#isFullScreen(t);
+    if (!isFull) {
       const { lines, cut } = await this.#readBody(t);
       mark = cut ? undefined : tailOf(lines);
     }
     const of = running.key ? `${running.pid}-${running.seq}` : running.at.toString(36);
     const line = clientId ?? `${t.id.slice(0, 8)}-${of}-${running.segments.length}`;
     const shown = hidden ? HIDDEN_TEXT : text;
-    running.segments.push({ line, shown, at: Date.now(), mark: mark ?? { index: -1, text: '' } });
+    const before = running.segments.at(-1);
+    const segment = { line, shown, at: Date.now(), mark: mark ?? { index: -1, text: '' } };
+    // What a program with the screen to itself shows is one screen, under the last line sent: it moves
+    // here from under the line before.
+    if (isFull && before?.screen !== undefined) {
+      segment.screen = before.screen;
+      before.screen = undefined;
+    }
+    running.segments.push(segment);
     // Its answer is on its way, so it's read as often as a command just started.
     running.changedAt = Date.now();
     this.#store.report(t.id, 'message.user', { text: shown, shell: true, input: true, clientId: line });
+    if (segment.screen !== undefined) this.#sendParts(t, running.main?.lines ?? [], running.main?.cut ?? false, {});
     this.#save(t);
     await this.#type(t, text);
     return { queued: false };

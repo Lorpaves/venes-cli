@@ -2271,11 +2271,13 @@ async function mirrorsATerminalOpenInRex(r) {
     assert.match(plainOf((await said('p10')).stdout), /localhost/);
     assert.ok(!/❯/.test(plainOf((await said('p10')).stdout)), 'without the prompt that came back');
 
-    // A program started at the Mac is named, and a line for it is followed from where it was.
+    // A program started at the Mac, with the page open, is a line as it was typed, and takes a line.
     r.mark();
     typeAtTheMac('cat\n');
     await status('running');
     assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, 'cat');
+    const atTheMac = await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'its line');
+    assert.deepEqual([atTheMac.text, atTheMac.shell, atTheMac.input], ['cat', true, undefined]);
     assert.equal((await send('from-the-phone', 'p8')).input, true);
     await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === 'p8' && /from-the-phone\nfrom-the-phone/.test(plainOf(e.stdout)), 10000, 'its answer');
     r.mark();
@@ -2284,13 +2286,42 @@ async function mirrorsATerminalOpenInRex(r) {
     assert.match(plainOf((await said('p8')).stdout), /^from-the-phone\nfrom-the-phone/);
     assert.equal((await r.wait(e => e.kind === 'terminal.program' && e.sessionId === id, 5000, 'terminal.program')).program, undefined);
 
+    // One that takes the screen for itself at the Mac shows as it does when sent from here.
+    r.mark();
+    typeAtTheMac('less /etc/hosts\n');
+    const pager = await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 10000, 'its line');
+    assert.match(pager.text, /^less/);
+    const pagedAtTheMac = await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === pager.clientId && /localhost/.test(plainOf(e.stdout)), 10000, 'what it shows');
+    assert.equal(pagedAtTheMac.running, true);
+    r.mark();
+    typeAtTheMac('q');
+    await status('idle');
+    assert.match(plainOf((await said(pager.clientId)).stdout), /localhost/);
+
+    // One that was already running there when the page is opened shows too, under its name.
+    await r.client.request('terminalLeave', { sessionId: id });
+    r.mark();
+    typeAtTheMac('less /etc/hosts\n');
+    await status('running');
+    await delay(800);
+    assert.ok(!r.events.some(e => e.kind === 'message.user' && e.sessionId === id), 'not while no one has the page open');
+    await r.client.request('terminalView', { sessionId: id, columns: 47, rows: 30 });
+    const already = await r.wait(e => e.kind === 'message.user' && e.sessionId === id, 5000, 'its line');
+    assert.equal(already.text, 'less');
+    await r.wait(e => e.kind === 'message.output' && e.sessionId === id && e.clientId === already.clientId && /localhost/.test(plainOf(e.stdout)), 10000, 'what it shows');
+    assert.deepEqual((await r.client.request('join', { sessionId: id, limit: 2 })).items.map(item => item.role), ['user', 'output'], 'on the page from the start');
+    r.mark();
+    typeAtTheMac('q');
+    await status('idle');
+    assert.match(plainOf((await said(already.clientId)).stdout), /localhost/);
+
     // What it did is there for a client that comes later.
     const again = await r.client.request('join', { sessionId: id, limit: 60 });
     assert.deepEqual(again.items.filter(item => item.role === 'user').map(item => [item.text, item.input]), [
       ['echo from-the-phone; tput cols', undefined], ['echo typed-at-the-mac', undefined], ['printf no-line-end', undefined],
       ['echo sent-after', undefined], ['cd /tmp', undefined],
       ['seq 1 150000', undefined], ['echo after-the-flood', undefined], ['cat', undefined], ['to-the-program', true], ['less /etc/hosts', undefined],
-      ['from-the-phone', true],
+      ['cat', undefined], ['from-the-phone', true], [pager.text, undefined], ['less', undefined],
     ]);
     assert.ok(again.items.filter(item => item.role === 'output').every(item => !/❯/.test(plainOf(item.stdout))));
 

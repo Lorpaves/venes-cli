@@ -9,8 +9,8 @@ import { ZSH_FILES, installShellFiles, shellCommand } from '../../src/shell.mjs'
 import { parseStatus } from '../../src/gitstate.mjs';
 import { changesTerminals } from '../../src/rex.mjs';
 import {
-  HIDDEN_TEXT, Terminals, anchorLine, contextOf, historyPage, lineStarts, linesAdded, mirrorId, parseState, partFrom, partStarts, partTexts, promptHeight,
-  promptLike, shellQuoted, sizeOf, tailOf,
+  HIDDEN_TEXT, Terminals, anchorLine, commandLineOf, contextOf, historyPage, lineStarts, linesAdded, mirrorId, parseState, partFrom, partStarts, partTexts,
+  promptHeight, promptLike, promptLinesAbove, shellQuoted, sizeOf, tailOf,
 } from '../../src/terminals.mjs';
 
 const ESC = '\u001b';
@@ -535,7 +535,7 @@ function setUpRex(t) {
   const events = [];
   store.on('event', event => events.push(event));
   const calls = [];
-  const rex = { open: [], screens: new Map(), shells: new Map(), sizes: new Map(), fullScreen: false, changed: undefined, limit: undefined };
+  const rex = { open: [], screens: new Map(), alts: new Map(), shells: new Map(), sizes: new Map(), fullScreen: false, changed: undefined, limit: undefined };
   const backend = {
     listTerminals: async () => rex.open.map(terminal => ({ ...terminal })),
     watchTerminals: listener => { rex.changed = listener; },
@@ -552,7 +552,8 @@ function setUpRex(t) {
       const cut = Boolean(rex.limit) && whole.length > rex.limit;
       return { text: (cut ? whole.subarray(whole.length - rex.limit) : whole).toString('utf8'), cut, end: whole.length };
     },
-    readStyledScreen: async target => rex.screens.get(target.pane) ?? '',
+    // A program with the screen to itself shows on a screen of its own, which `alts` has.
+    readStyledScreen: async target => (rex.fullScreen ? rex.alts.get(target.pane) ?? '' : rex.screens.get(target.pane) ?? ''),
     isFullScreen: async () => rex.fullScreen,
     hidesInput: async () => false,
     size: async target => rex.sizes.get(target.pane) ?? { columns: 156, rows: 70 },
@@ -753,6 +754,19 @@ test('the line a command was typed on is where it was, or where the prompt has t
   assert.equal(anchorLine(['other', 'lines'], [0, 10], running), undefined);
 });
 
+test('a command typed at the Mac is found by the prompt it was typed at, and the prompt by where it\'s drawn', () => {
+  const lines = ['❯ ls', 'bin', '', '~/app', `${ESC}[32m❯${ESC}[0m make -j4`, 'cc main.c', '❯ not typed here'];
+  assert.deepEqual(commandLineOf(lines.slice(0, 6), '❯'), { index: 4, command: 'make -j4' });
+  assert.deepEqual(commandLineOf(['old', '', '~/app', '❯'], '❯'), undefined, 'not the prompt with nothing typed at it');
+  assert.equal(commandLineOf(lines, undefined), undefined);
+  // A prompt of three lines, the first of them empty: two are above the one that's typed on.
+  const drawn = ['bin', '', '~/app', '❯ make', 'cc main.c', 'done', '', '~/app', '❯'];
+  assert.equal(promptLinesAbove(drawn, 3, 8), 2);
+  // One line, although both commands ended alike: nothing above it is taken for the prompt.
+  assert.equal(promptLinesAbove(['done', '% make', 'done', '%'], 1, 3), 0);
+  assert.equal(promptLinesAbove(['a', '', '~/app', '❯ cd /tmp', '', '/tmp', '❯'], 3, 6), 0, 'nor where it reads otherwise');
+});
+
 const ended = (of, line) => of('message.output').find(event => event.clientId === line && !event.running);
 
 test('a command sent to a mirrored terminal is a line of its own, with what it printed under it', async t => {
@@ -944,4 +958,80 @@ test('what a mirrored terminal did is kept across a restart, for as long as the 
   await until(() => terminals.has('a'), 'the first look at Rex');
   await until(() => !fs.existsSync(path.join(root, 'gone')), 'what a closed one kept to go');
   assert.deepEqual((await terminals.join('a', {})).items.map(item => item.text), ['ls']);
+});
+
+test('a program running at the Mac shows in a mirrored terminal\'s page while the page is open', async t => {
+  const { terminals, rex, of, shell, store } = setUpRex(t);
+  rex.open = [shell('a', '/Users/me/app')];
+  const zsh = fakeShell(rex, 'block:a');
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  const last = line => of('message.output').filter(event => event.clientId === line).at(-1);
+
+  // One with the screen to itself, as codex has. Nothing is read of it until someone looks.
+  zsh.paste('codex');
+  zsh.starts('codex');
+  rex.fullScreen = true;
+  const screen = `Codex\n${ESC}[7m> ask   ${ESC}[0m`;
+  rex.alts.set('block:a', screen.replace('\n', '\r\n'));
+  rex.changed();
+  await until(() => of('terminal.program').at(-1)?.program === 'codex', 'Rex to say so');
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  assert.deepEqual([of('message.user').length, of('message.output').length], [0, 0]);
+
+  const phone = {};
+  await terminals.view('a', { columns: 47, rows: 30 }, phone);
+  const [named] = of('message.user');
+  assert.deepEqual([named.text, named.shell, named.input], ['codex', true, undefined], 'under a line that names it');
+  assert.deepEqual([last(named.clientId).stdout, last(named.clientId).running, of('terminal.screen').at(-1).fullScreen], [screen, true, true]);
+  const opened = await terminals.join('a', { limit: 60 });
+  assert.deepEqual(opened.items.map(item => [item.role, item.text ?? item.stdout]), [['user', 'codex'], ['output', screen]]);
+  assert.equal(store.find('a').lastPrompt, 'codex');
+
+  // With no one looking it isn't read, and it's the same line when someone looks again.
+  await terminals.leave('a', phone);
+  rex.alts.set('block:a', 'Codex\r\nworking');
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  assert.equal(last(named.clientId).stdout, screen);
+  await terminals.view('a', { columns: 47, rows: 30 }, phone);
+  await until(() => last(named.clientId).stdout === 'Codex\nworking', 'what it shows now');
+  assert.equal(of('message.user').length, 1);
+
+  // A line sent to it takes the screen, as in any terminal session.
+  assert.deepEqual(await terminals.send('a', { text: 'hello', clientId: 'c1' }), { queued: false, page: true });
+  assert.deepEqual([of('message.user').at(-1).input, last('c1').stdout, last(named.clientId).stdout], [true, 'Codex\nworking', '']);
+
+  // It's left at the Mac with no one looking: that's said, with what it showed last.
+  await terminals.leave('a', phone);
+  rex.fullScreen = false;
+  zsh.ends();
+  rex.changed();
+  await until(() => of('session.status').at(-1)?.status === 'idle', 'it to end', 5000);
+  assert.deepEqual([last('c1').stdout, last('c1').running, of('terminal.screen').at(-1).fullScreen], ['Codex\nworking', false, false]);
+});
+
+test('a command typed at the Mac while a mirrored terminal\'s page is open is a line with what it printed', async t => {
+  const { terminals, rex, of, shell } = setUpRex(t);
+  rex.open = [shell('a', '/Users/me/app')];
+  const zsh = fakeShell(rex, 'block:a', { runs: command => (command.startsWith('make') ? { lines: ['cc main.c'], stays: 'make' } : []) });
+  await terminals.restore();
+  await until(() => terminals.has('a'), 'the first look at Rex');
+  // The page is opened at a prompt, which is how the prompt is known without a command sent from here.
+  const phone = {};
+  await terminals.view('a', { columns: 47, rows: 30 }, phone);
+  zsh.paste('make -j4');
+  zsh.key('Enter');
+  rex.changed();
+  await until(() => of('message.user').length, 'its line');
+  const [typed] = of('message.user');
+  assert.deepEqual([typed.text, typed.shell, typed.input], ['make -j4', true, undefined], 'as it was typed');
+  await until(() => of('message.output').length, 'what it printed');
+  assert.deepEqual([of('message.output').at(-1).stdout, of('message.output').at(-1).running, of('message.output').at(-1).clientId], ['cc main.c', true, typed.clientId]);
+
+  // It ends: the prompt under it is none of what it printed, though it was never measured.
+  zsh.ends(['done']);
+  rex.changed();
+  await until(() => ended(of, typed.clientId), 'it to end', 5000);
+  assert.equal(ended(of, typed.clientId).stdout, 'cc main.c\ndone');
+  assert.deepEqual(terminals.history('a').items.map(item => [item.role, item.text ?? item.stdout]), [['user', 'make -j4'], ['output', 'cc main.c\ndone']]);
 });

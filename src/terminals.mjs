@@ -14,7 +14,9 @@
 // the line the prompt was on. That line stays as far from the start of all the terminal holds while
 // more is printed under it, until the terminal is full and lets go of its oldest lines, and then it's
 // known by what it says and what's above it. The command's output is what's under that line, until the
-// shell is in front again with its prompt drawn. What's typed at the Mac isn't followed.
+// shell is in front again with its prompt drawn. A command typed at the Mac isn't followed, but a
+// program that's running there is, while a client has the terminal's page open: under a line that
+// names it, as a command sent from a client would be.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -246,6 +248,34 @@ export function anchorLine(lines, starts, { offset, text, typed, context = [] })
     if (hasCommand(i) && isUnder(i)) return i;
   }
   return undefined;
+}
+
+// The line a command was typed on, and what was typed, in a terminal whose prompt reads `prompt` with
+// nothing typed at it: the last line that starts with it and has something after. Lines the terminal
+// has let go of went from the top, so one that's still there is never older than the one looked for.
+export function commandLineOf(lines, prompt) {
+  if (!prompt) return undefined;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const text = plain(lines[index]);
+    const command = text.startsWith(`${prompt} `) ? text.slice(prompt.length).trim() : '';
+    if (command) return { index, command };
+  }
+  return undefined;
+}
+
+// How many of the lines above a prompt's own line are the prompt's too, going by two places it was
+// drawn: above the line a command was typed on, and above the line the shell waits on now. A prompt of
+// several lines starts with an empty one, as most are set up to, and it's those lines when they read
+// the same in both places, down from an empty one. Anything else is taken for a prompt of one line:
+// what's above could as well be the ends of what two commands printed alike. Used only where the
+// prompt was never measured, as it is before a command is sent from a client.
+export function promptLinesAbove(lines, typedAt, waitingAt) {
+  for (let above = 1; above <= CONTEXT_LINES; above++) {
+    const [typed, waiting] = [lines[typedAt - above], lines[waitingAt - above]].map(line => (line === undefined ? undefined : plain(line)));
+    if (typed === undefined || typed !== waiting) return 0;
+    if (typed.trim() === '') return above;
+  }
+  return 0;
 }
 
 // A page of what a terminal session did, as `history` gives Claude Code's: it starts where a command
@@ -485,6 +515,8 @@ export class Terminals {
           await this.#run(t, { text, clientId });
           return { queued: false };
         }
+        // With its page open somewhere, the program has a line of its own first, as it has there.
+        if (!t.running && t.viewers?.size) await this.#watch(t);
         if (!t.running) await this.#attach(t);
       }
       if (t.running) {
@@ -541,8 +573,21 @@ export class Terminals {
       t.viewers.delete(viewer);
       t.viewers.set(viewer, sizeOf({ columns, rows }, t.size));
       if (!t.ended) await this.#fit(t, { columns, rows });
+      if (t.mirror && !t.ended && !t.running) await this.#lookAtMirror(t).catch(() => {});
       return { columns: t.columns ?? t.size.columns, rows: t.size.rows };
     });
+  }
+
+  // A client has just opened a mirrored terminal's page, with nothing being followed there. A program
+  // running in it, which was started at the Mac, is followed from now, and read at once for the page to
+  // open on. At a prompt, what the prompt reads is kept, for finding a command typed at the Mac later.
+  async #lookAtMirror(t) {
+    if (await this.#frontNow(t)) {
+      await this.#watch(t);
+      await this.#readMirror(t);
+      return;
+    }
+    t.promptSeen = tailOf((await this.#look(t)).lines).text || undefined;
   }
 
   // The client has gone from the page. With no one left looking, the terminal is whoever else's has it.
@@ -789,9 +834,14 @@ export class Terminals {
       if (this.#mirrors && Date.now() - this.#syncedAt >= MIRROR_SYNC_MS && this.#backends.rex?.listTerminals && this.#useRex()) this.syncMirrors();
       await Promise.all([...this.#terminals.values()].filter(t => !t.ended).map(t => this.#exclusive(t, async () => {
         if (t.ended) return;
-        // A mirrored terminal is read while what was sent to it runs, and Rex says when it closes.
+        // A mirrored terminal is read while what was sent to it runs, and Rex says when it closes. A
+        // program started at the Mac is read while someone has the page open, and once more when it's
+        // over, to say so.
         if (t.mirror) {
-          if (t.running && Date.now() - t.running.readAt >= this.#readEvery(t.running)) await this.#readMirror(t);
+          if (!t.running && t.front && t.viewers?.size) await this.#watch(t);
+          const running = t.running;
+          const isFollowed = running && (!running.isWatched || t.viewers?.size > 0 || !t.front);
+          if (isFollowed && Date.now() - running.readAt >= this.#readEvery(running)) await this.#readMirror(t);
           return;
         }
         if (Date.now() - t.checkedAt >= this.#liveCheckMs && !(await this.#isOpen(t))) {
@@ -976,10 +1026,10 @@ export class Terminals {
   // nowhere to start from, and what it prints then is no line's.
   #bodyOf(t, look) {
     const { anchor } = t.running;
-    if (anchor.offset === undefined && anchor.typed === undefined) return { lines: [], cut: false, isPlaceless: true };
+    if (anchor.isPlaceless) return { lines: [], cut: false, isPlaceless: true };
     const at = anchorLine(look.lines, look.starts, anchor);
     if (at === undefined) return { lines: look.cut ? look.lines.slice(1) : look.lines, cut: true };
-    return { lines: look.lines.slice(at + anchor.span), cut: false };
+    return { lines: look.lines.slice(at + anchor.span), cut: false, ...(anchor.typed !== undefined && { typedAt: at }) };
   }
 
   // The shell's prompt, which only the shell knows: Ctrl-C at it draws it again under itself, and how
@@ -1034,10 +1084,38 @@ export class Terminals {
   async #attach(t) {
     const look = (await this.#isFullScreen(t)) ? undefined : await this.#look(t);
     const tail = look && tailOf(look.lines);
-    t.running = {
-      at: Date.now(), readAt: 0, segments: [], before: look?.text,
-      anchor: { offset: look?.starts[Math.max(tail.index, 0)], text: tail?.text ?? '', context: look ? contextOf(look.lines, tail.index) : [], span: 0 },
-    };
+    const anchor = look
+      ? { offset: look.starts[Math.max(tail.index, 0)], text: tail.text, context: contextOf(look.lines, tail.index), span: 0 }
+      : { isPlaceless: true, span: 0 };
+    t.running = { at: Date.now(), readAt: 0, segments: [], before: look?.text, anchor };
+  }
+
+  // A program that was started at the Mac is in front of a mirrored terminal's shell, and a client has
+  // the terminal's page open. It's followed as a command sent from a client is, under a line of its own.
+  // With the screen to itself, what it shows is all there is to it, and the line is its name. Otherwise
+  // its output starts under the line it was typed on, when the prompt is known and that line can be
+  // found, and the line is what was typed. Failing that, it's the program's name, with what it prints
+  // from now on.
+  async #watch(t) {
+    const now = Date.now();
+    let text = t.front;
+    let anchor = { isPlaceless: true, span: 0 };
+    if (!(await this.#isFullScreen(t))) {
+      const look = await this.#look(t);
+      const prompt = t.prompt?.text ?? t.promptSeen;
+      const typed = commandLineOf(look.lines, prompt);
+      const tail = tailOf(look.lines);
+      const index = typed ? typed.index : Math.max(tail.index, 0);
+      anchor = {
+        offset: look.starts[index], text: typed ? prompt : tail.text, context: contextOf(look.lines, index), span: 1,
+        ...(typed && { typed: squashed(typed.command) }),
+      };
+      if (typed) text = typed.command;
+    }
+    t.running = { at: now, readAt: 0, isWatched: true, segments: [{ line: `${t.id.slice(0, 8)}-${now.toString(36)}` }], anchor };
+    this.#append(t, { role: 'user', text, shell: true, at: now });
+    this.#store.report(t.id, 'message.user', { text, shell: true, clientId: t.running.segments[0].line }, { fields: { lastPrompt: text } });
+    if (t.status !== 'running') this.#setStatus(t, 'running');
   }
 
   // The command before may be over without having been seen to be.
@@ -1076,8 +1154,10 @@ export class Terminals {
     const body = this.#bodyOf(t, look);
     const lines = trimEnd(body.lines);
     const tail = tailOf(look.lines);
-    const height = t.prompt?.height ?? 1;
-    const isPrompted = promptLike(tail.text, t.prompt?.text);
+    // A prompt that was never measured, as before any command is sent from a client, is as many lines
+    // as it shows above the command's own line and above the line it's on now.
+    const height = t.prompt?.height ?? Math.max(body.typedAt === undefined ? 0 : promptLinesAbove(look.lines, body.typedAt, tail.index), 1);
+    const isPrompted = promptLike(tail.text, t.prompt?.text ?? t.promptSeen);
     const hasPrompt = body.isPlaceless || lines.length >= height;
     const output = lines.slice(0, Math.max(lines.length - height, 0));
     const hasWaited = Date.now() - running.stillSince >= PROMPT_WAIT_MS;

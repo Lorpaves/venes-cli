@@ -2005,6 +2005,13 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   const { sessionId, model } = await startCodex(r);
   const listed = (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
   assert.deepEqual([listed.agent, listed.status, listed.model, listed.pane], ['codex', 'idle', model, null]);
+  // A client that doesn't say it can show Codex sessions, as an app from before them, is told of none.
+  const older = await connect();
+  const heard = [];
+  older.on('message', message => heard.push(message));
+  await older.request('subscribe');
+  assert.deepEqual(heard.find(message => message.type === 'snapshot').sessions, []);
+  assert.deepEqual((await older.request('sessions')).sessions, []);
   assert.equal((await r.kind('session.discovered')).agent, 'codex');
   assert.equal((await r.kind('session.started')).source, 'startup');
 
@@ -2050,6 +2057,9 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   const { items } = await r.client.request('library', { limit: 5 });
   const stored = items.find(item => item.id === sessionId);
   assert.deepEqual([stored.agent, stored.status, stored.cwd], ['codex', 'idle', fs.realpathSync(WS)]);
+  assert.ok(!(await older.request('library', { limit: 5 })).items.some(item => item.agent), 'the older client\'s library has no Codex in it');
+  assert.deepEqual(heard.filter(message => message.type === 'event'), [], 'and it heard nothing of the session');
+  older.close();
 
   // Codex's server gone and back, the thread is stored and no longer going on. A message loads it again.
   r.mark();
@@ -2137,7 +2147,8 @@ async function runCase(name) {
       startHelper(CLI, opts.codex);
       client = await connect();
       run = new Run(client);
-      await client.request('subscribe');
+      // A Codex case's client is one that can show Codex sessions, and says so.
+      await client.request('subscribe', opts.codex ? { agents: ['codex'] } : {});
     }
     // A Codex case has no Claude Code session to wait for.
     if (opts.rex) launchInRex(opts);

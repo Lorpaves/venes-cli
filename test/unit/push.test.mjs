@@ -109,3 +109,17 @@ test('a token Apple no longer takes is forgotten, and a relay that\'s down is on
   await notify({ devices, isConnected: () => false, event, title: async () => 'T', send: async () => ({ status: 502, body: { status: 410, reason: 'Unregistered' } }) });
   assert.deepEqual(devices.list(), []);
 });
+
+test('a session that isn\'t Claude Code\'s is only told to a phone whose app can show one', async t => {
+  const { devices, file } = devicesIn(t);
+  devices.register({ deviceId: 'newer', token: TOKEN, key: KEY, agents: ['codex', 7, ''] });
+  devices.register({ deviceId: 'older', token: 'cd'.repeat(32), key: KEY });
+  assert.deepEqual(devices.list().map(device => [device.deviceId, device.agents]), [['newer', ['codex']], ['older', undefined]]);
+  assert.deepEqual(new PushDevices(file).list(), devices.list(), 'and that\'s kept');
+  const told = async agent => (await notify({
+    devices, isConnected: () => false, event: { kind: 'turn.end', sessionId: 's1', lastMessage: 'Done' }, title: async () => 'Fix login', agent,
+    url: 'http://relay/push', send: async () => ({ status: 200, body: { status: 200 } }),
+  })).map(result => result.deviceId);
+  assert.deepEqual(await told('codex'), ['newer']);
+  assert.deepEqual(await told(undefined), ['newer', 'older']);
+});

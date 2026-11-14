@@ -161,6 +161,18 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const isConnected = deviceId => [...clients].some(socket => socket.pushDevice === deviceId);
   const write = (socket, message) => socket.write(`${JSON.stringify(message)}\n`);
 
+  // A session that isn't Claude Code's, as a Codex one, is only told to a client that says it can show
+  // one: with `agents` on any command, which holds for its connection. An app from before them would
+  // list such a session and make little of it.
+  const agentOf = new Map();
+  const shows = (socket, agent) => !agent || socket.agents?.has(agent) === true;
+  // Whose a session is outlasts the session, for the word that it's gone.
+  const agentFor = sessionId => agentOf.get(sessionId) ?? (typeof sessionId === 'string' ? store.find(sessionId)?.agent : undefined);
+  const showsEvent = (socket, event) => shows(socket, agentFor(event.sessionId));
+  const noteAgents = (socket, agents) => {
+    if (Array.isArray(agents)) socket.agents = new Set(agents.filter(agent => typeof agent === 'string'));
+  };
+
   const typing = oneAtATime();
   const avatar = avatarSource();
   const findMentions = mentionFinder();
@@ -204,12 +216,13 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     if (event.kind === 'request.opened' && event.request.kind === 'permission') {
       offerPromptRows(store, event.request).catch(error => console.error(`prompt rows: ${error.message}`));
     }
-    for (const socket of subscribers) write(socket, { type: 'event', event });
+    if (event.kind === 'session.discovered' && event.agent) agentOf.set(event.sessionId, event.agent);
+    for (const socket of subscribers) if (showsEvent(socket, event)) write(socket, { type: 'event', event });
     const title = async () => {
       const info = await library.info(event.sessionId).catch(() => undefined);
       return titleFor({ id: event.sessionId, title: info?.summary, cwd: store.find(event.sessionId)?.cwd ?? info?.cwd });
     };
-    notify({ devices, isConnected, event, title }).catch(error => console.error(`push: ${error.message}`));
+    notify({ devices, isConnected, event, title, agent: agentFor(event.sessionId) }).catch(error => console.error(`push: ${error.message}`));
   });
 
   const sessionWithPane = sessionId => {
@@ -279,16 +292,16 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const forCodex = (name, otherwise) => async (msg, socket) => ((await isCodex(msg.sessionId)) ? codex[name](msg) : otherwise(msg, socket));
 
   // Codex's stored threads come with the first page, which is where what's running comes too.
-  const listLibrary = async ({ limit, offset }) => {
+  const listLibrary = async ({ limit, offset }, socket) => {
     const [page, threads] = await Promise.all([
       library.page({ limit, offset }),
-      offset ? [] : codex?.library().catch(error => { console.error(`codex library: ${error.message}`); return []; }) ?? [],
+      offset || !shows(socket, CODEX) ? [] : codex?.library().catch(error => { console.error(`codex library: ${error.message}`); return []; }) ?? [],
     ]);
     return threads.length ? { ...page, items: [...page.items, ...threads] } : page;
   };
 
-  const listSessions = async () => {
-    const sessions = store.sessions();
+  const listSessions = async socket => {
+    const sessions = store.sessions().filter(session => shows(socket, session.agent));
     const sockets = new Set([undefined, ...sessions.map(s => s.tmuxSocket ?? undefined)]);
     const known = new Set(sessions.map(s => `${s.tmuxSocket}|${s.pane}`));
     const unattached = (await findClaudePanes(sockets)).filter(p => !known.has(`${p.tmuxSocket}|${p.pane}`));
@@ -302,20 +315,22 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { protocol: PROTOCOL_VERSION, version: VERSION, quiet: store.isQuiet(), ...(account && { tailscaleAccount: account }) };
     },
     update: async () => ({ version: VERSION, available: (await checkForUpdate()) ?? null }),
-    sessions: listSessions,
+    sessions: (msg, socket) => listSessions(socket),
     subscribe: async (msg, socket) => {
-      const { unattached } = await listSessions();
+      const { unattached } = await listSessions(socket);
       // Nothing below awaits, so no event can slip between the snapshot and the subscription.
       const sameBoot = !msg.bootId || msg.bootId === bootId;
       const { events, gap } = store.eventsSince(sameBoot ? msg.since ?? store.seq : 0);
       write(socket, {
-        type: 'snapshot', bootId, seq: store.seq, sessions: store.sessions(), unattached, requests: store.requests(),
+        type: 'snapshot', bootId, seq: store.seq, unattached,
+        sessions: store.sessions().filter(session => shows(socket, session.agent)),
+        requests: store.requests().filter(request => shows(socket, request.agent)),
       });
-      for (const event of events) write(socket, { type: 'event', event });
+      for (const event of events) if (showsEvent(socket, event)) write(socket, { type: 'event', event });
       subscribers.add(socket);
       return { gap: gap || !sameBoot };
     },
-    library: msg => listLibrary({ limit: msg.limit, offset: msg.offset }),
+    library: (msg, socket) => listLibrary({ limit: msg.limit, offset: msg.offset }, socket),
     // A phone that wants notifications while it isn't connected, and this connection is that phone's.
     pushRegister: (msg, socket) => {
       devices.register(msg);
@@ -524,6 +539,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         msg = JSON.parse(line);
         const command = commands[msg.cmd];
         if (!command) throw new HelperError('unknown_command', `Unknown command: ${msg.cmd}`);
+        noteAgents(socket, msg.agents);
         write(socket, { type: 'result', id: msg.id, ok: true, ...(await command(msg, socket)) });
       } catch (error) {
         write(socket, {

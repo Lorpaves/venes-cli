@@ -146,10 +146,10 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `folders` | `path`, `hidden` (both optional) | Where a new session can start. Without `path`: `home`, and `recent`, the folders sessions ran in lately. With it: that folder's `path`, `name` and `trusted`, its `entries`, and `truncated`. See [Starting a session](#starting-a-session). |
-| `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
+| `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac`, `agents` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
 | `pushUnregister` | `deviceId` | That phone doesn't want them any more |
 | `start` | `cwd`, `trust`, `agent` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). With `agent: "codex"` it starts a Codex session there. See [Codex sessions](#codex-sessions). |
-| `subscribe` | `since`, `bootId` (both optional) | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. |
+| `subscribe` | `since`, `bootId` (both optional), `agents` | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, so reload. `agents` lists the sessions other than Claude Code's that the client can show: `["codex"]`. See [Codex sessions](#codex-sessions). |
 | `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
@@ -251,6 +251,8 @@ Claude Code asks before it works in a folder it doesn't trust yet, and runs no h
 ### Codex sessions
 
 Codex has a server for its own clients, which its desktop app, its editor extension and its remote control go through, and it keeps one running on this Mac as a daemon (`codex app-server daemon`). The helper is one more client of it, over the daemon's control socket, `~/.codex/app-server-control/app-server-control.sock`: a session here is a thread there, and everything comes and goes as that server's own messages. Nothing is typed into a terminal or read off one, and no hooks are installed in Codex.
+
+A client says it can show Codex sessions with `agents: ["codex"]` on a command, `subscribe` being the one to put it on, and it holds for the connection. Without it, a client gets no Codex session in a snapshot, `sessions` or `library`, and none of their events: an app from before them would list such a session and make little of it. `pushRegister` takes `agents` the same way, for the phone's notifications.
 
 A Codex session is told with the events and commands a Claude Code session has, and says whose it is: `agent: "codex"` is in its entry in `sessions`, a snapshot and `join`, in its `session.discovered`, in its requests, and in its `library` item. A Claude Code session has no `agent`.
 

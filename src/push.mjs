@@ -53,13 +53,15 @@ export function payloadFor(sealed) {
   return { aps: { alert: FALLBACK, sound: 'default', 'mutable-content': 1 }, v: sealed };
 }
 
-function checkedDevice({ deviceId, token, key, sandbox = false, mac }) {
+function checkedDevice({ deviceId, token, key, sandbox = false, mac, agents }) {
   const isId = value => typeof value === 'string' && value.length > 0 && value.length <= ID_LIMIT;
   if (!isId(deviceId)) throw new HelperError('bad_device', 'That isn\'t a device.');
   if (typeof token !== 'string' || !DEVICE_TOKEN.test(token)) throw new HelperError('bad_device', 'That isn\'t a device token.');
   if (typeof key !== 'string' || Buffer.from(key, 'base64').length !== KEY_BYTES) throw new HelperError('bad_device', 'That isn\'t a key.');
   if (mac !== undefined && !isId(mac)) throw new HelperError('bad_device', 'That isn\'t a Mac.');
-  return { deviceId, token: token.toLowerCase(), key, sandbox: sandbox === true, ...(mac && { mac }) };
+  // The sessions other than Claude Code's that the phone's app can show, which it's only told of then.
+  const shown = Array.isArray(agents) ? agents.filter(isId) : [];
+  return { deviceId, token: token.toLowerCase(), key, sandbox: sandbox === true, ...(mac && { mac }), ...(shown.length && { agents: shown }) };
 }
 
 // The phones to notify, kept in a file only this user can read, since each has its key.
@@ -108,9 +110,10 @@ async function post(url, body) {
 }
 
 // Sends what an event is worth to each phone that isn't connected now. `title` is looked up only when
-// there's someone to tell.
-export async function notify({ devices, isConnected, event, title, url = process.env.VENES_PUSH_URL || RELAY_URL, send = post }) {
-  const away = devices.list().filter(device => !isConnected(device.deviceId));
+// there's someone to tell. `agent` is whose session it is when it isn't Claude Code's, which only a
+// phone whose app can show such a session hears of.
+export async function notify({ devices, isConnected, event, title, agent = undefined, url = process.env.VENES_PUSH_URL || RELAY_URL, send = post }) {
+  const away = devices.list().filter(device => !isConnected(device.deviceId) && (!agent || device.agents?.includes(agent)));
   if (!away.length || !noticeFor(event, '')) return [];
   const notice = noticeFor(event, await title());
   return Promise.all(away.map(async device => {

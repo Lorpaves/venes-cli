@@ -271,7 +271,9 @@ A Codex session is told with the events and commands a Claude Code session has, 
 | `respond` | Answers Codex. See below. |
 | `delete` | Stops a turn going on, and has Codex delete the thread for good |
 
-`page`, `pageKey`, `pageText`, `pageClose`, `statusLine`, `image` and `taskOutput` have nothing for a Codex session: there's no terminal, and no status line.
+`statusLine` gives a `status` in the shape Claude Code's has, from what Codex's server says itself, since Codex has no status line: `model`, `effort`, `project`, `branch`, `context` after the last reply (`percent`, `used`, `size`), and the account's `fiveHour` and `sevenDay` limits, each `percent` and `resetsAt`.
+
+`page`, `pageKey`, `pageText`, `pageClose`, `image` and `taskOutput` have nothing for a Codex session: there's no terminal.
 
 **Events.** `session.started` has `source: "startup"` for a new thread and `"resume"` for a stored one that's loaded. `message.user` has the send's `clientId`, and none for a message typed in Codex's own terminal. `message.assistant.delta` has Codex's `phase` beside the rest, `commentary` for what it says between steps and `final_answer` for its reply, and ends with one that has `final: true` and no text. `message.thinking` is a reasoning item's summary. A turn ends with `turn.end`, `turn.interrupted`, or `turn.error`, whose `error` is Codex's message and `details` its own code for it, such as `usageLimitExceeded`.
 
@@ -287,7 +289,7 @@ Everything else Codex does is a `tool.start` and a `tool.end`, named after the k
 | `permission`, `toolName` `permissions` | Codex asking for more room than its sandbox gives. `input.permissions` is what it wants. | `allow` grants it for the turn, and with `option: "session"` for the session. `deny` grants nothing, and the turn goes on. |
 | `question` | Codex's questions, in the shape Claude Code's have: `input.questions`, each with `question`, `header`, `options` and `multiSelect: false`, and Codex's own `id`, `isOther` and `isSecret` | `allow` with `answers` by each question's text, as for Claude Code |
 
-**What it doesn't do yet.** Slash commands, lines run with `!`, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), a list of commands left running, and a status line.
+**What it doesn't do yet.** Slash commands, lines run with `!`, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
 
 ### Notifications
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
   Codex, approvalRequest, historyOf, inputOf, isListed, isTool, isTrustedByCodex, libraryItem, modelsOf, permissionsRequest, questionRequest, textOf, thinkingOf,
-  trustedFolders,
+  statusLineOf, trustedFolders,
 } from '../../src/codex.mjs';
 
 const FOLDER = os.homedir();
@@ -23,6 +23,7 @@ function fakeCodex() {
   const server = {
     threads: new Map(), loaded: new Set(), turns: new Map(), calls: [], answers: [], links: [], fails: {},
     isRunning: true, starts: 0, next: 1,
+    limits: { primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1_800_000_000 }, secondary: { usedPercent: 31, windowDurationMins: 10080, resetsAt: 1_800_500_000 } },
     models: [
       { id: 'gpt-6', model: 'gpt-6', displayName: 'GPT-6', description: 'The big one', hidden: false, isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }] },
       { id: 'gpt-5', model: 'gpt-5', displayName: 'GPT-5', description: 'The old one', hidden: false, isDefault: false, supportedReasoningEfforts: [{ reasoningEffort: 'low' }] },
@@ -66,6 +67,7 @@ function fakeCodex() {
     'turn/steer': () => ({}),
     'turn/interrupt': () => ({}),
     'model/list': () => ({ data: server.models }),
+    'account/rateLimits/read': () => ({ rateLimits: server.limits }),
   };
   server.connect = async () => {
     if (!server.isRunning) throw Object.assign(new Error('connect ENOENT'), { code: 'ENOENT' });
@@ -733,4 +735,30 @@ test('a daemon that\'s gone takes its sessions with it', async () => {
   assert.equal(store.get(sessionId).status, 'ended');
   assert.equal(last('session.ended').reason, 'disconnected');
   assert.equal(server.starts, 0);
+});
+
+test('a status is what Codex says of the session and the account, as Claude Code\'s status line would', () => {
+  const session = { model: 'gpt-6', effort: 'high', cwd: '/Users/me/app' };
+  const usage = { last: { totalTokens: 20_868, inputTokens: 20_822 }, total: { totalTokens: 90_000 }, modelContextWindow: 258_400 };
+  const limits = { primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_794_662_176 }, secondary: { usedPercent: 31, windowDurationMins: 10080, resetsAt: 1_795_230_430 } };
+  assert.deepEqual(statusLineOf({ session, usage, limits, branch: 'main', at: 1_794_659_546_700 }), {
+    model: 'gpt-6', effort: 'high', project: 'app', branch: 'main', context: { percent: 8.1, used: 20_868, size: 258_400 },
+    fiveHour: { percent: 100, resetsAt: 1_794_662_176 }, sevenDay: { percent: 31, resetsAt: 1_795_230_430 }, updatedAt: 1_794_659_546,
+  });
+  // Before a first reply there's no context to speak of, and a window of some other length isn't one of the two.
+  assert.deepEqual(statusLineOf({ session, limits: { primary: { usedPercent: 5, windowDurationMins: 60 }, secondary: null }, at: 1000 }), {
+    model: 'gpt-6', effort: 'high', project: 'app', branch: undefined, updatedAt: 1,
+  });
+});
+
+test('a session\'s status has its context after a reply, and the limits asked for once in a while', async () => {
+  const { codex, say, sessionId, server } = await running();
+  assert.deepEqual(await codex.status({ sessionId: 'nobody' }), { status: null });
+  const before = (await codex.status({ sessionId })).status;
+  assert.deepEqual([before.model, before.effort, before.context, before.fiveHour.percent, before.sevenDay.percent], ['gpt-6', 'high', undefined, 12, 31]);
+  say('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: 1000 }, total: { totalTokens: 1000 }, modelContextWindow: 10_000 } });
+  server.say('account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 13, windowDurationMins: 300 }, secondary: null } });
+  const after = (await codex.status({ sessionId })).status;
+  assert.deepEqual([after.context, after.fiveHour, after.sevenDay], [{ percent: 10, used: 1000, size: 10_000 }, { percent: 13 }, undefined]);
+  assert.equal(server.called('account/rateLimits/read').length, 1);
 });

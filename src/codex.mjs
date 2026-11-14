@@ -232,6 +232,28 @@ const REQUESTS = {
 
 const statusOf = status => (status?.type === 'active' ? (status.activeFlags?.length ? 'waiting' : 'running') : 'idle');
 
+// How long Codex's word on the account's limits is good for, between its own notices of them.
+const LIMITS_LIFETIME_MS = 60_000;
+const FIVE_HOURS_MINS = 5 * 60;
+const SEVEN_DAYS_MINS = 7 * 24 * 60;
+
+// What a status sheet shows of a Codex session, in the shape Claude Code's status line is kept in: what
+// it runs on, where, how full its context is after its last reply, and how much of the account's two
+// limits is used. Codex has no status line, and says all of this itself.
+export function statusLineOf({ session, usage, limits, branch, at = Date.now() }) {
+  const windowOf = minutes => [limits?.primary, limits?.secondary].find(found => found?.windowDurationMins === minutes);
+  const limit = found => found && { percent: found.usedPercent, ...(found.resetsAt && { resetsAt: found.resetsAt }) };
+  const used = usage?.last?.totalTokens;
+  const size = usage?.modelContextWindow;
+  const [fiveHour, sevenDay] = [limit(windowOf(FIVE_HOURS_MINS)), limit(windowOf(SEVEN_DAYS_MINS))];
+  return {
+    model: session.model, effort: session.effort, project: session.cwd ? path.basename(session.cwd) : undefined, branch: branch ?? undefined,
+    ...(used !== undefined && size ? { context: { percent: Math.round((used / size) * 1000) / 10, used, size } } : {}),
+    ...(fiveHour && { fiveHour }), ...(sevenDay && { sevenDay }),
+    updatedAt: Math.floor(at / 1000),
+  };
+}
+
 function blankThread() {
   return { isSubscribed: false, turnId: undefined, messages: new Map(), tools: new Map(), items: new Set(), sent: new Map(), requests: new Map() };
 }
@@ -251,6 +273,8 @@ export class Codex {
   #models;
   // What a reader chose a session to run on, until the turn that takes it.
   #chosen = new Map();
+  // The account's limits as Codex last gave them, and when.
+  #limits;
   #retry;
   #retryMs;
   #trusts;
@@ -375,6 +399,7 @@ export class Codex {
   #adopt(thread, extra = {}) {
     this.#owned.set(thread.id, true);
     if (!this.#threads.has(thread.id)) this.#threads.set(thread.id, blankThread());
+    this.#threads.get(thread.id).branch = thread.gitInfo?.branch ?? undefined;
     const known = this.#store.find(thread.id);
     this.#store.adopt(thread.id, {
       agent: AGENT, cwd: thread.cwd, model: thread.model ?? known?.model, effort: thread.reasoningEffort ?? known?.effort,
@@ -404,6 +429,11 @@ export class Codex {
   }
 
   #onNotification({ method, params = {} }) {
+    // The account's, and so every session's.
+    if (method === 'account/rateLimits/updated') {
+      this.#limits = { at: Date.now(), snapshot: params.rateLimits };
+      return;
+    }
     const threadId = params.threadId ?? params.thread?.id;
     if (method === 'thread/started') {
       if (isListed(params.thread)) {
@@ -439,6 +469,9 @@ export class Codex {
         break;
       case 'thread/settings/updated':
         this.#noteSettings(threadId, { model: params.threadSettings?.model, effort: params.threadSettings?.effort });
+        break;
+      case 'thread/tokenUsage/updated':
+        thread.usage = params.tokenUsage;
         break;
       case 'turn/started':
         thread.turnId = params.turn?.id;
@@ -734,6 +767,19 @@ export class Codex {
     const { data } = await link.request('model/list', {});
     this.#models = { at: Date.now(), list: modelsOf(data) };
     return this.#models.list;
+  }
+
+  // What a status sheet shows of a session the helper follows, and nothing for one it doesn't.
+  async status({ sessionId }) {
+    const session = this.#store.find(sessionId);
+    if (!session) return { status: null };
+    if (!this.#limits || Date.now() - this.#limits.at > LIMITS_LIFETIME_MS) {
+      const link = await this.#open({ start: false }).catch(() => undefined);
+      const read = await link?.request('account/rateLimits/read', {}).catch(() => undefined);
+      if (read?.rateLimits) this.#limits = { at: Date.now(), snapshot: read.rateLimits };
+    }
+    const thread = this.#threads.get(sessionId);
+    return { status: statusLineOf({ session, usage: thread?.usage, limits: this.#limits?.snapshot, branch: thread?.branch }) };
   }
 
   // Codex's server has no list of commands: those are its terminal's own.

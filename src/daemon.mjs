@@ -430,6 +430,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     screen: () => screenAccess(),
     // What the session's status line was last told, or null before Claude Code has run it.
     statusLine: async ({ sessionId }) => {
+      // Codex has no status line, and says what one would itself.
+      if (await isCodex(sessionId)) return codex.status({ sessionId });
       store.get(sessionId);
       return { status: (await readStatus(statusDir, sessionId)) ?? null };
     },

@@ -71,9 +71,13 @@ export function isTrustedByCodex(folder, { config = undefined, home = codexHome(
   }
 }
 
-// The items that are the conversation itself. Every other kind is something Codex did, which a
-// client shows as a tool call named after the kind.
-const TALK = new Set(['userMessage', 'agentMessage', 'reasoning', 'plan', 'hookPrompt', 'functionCallOutput', 'contextCompaction', 'enteredReviewMode', 'exitedReviewMode']);
+// The items that are the conversation itself, and the notes Codex keeps of a subagent's comings and
+// goings, which its own calls to that subagent already tell. Every other kind is something Codex did,
+// which a client shows as a tool call named after the kind.
+const TALK = new Set([
+  'userMessage', 'agentMessage', 'reasoning', 'plan', 'hookPrompt', 'functionCallOutput', 'contextCompaction', 'enteredReviewMode', 'exitedReviewMode',
+  'subAgentActivity',
+]);
 export const isTool = item => !TALK.has(item.type);
 const isFailed = item => item.status === 'failed' || item.status === 'declined';
 

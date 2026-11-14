@@ -139,7 +139,7 @@ test('a thread a person started is listed, and one Codex made for itself is not'
 
 test('everything Codex does is a tool, and what it says is not', () => {
   for (const type of ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'imageView', 'collabAgentToolCall']) assert.equal(isTool({ type }), true);
-  for (const type of ['userMessage', 'agentMessage', 'reasoning', 'plan', 'contextCompaction']) assert.equal(isTool({ type }), false);
+  for (const type of ['userMessage', 'agentMessage', 'reasoning', 'plan', 'contextCompaction', 'subAgentActivity']) assert.equal(isTool({ type }), false);
 });
 
 test('a picture goes as an image, and any other file by its path ahead of the text', () => {

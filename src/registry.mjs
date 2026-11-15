@@ -4,9 +4,11 @@
 
 import fs from 'node:fs';
 
+// `agent` and `permissionModes` are a session's that isn't Claude Code's and still runs in a terminal, as
+// Antigravity's does: whose it is, and the modes it has.
 const FIELDS = [
   'id', 'cwd', 'startFolder', 'folders', 'pane', 'tmuxSocket', 'rexSession', 'rexServer', 'transcriptPath', 'permissionMode', 'modes', 'modeBeforePlan', 'model',
-  'effort', 'startedAt', 'lastEventAt',
+  'effort', 'startedAt', 'lastEventAt', 'agent', 'permissionModes',
 ];
 
 export function readRegistry(file) {

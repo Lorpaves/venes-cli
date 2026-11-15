@@ -188,5 +188,6 @@ export function resumeTerminal(env = process.env) {
     startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, pressKey,
     paste: (session, text) => backendOf(session).paste(session, text),
     foreground: session => backendOf(session).foreground(session),
+    findSession: backend.findSession,
   };
 }

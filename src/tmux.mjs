@@ -27,6 +27,17 @@ export const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-p
 export const readStyledScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-e', '-t', pane]);
 export const pressKey = ({ pane, tmuxSocket }, key) => tmux(tmuxSocket, ['send-keys', '-t', pane, key]);
 
+// The pane of a session started with `startSession`, by the name it was given, or nothing when it has gone.
+export async function findSession(name, env) {
+  const tmuxSocket = env.VENES_TMUX_SOCKET;
+  try {
+    const pane = (await tmux(tmuxSocket, ['list-panes', '-t', `=${name}`, '-F', '#{pane_id}'])).split('\n')[0].trim();
+    return pane ? { pane, tmuxSocket } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // The program a pane is running now, by its name.
 export const foreground = async ({ pane, tmuxSocket }) => (await tmux(tmuxSocket, ['display-message', '-p', '-t', pane, '#{pane_current_command}'])).trim();
 

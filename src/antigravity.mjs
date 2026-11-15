@@ -93,6 +93,15 @@ const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 export const dataFolder = (home = os.homedir()) => path.join(home, '.gemini', 'antigravity-cli');
 export const transcriptOf = (data, id) => path.join(data, 'brain', id, '.system_generated', 'logs', 'transcript_full.jsonl');
 
+// Whether a terminal is running Antigravity now, as one a session was in is asked after the helper starts again.
+export async function runsIn(terminal, where) {
+  try {
+    return PROGRAMS.has(await terminal.foreground(where));
+  } catch {
+    return false; // the terminal has gone
+  }
+}
+
 // Whether Antigravity's command line is on this Mac.
 export function isInstalled(env = process.env) {
   return (env.PATH ?? '').split(path.delimiter).some(folder => folder && fs.existsSync(path.join(folder, COMMAND)));
@@ -846,6 +855,11 @@ export class Antigravity {
     if (!this.#terminal) throw new HelperError('no_tmux', 'Install tmux or Rex on your Mac to run this session.');
     const name = `${TERMINAL_PREFIX}${sessionId.slice(0, TERMINAL_ID_LENGTH)}`;
     const variables = Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
+    // The terminal the helper opened on it before may still be there with Antigravity in it, as after the
+    // helper has started again and before the session's next hook. A second one on the same conversation
+    // would be two of Antigravity writing to it, so that one is gone back to.
+    const open = await this.#terminal.findSession?.(name, variables);
+    if (open && this.#terminal.foreground && await runsIn(this.#terminal, open)) return open;
     const target = await this.#terminal.startSession({ name, cwd, command: [COMMAND, '--conversation', sessionId], env: variables });
     const { startLimit, startCheck, keySettle } = this.#timing;
     let isAnswered = false;

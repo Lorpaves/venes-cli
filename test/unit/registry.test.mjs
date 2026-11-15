@@ -27,6 +27,16 @@ test('a session in Rex comes back with its block', t => {
   assert.deepEqual(readRegistry(file), [record]);
 });
 
+test('a session that isn\'t Claude Code\'s and runs in a terminal comes back as whose it is, with its modes', t => {
+  const file = tempDir(t);
+  const record = { id: 'g', cwd: '/w', pane: 'block:2', rexSession: 'session:1', agent: 'antigravity', permissionModes: ['default', 'acceptEdits', 'auto', 'plan'], permissionMode: 'auto' };
+  writeRegistry(file, [record]);
+  assert.deepEqual(readRegistry(file), [record]);
+  // One of Claude Code's says nothing of either.
+  writeRegistry(file, [{ id: 'a', pane: '%1' }]);
+  assert.deepEqual(Object.keys(readRegistry(file)[0]), ['id', 'pane']);
+});
+
 test('nothing said in a session reaches the disk', t => {
   const file = tempDir(t);
   writeRegistry(file, [{ id: 'a', pane: '%1', lastPrompt: 'my secret plan', lastMessage: 'a reply', tools: new Map(), held: [{ text: 'held' }] }]);

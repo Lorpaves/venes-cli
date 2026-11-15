@@ -177,6 +177,20 @@ export async function isSessionOpen(_, target) {
   }
 }
 
+// The block of a window started with `startSession`, by the label it was given, or nothing when it has
+// gone. Only the helper's own session is looked in, and none is made to look in.
+export async function findSession(name) {
+  const rexSession = keptSession();
+  if (!rexSession) return undefined;
+  try {
+    const { blocks } = JSON.parse(await rex({}, ['--autostart=false', 'block', 'ls', '-s', rexSession, '--json']));
+    const found = blocks.find(block => block.label === name);
+    return found ? { pane: found.block_id, rexSession } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // The program a block is running now, by its name.
 export const foreground = async session => (await callBlock(session, 'process', {})).foreground?.name;
 

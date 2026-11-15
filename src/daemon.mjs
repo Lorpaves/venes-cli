@@ -9,7 +9,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { installHooks } from './agyhooks.mjs';
-import { AGENT as ANTIGRAVITY, Antigravity } from './antigravity.mjs';
+import { AGENT as ANTIGRAVITY, Antigravity, runsIn as runsAntigravity } from './antigravity.mjs';
 import { Codex } from './codex.mjs';
 import { checkedToolUse, readArtifact } from './artifact.mjs';
 import { lineOf, onLines } from './lines.mjs';
@@ -781,14 +781,18 @@ function lastWords(file) {
   }
 }
 
-// A pane that has gone, or no longer runs Claude, has nothing to come back to.
-async function restoreSessions(store, paths) {
+// A pane that has gone, or no longer runs Claude, has nothing to come back to. An Antigravity session's
+// is asked whether it still runs Antigravity, and its last words are its own to read.
+export async function restoreSessions(store, paths, terminal = resumeTerminal()) {
   const records = readRegistry(paths.sessionsFile);
   const panes = await findClaudePanes(new Set(records.map(record => record.tmuxSocket ?? undefined)));
   const running = new Set(panes.map(pane => `${pane.tmuxSocket}|${pane.pane}`));
-  const isAlive = record => (record.rexSession ? rexRunsClaude(record) : running.has(`${record.tmuxSocket ?? null}|${record.pane}`));
+  const isAlive = record => {
+    if (record.agent === ANTIGRAVITY) return runsAntigravity(terminal, record);
+    return record.rexSession ? rexRunsClaude(record) : running.has(`${record.tmuxSocket ?? null}|${record.pane}`);
+  };
   const alive = await Promise.all(records.map(isAlive));
-  store.restore(records.filter((_, index) => alive[index]).map(record => ({ ...record, ...lastWords(record.transcriptPath) })));
+  store.restore(records.filter((_, index) => alive[index]).map(record => (record.agent ? record : { ...record, ...lastWords(record.transcriptPath) })));
 }
 
 function startRegistrySaving(store, paths) {

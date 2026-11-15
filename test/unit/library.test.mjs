@@ -5,7 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dropParentSession } from '../../src/daemon.mjs';
+import { dropParentSession, restoreSessions } from '../../src/daemon.mjs';
+import { writeRegistry } from '../../src/registry.mjs';
+import { SessionStore } from '../../src/sessions.mjs';
 import { Library, joinedStatus, libraryPage, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
@@ -372,4 +374,25 @@ test('an SDK install going on ends with the helper, and writes nothing after', a
   await assert.rejects(preparing, { code: 'sdk_unavailable' });
   await new Promise(resolve => { setTimeout(resolve, 1500); });
   assert.deepEqual(fs.readdirSync(sdkDir), [], 'nothing written after');
+});
+
+test('after a restart an Antigravity session is kept while its terminal still runs Antigravity, and Claude Code\'s while theirs runs Claude', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-restore-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const sessionsFile = path.join(dir, 'sessions.json');
+  const modes = ['default', 'acceptEdits', 'auto', 'plan'];
+  writeRegistry(sessionsFile, [
+    { id: 'agy-up', cwd: '/w', pane: 'block:1', rexSession: 'session:1', agent: 'antigravity', permissionModes: modes, permissionMode: 'auto', model: 'gemini-4-hydrogen', effort: 'xhigh', transcriptPath: '/nowhere/t.jsonl' },
+    { id: 'agy-quit', cwd: '/w', pane: 'block:2', rexSession: 'session:1', agent: 'antigravity', permissionModes: modes },
+    { id: 'agy-gone', cwd: '/w', pane: '%7', tmuxSocket: path.join(dir, 'no-tmux.sock'), agent: 'antigravity', permissionModes: modes },
+    { id: 'claude-gone', cwd: '/w', pane: '%8', tmuxSocket: path.join(dir, 'no-tmux.sock') },
+  ]);
+  const asked = [];
+  const terminal = { foreground: async where => { asked.push(where.pane); if (where.pane === '%7') throw new Error('no such pane'); return where.pane === 'block:1' ? 'antigravity' : 'zsh'; } };
+  const store = new SessionStore();
+  await restoreSessions(store, { sessionsFile }, terminal);
+  assert.deepEqual(store.sessions().map(view => [view.id, view.agent, view.permissionMode, view.permissionModes, view.model, view.pane]),
+    [['agy-up', 'antigravity', 'auto', modes, 'gemini-4-hydrogen', 'block:1']]);
+  // Only Antigravity's are asked this way.
+  assert.deepEqual(asked.sort(), ['%7', 'block:1', 'block:2']);
 });

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  AGENT, Antigravity, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, stepsIn, toolOf, transcriptOf, typedText,
+  AGENT, Antigravity, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, runsIn, stepsIn, toolOf, transcriptOf, typedText,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -457,6 +457,26 @@ test('a stored conversation is read from its transcript, and opened in a termina
   assert.equal(store.get(ID).pane, '%9');
   await assert.rejects(agent.send({ sessionId: 'f0000000-0000-4000-8000-000000000002', text: 'x' }), { code: 'unknown_session' });
   await assert.rejects(agent.remove(), { code: 'cant_delete' });
+});
+
+test('a conversation whose terminal is still open with Antigravity in it is gone back to, and no second one opened', async t => {
+  const rows = [{ conversation_id: ID, title: 'Read Note', last_modified_time: '2026-11-15 10:39:39+00:00', workspace_uris: `["file://${os.tmpdir()}"]`, step_count: 4 }];
+  // As after the helper has started again: it knows nothing of the session, and its terminal is where it was.
+  const { agent, store, events, terminal } = setup(t, { rows, trusted: [fs.realpathSync(os.tmpdir())] });
+  const looked = [];
+  terminal.findSession = async (name, env) => { looked.push([name, env]); return { pane: 'block:7', rexSession: 'session:1' }; };
+  terminal.running = 'antigravity';
+  assert.deepEqual(await agent.send({ sessionId: ID, text: 'carry on', clientId: 'c1' }), { queued: false });
+  assert.deepEqual([looked, terminal.started, terminal.pasted], [[['venes-agy-9a2b37ed', { PATH: '/bin', VENES_HOME: '/h' }]], [], ['carry on']]);
+  assert.deepEqual([store.get(ID).pane, store.get(ID).rexSession, events.find(event => event.kind === 'session.started').source], ['block:7', 'session:1', 'resume']);
+
+  // One that's there with something else in it, as its shell is once Antigravity has quit, isn't.
+  const quit = setup(t, { rows, trusted: [fs.realpathSync(os.tmpdir())] });
+  quit.terminal.findSession = async () => ({ pane: 'block:7', rexSession: 'session:1' });
+  await quit.agent.send({ sessionId: ID, text: 'carry on' });
+  assert.equal(quit.terminal.started.length, 1);
+  assert.deepEqual([await runsIn({ foreground: async () => 'antigravity' }, {}), await runsIn({ foreground: async () => 'agy' }, {}), await runsIn({ foreground: async () => 'zsh' }, {}),
+    await runsIn({ foreground: async () => { throw new Error('gone'); } }, {})], [true, true, false, false]);
 });
 
 test('its mode is changed with Shift+Tab, and what it runs on with its own commands', async t => {

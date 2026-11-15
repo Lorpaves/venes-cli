@@ -38,6 +38,18 @@ export async function findSession(name, env) {
   }
 }
 
+// The process of the program a pane is running now: the one of that name at the pane's own process or
+// under it, as a program started from a shell there is.
+export async function processOf({ pane, tmuxSocket }) {
+  const [name, root] = (await tmux(tmuxSocket, ['display-message', '-p', '-t', pane, '#{pane_current_command}\t#{pane_pid}'])).trim().split('\t');
+  const { stdout } = await exec('ps', ['-axww', '-o', 'pid=,ppid=,comm='], { timeout: COMMAND_TIMEOUT_MS });
+  const rows = stdout.split('\n').map(line => line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean).map(([, pid, ppid, command]) => ({ pid, ppid, command }));
+  const under = [root];
+  for (let at = 0; at < under.length; at++) under.push(...rows.filter(row => row.ppid === under[at]).map(row => row.pid));
+  const found = rows.find(row => under.includes(row.pid) && path.basename(row.command) === name);
+  return { name, pid: found ? Number(found.pid) : undefined };
+}
+
 // The program a pane is running now, by its name.
 export const foreground = async ({ pane, tmuxSocket }) => (await tmux(tmuxSocket, ['display-message', '-p', '-t', pane, '#{pane_current_command}'])).trim();
 

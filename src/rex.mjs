@@ -191,6 +191,12 @@ export async function findSession(name) {
   }
 }
 
+// The process of the program a block is running now.
+export async function processOf(session) {
+  const { foreground } = await callBlock(session, 'process', {});
+  return { name: foreground?.name, pid: foreground?.pid };
+}
+
 // The program a block is running now, by its name.
 export const foreground = async session => (await callBlock(session, 'process', {})).foreground?.name;
 

@@ -189,5 +189,6 @@ export function resumeTerminal(env = process.env) {
     paste: (session, text) => backendOf(session).paste(session, text),
     foreground: session => backendOf(session).foreground(session),
     findSession: backend.findSession,
+    processOf: session => backendOf(session).processOf(session),
   };
 }

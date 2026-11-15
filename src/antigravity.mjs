@@ -25,6 +25,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import { MODE_IDS, asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, showsDialog } from './agyscreen.mjs';
+import { moveToTrash } from './files.mjs';
 import { checkedFolder } from './folders.mjs';
 import { HelperError } from './errors.mjs';
 import { choicesOf, chooseRow } from './prompt.mjs';
@@ -75,6 +76,13 @@ const MODELS_LIFETIME_MS = 10 * 60_000;
 const MODELS_LIMIT_MS = 20_000;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_SUFFIX = new RegExp(`-(${EFFORTS.join('|')})$`);
+// How long Antigravity is given to go once it's told to, before a conversation of its is deleted. It
+// had gone within a second when measured.
+const QUIT_LIMIT_MS = 5000;
+const QUIT_CHECK_MS = 100;
+// How long another writer of Antigravity's summary of its conversations is waited for.
+const ROWS_WAIT_MS = 3000;
+
 // How long a session just opened waits for the models Antigravity lists, to name the one its bar shows.
 const MODELS_WAIT_MS = 5000;
 // How long what Antigravity says of the account's limits is kept, how soon it's asked again after it
@@ -318,6 +326,41 @@ async function storedRows(data) {
   }
 }
 
+// What Antigravity keeps of a conversation in files, as its own picker's Delete takes them away (F4 in
+// `/resume`, 1.5.8): the conversation itself, with what a database leaves beside it, the folder of its
+// transcript and what it made, and its notes.
+export function conversationFiles(data, id) {
+  const conversation = path.join(data, 'conversations', `${id}.db`);
+  return [conversation, `${conversation}-journal`, `${conversation}-wal`, `${conversation}-shm`, path.join(data, 'brain', id), path.join(data, 'annotations', `${id}.pbtxt`)];
+}
+
+// Takes a conversation out of Antigravity's summary of them all and out of what it searches, as its own
+// Delete does. Its id is only letters, digits and hyphens, which `SESSION_ID` saw to.
+async function dropRows(data, id) {
+  const file = path.join(data, 'conversation_summaries.db');
+  if (!fs.existsSync(file)) return;
+  const sql = ['conversation_summaries', 'conversations_fts', 'conversation_parents'].map(table => `delete from ${table} where conversation_id = '${id}';`).join(' ');
+  await exec(SQLITE, ['-cmd', `.timeout ${ROWS_WAIT_MS}`, file, sql], { timeout: 10_000 });
+}
+
+// What's deleted of a conversation goes to the Trash in one folder named for it, so that it can be put
+// back. On a Mac with no way to the Trash from here it's deleted for good, as Antigravity's own Delete does.
+async function trashFiles(files, id, trash = moveToTrash) {
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-antigravity-'));
+  try {
+    const folder = path.join(staging, `Antigravity session ${id.slice(0, TERMINAL_ID_LENGTH)}`);
+    fs.mkdirSync(folder);
+    for (const file of files) fs.renameSync(file, path.join(folder, path.basename(file)));
+    try {
+      await trash(folder);
+    } catch (error) {
+      if (error.code !== 'no_trash') throw error;
+    }
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
+}
+
 // A new, empty conversation in a folder, made through Antigravity's protocol server, which is let go
 // once it has said the conversation's id.
 async function mintWith(folder) {
@@ -371,6 +414,9 @@ export class Antigravity {
   #rows;
   #models;
   #readUsage;
+  #trash;
+  #forget;
+  #kill;
   #usage = { at: 0, limits: [], reading: undefined };
   #data;
   #env;
@@ -394,6 +440,11 @@ export class Antigravity {
     rows = () => storedRows(data),
     models = listedModels,
     usage = usageReport,
+    // What a deleted conversation's files are moved to the Trash with, what takes it out of Antigravity's
+    // own lists, and what tells Antigravity to go.
+    trash = moveToTrash,
+    forget = id => dropRows(data, id),
+    kill = pid => process.kill(pid, 'SIGTERM'),
     env = process.env,
     timing = {},
   }) {
@@ -404,12 +455,15 @@ export class Antigravity {
     this.#rows = rows;
     this.#models = models;
     this.#readUsage = usage;
+    this.#trash = trash;
+    this.#forget = forget;
+    this.#kill = kill;
     this.#data = data;
     this.#env = env;
     this.#timing = {
       watch: WATCH_MS, rest: REST_CHECK_MS, startLimit: START_LIMIT_MS, startCheck: START_CHECK_MS, keySettle: KEY_SETTLE_MS,
       pasteSettle: PASTE_SETTLE_MS, stepWait: STEP_WAIT_MS, stepCheck: STEP_CHECK_MS, keyLimit: KEY_LIMIT_MS, keyCheck: KEY_CHECK_MS,
-      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, ...timing,
+      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, quitLimit: QUIT_LIMIT_MS, quitCheck: QUIT_CHECK_MS, ...timing,
     };
     this.#timer = setInterval(() => this.#lookAtAll(), this.#timing.watch);
     this.#timer.unref();
@@ -498,7 +552,8 @@ export class Antigravity {
     if (typeof sessionId !== 'string') return false;
     const known = this.#store.find(sessionId);
     if (known) return known.agent === AGENT;
-    if (this.#listed.has(sessionId) || this.#sessions.has(sessionId)) return true;
+    if (this.#sessions.has(sessionId)) return true;
+    // Not by what Antigravity's summary lists: a deleted conversation can still have a row there.
     return SESSION_ID.test(sessionId) && fs.existsSync(path.join(this.#data, 'conversations', `${sessionId}.db`));
   }
 
@@ -508,7 +563,9 @@ export class Antigravity {
     if (!this.#installed()) return [];
     const rows = await this.#rows();
     this.#listed = new Map(rows.map(row => [row.conversation_id, row]));
-    return rows.filter(row => row.step_count > 0 || this.#isLive(row.conversation_id)).map(row => {
+    // A conversation whose file has gone was deleted, whatever Antigravity's summary still says of it.
+    const isThere = row => fs.existsSync(path.join(this.#data, 'conversations', `${row.conversation_id}.db`));
+    return rows.filter(row => this.#isLive(row.conversation_id) || (row.step_count > 0 && isThere(row))).map(row => {
       const session = this.#store.find(row.conversation_id);
       return libraryItem(row, session && session.status !== 'ended' ? session.status : null);
     }).sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0));
@@ -1141,9 +1198,46 @@ export class Antigravity {
     };
   }
 
-  // Antigravity keeps its conversations itself, and has no way to be asked to drop one.
-  async remove() {
-    throw new HelperError('cant_delete', 'Antigravity keeps its own sessions, and this one can only be deleted there.');
+  // Tells the Antigravity that has a conversation open in a terminal the helper can reach to go: the
+  // session's own terminal, or the one the helper opened on it before. Left running, it would write
+  // the conversation back.
+  async #quit(sessionId, known) {
+    if (!this.#terminal?.processOf) return;
+    const name = `${TERMINAL_PREFIX}${sessionId.slice(0, TERMINAL_ID_LENGTH)}`;
+    const variables = Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
+    const where = known?.pane ? known : await this.#terminal.findSession?.(name, variables);
+    if (!where) return;
+    const running = await this.#terminal.processOf(where).catch(() => undefined);
+    if (!running || !PROGRAMS.has(running.name)) return;
+    if (running.pid) {
+      try {
+        this.#kill(running.pid);
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error; // it has just gone by itself
+      }
+    }
+    for (const end = Date.now() + this.#timing.quitLimit; ; await pause(this.#timing.quitCheck)) {
+      if (!(await runsIn(this.#terminal, where))) return;
+      if (Date.now() >= end) throw new HelperError('session_running', 'This session wouldn\'t stop, so it hasn\'t been deleted.');
+    }
+  }
+
+  // Deletes a conversation from this Mac, as Antigravity's own picker does: its files, and its place in
+  // Antigravity's lists. One that's open in a terminal is quit first. The files go to the Trash.
+  async remove({ sessionId }) {
+    if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new HelperError('unknown_session', `No session ${sessionId}`);
+    const known = this.#typable(sessionId);
+    const files = () => conversationFiles(this.#data, sessionId).filter(file => fs.existsSync(file));
+    if (!known && !files().length && !this.#store.find(sessionId)) throw new HelperError('unknown_session', `No session ${sessionId}`);
+    await this.#quit(sessionId, known);
+    const left = files();
+    if (left.length) await trashFiles(left, sessionId, this.#trash);
+    // Its file is what says a conversation is there, so a row that stays behind lists nothing.
+    await this.#forget(sessionId).catch(error => { console.error(`antigravity: ${sessionId} is still in Antigravity's own lists: ${error.message}`); });
+    this.#sessions.delete(sessionId);
+    this.#listed.delete(sessionId);
+    this.#store.forget(sessionId);
+    return {};
   }
 
   image() {

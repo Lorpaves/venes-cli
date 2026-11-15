@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  AGENT, Antigravity, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, runsIn, stepsIn, toolOf, transcriptOf, typedText,
+  AGENT, Antigravity, conversationFiles, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, runsIn, stepsIn, toolOf,
+  transcriptOf, typedText,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -149,15 +150,23 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     paste: async (_, text) => { terminal.pasted.push(text); },
     running: 'zsh',
     foreground: async () => { if (terminal.isGone) throw new Error('no such pane'); return terminal.running; },
+    processOf: async () => { if (terminal.isGone) throw new Error('no such pane'); return { name: terminal.running, pid: 4242 }; },
   };
   const minted = [];
+  // What was moved to the Trash, as the folder's name and what was in it, taken out of Antigravity's lists, and told to go.
+  const trashed = [];
+  const forgotten = [];
+  const killed = [];
   const agent = new Antigravity({
     store, terminal, data, installed: () => true, rows: async () => rows,
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
     usage,
+    trash: async folder => { trashed.push([path.basename(folder), fs.readdirSync(folder).sort()]); },
+    forget: async id => { forgotten.push(id); },
+    kill: pid => { killed.push(pid); terminal.onKill?.(pid); },
     env: { PATH: '/bin', VENES_HOME: '/h', SECRET: 'x' },
-    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, modelsWait: 200, usageWait: 200, ...timing },
+    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, modelsWait: 200, usageWait: 200, quitLimit: 150, quitCheck: 5, ...timing },
   });
   t.after(() => agent.stop());
   const file = transcriptOf(data, ID);
@@ -174,7 +183,15 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     }
     assert.fail(`never: ${what}`);
   };
-  return { agent, store, events, terminal, minted, data, file, write, hook, kinds, until };
+  // A conversation as Antigravity keeps one: its file, its folder with the transcript, and its notes.
+  const stored = (id = ID) => {
+    for (const kept of conversationFiles(data, id).filter(kept => /\.(db|pbtxt)$/.test(kept))) {
+      fs.mkdirSync(path.dirname(kept), { recursive: true });
+      fs.writeFileSync(kept, '');
+    }
+    fs.mkdirSync(path.join(data, 'brain', id), { recursive: true });
+  };
+  return { agent, store, events, terminal, minted, data, file, write, hook, kinds, until, trashed, forgotten, killed, stored };
 }
 
 test('a session at the Mac is followed from its hooks, and a turn told in a Claude Code turn\'s shapes', async t => {
@@ -439,12 +456,12 @@ test('a stored conversation is read from its transcript, and opened in a termina
     { conversation_id: ID, title: 'Read Note', last_modified_time: '2026-11-15 10:39:39+00:00', workspace_uris: `["file://${os.tmpdir()}"]`, step_count: 4 },
     { conversation_id: 'd652c9b5-ac30-4e25-9b39-222bbd73eaf3', title: '', last_modified_time: '2026-11-15 11:00:00+00:00', workspace_uris: '[]', step_count: 0 },
   ];
-  const { agent, store, terminal, write, data } = setup(t, { rows });
+  const { agent, store, terminal, write, data, stored } = setup(t, { rows });
+  stored();
   write([user(0, 'read the note'), reply(1, { content: 'HERON' })]);
   // One with nothing said in it isn't listed.
   assert.deepEqual((await agent.library()).map(item => [item.id, item.title, item.cwd, item.status]), [[ID, 'Read Note', os.tmpdir(), null]]);
   assert.equal(await agent.folderOf(ID), os.tmpdir());
-  fs.mkdirSync(path.join(data, 'conversations'));
   fs.writeFileSync(path.join(data, 'conversations', 'e0000000-0000-4000-8000-000000000001.db'), '');
   assert.deepEqual([await agent.owns('e0000000-0000-4000-8000-000000000001'), await agent.owns('f0000000-0000-4000-8000-000000000002'), await agent.owns(undefined)], [true, false, false]);
   const joined = await agent.join({ sessionId: ID });
@@ -456,7 +473,69 @@ test('a stored conversation is read from its transcript, and opened in a termina
   assert.deepEqual([terminal.started[0].command, terminal.started[0].cwd, terminal.pasted, terminal.keys], [['agy', '--conversation', ID], os.tmpdir(), ['again'], ['Enter']]);
   assert.equal(store.get(ID).pane, '%9');
   await assert.rejects(agent.send({ sessionId: 'f0000000-0000-4000-8000-000000000002', text: 'x' }), { code: 'unknown_session' });
-  await assert.rejects(agent.remove(), { code: 'cant_delete' });
+});
+
+test('a stored conversation is deleted as Antigravity deletes one: its files to the Trash, and out of Antigravity\'s lists', async t => {
+  const rows = [{ conversation_id: ID, title: 'Read Note', last_modified_time: '2026-11-15 10:39:39+00:00', workspace_uris: `["file://${os.tmpdir()}"]`, step_count: 4 }];
+  const { agent, events, terminal, data, stored, write, trashed, forgotten, killed } = setup(t, { rows });
+  stored();
+  write([user(0, 'read the note'), reply(1, { content: 'HERON' })]);
+  fs.writeFileSync(path.join(data, 'conversations', `${ID}.db-wal`), '');
+  assert.equal((await agent.library()).length, 1);
+  assert.deepEqual(await agent.remove({ sessionId: ID }), {});
+  assert.deepEqual(trashed, [['Antigravity session 9a2b37ed', [ID, `${ID}.db`, `${ID}.db-wal`, `${ID}.pbtxt`]]]);
+  assert.deepEqual([forgotten, killed, terminal.keys], [[ID], [], []]);
+  assert.deepEqual(conversationFiles(data, ID).filter(file => fs.existsSync(file)), [], 'nothing of it is left where Antigravity keeps it');
+  assert.equal(events.at(-1).kind, 'session.deleted');
+  // Antigravity's summary can still have its row, and it's listed no more.
+  assert.deepEqual([await agent.library(), await agent.owns(ID)], [[], false]);
+  await assert.rejects(agent.remove({ sessionId: ID }), { code: 'unknown_session' });
+  await assert.rejects(agent.remove({ sessionId: '../../etc' }), { code: 'unknown_session' });
+  await assert.rejects(agent.remove({}), { code: 'unknown_session' });
+});
+
+test('a session open in a terminal is told to go before it\'s deleted, and one that won\'t go isn\'t', async t => {
+  const { agent, store, events, terminal, data, stored, hook, trashed, killed } = setup(t, { timing: { watch: 100_000 } });
+  stored();
+  await hook('SessionStart');
+  terminal.running = 'antigravity';
+  // It doesn't stop: nothing of it is touched.
+  await assert.rejects(agent.remove({ sessionId: ID }), { code: 'session_running' });
+  assert.deepEqual([killed, trashed, fs.existsSync(path.join(data, 'conversations', `${ID}.db`)), store.get(ID).status], [[4242], [], true, 'idle']);
+  // It goes when it's told to.
+  terminal.onKill = () => { terminal.running = 'zsh'; };
+  await agent.remove({ sessionId: ID });
+  assert.deepEqual([killed, trashed.length, store.find(ID)], [[4242, 4242], 1, undefined]);
+  assert.deepEqual(events.slice(-2).map(event => [event.kind, event.reason]), [['session.ended', 'deleted'], ['session.deleted', undefined]]);
+
+  // One the helper doesn't follow, whose terminal it opened before, is found by its name and told to go too.
+  const before = setup(t);
+  before.stored();
+  before.terminal.findSession = async name => (name === 'venes-agy-9a2b37ed' ? { pane: 'block:7', rexSession: 'session:1' } : undefined);
+  before.terminal.running = 'antigravity';
+  before.terminal.onKill = () => { before.terminal.running = 'zsh'; };
+  await before.agent.remove({ sessionId: ID });
+  assert.deepEqual([before.killed, before.trashed.length], [[4242], 1]);
+});
+
+test('with no way to the Trash from here a conversation is deleted for good, and a list that keeps its row stops nothing', async t => {
+  const none = Object.assign(new Error('needs macOS 15'), { code: 'no_trash' });
+  const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
+  t.after(() => fs.rmSync(data, { recursive: true, force: true }));
+  const store = new SessionStore();
+  const agent = new Antigravity({
+    store, data, installed: () => true, trash: async () => { throw none; }, forget: async () => { throw new Error('database is locked'); }, timing: { watch: 100_000 },
+  });
+  t.after(() => agent.stop());
+  fs.mkdirSync(path.join(data, 'conversations'));
+  fs.writeFileSync(path.join(data, 'conversations', `${ID}.db`), '');
+  await agent.remove({ sessionId: ID });
+  assert.equal(fs.existsSync(path.join(data, 'conversations', `${ID}.db`)), false);
+  // Any other failure to move it leaves it where it was.
+  fs.writeFileSync(path.join(data, 'conversations', `${ID}.db`), '');
+  const failing = new Antigravity({ store, data, installed: () => true, trash: async () => { throw new Error('disk full'); }, forget: async () => {}, timing: { watch: 100_000 } });
+  t.after(() => failing.stop());
+  await assert.rejects(failing.remove({ sessionId: ID }), /disk full/);
 });
 
 test('a conversation whose terminal is still open with Antigravity in it is gone back to, and no second one opened', async t => {

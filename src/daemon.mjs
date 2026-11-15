@@ -8,9 +8,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
-import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
 import { checkedToolUse, readArtifact } from './artifact.mjs';
+import { lineOf, onLines } from './lines.mjs';
 import { createEntry, listAnywhere, listFolder, readChunk, readFile, trashEntry, writeFile } from './files.mjs';
 import {
   branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
@@ -174,7 +174,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const clients = new Set();
   const devices = new PushDevices(pushFile);
   const isConnected = deviceId => [...clients].some(socket => socket.pushDevice === deviceId);
-  const write = (socket, message) => socket.write(`${JSON.stringify(message)}\n`);
+  const write = (socket, message) => socket.write(lineOf(message));
 
   // A session that isn't Claude Code's, as a Codex one, is only told to a client that says it can show
   // one: with `agents` on any command, which holds for its connection. An app from before them would
@@ -713,9 +713,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       clients.delete(socket);
     });
     write(socket, { type: 'hello', protocol: PROTOCOL_VERSION, version: VERSION });
-    const lines = readline.createInterface({ input: socket });
-    lines.on('error', () => {}); // readline re-emits socket errors; a dropped client must not crash the helper
-    lines.on('line', async line => {
+    onLines(socket, async line => {
       let msg;
       try {
         msg = JSON.parse(line);

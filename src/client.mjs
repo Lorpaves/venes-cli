@@ -1,6 +1,6 @@
 import net from 'node:net';
-import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
+import { lineOf, onLines } from './lines.mjs';
 
 // Newline-delimited JSON client, over client.sock or any pair of streams. Emits
 // 'message' for everything that isn't the reply to a request.
@@ -20,9 +20,8 @@ export class HelperClient extends EventEmitter {
   static over(input, output) {
     const client = new HelperClient();
     client.#output = output;
-    const lines = readline.createInterface({ input });
-    lines.on('line', line => client.#receive(JSON.parse(line)));
-    lines.on('error', () => {}); // readline re-emits socket errors and would otherwise throw
+    onLines(input, line => client.#receive(JSON.parse(line)));
+    input.on('error', () => {}); // a dropped connection isn't thrown
     return client;
   }
 
@@ -41,7 +40,7 @@ export class HelperClient extends EventEmitter {
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       this.#waiting.set(id, { resolve, reject });
-      this.#output.write(`${JSON.stringify({ id, cmd, ...params })}\n`);
+      this.#output.write(lineOf({ id, cmd, ...params }));
     });
   }
 

@@ -17,6 +17,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import http from 'node:http';
+import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
@@ -2311,6 +2312,25 @@ T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissio
     assert.equal(fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8'), 'edited\n二\n');
     await r.client.request('fileWrite', { sessionId, path: 'e2e-new.txt', text: 'over\n', overwrite: true });
     assert.equal(fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8'), 'over\n');
+    // A line separator in a file's text is part of the text. Sent as it is, which is how the app's JSON has
+    // it, it ends no line of what the helper reads, and the file has it.
+    const parted = 'one\u2028two\u2029three\n';
+    const sent = `${JSON.stringify({ id: 1, cmd: 'fileWrite', sessionId, path: 'e2e-new.txt', text: parted, overwrite: true })}\n`;
+    assert.ok(sent.includes('\u2028'), 'the line has the separator itself in it');
+    const answer = await new Promise((resolve, reject) => {
+      const plain = net.connect(paths.clientSocket);
+      let heard = '';
+      plain.on('error', reject);
+      plain.on('data', piece => {
+        heard += piece;
+        const reply = heard.split('\n').filter(Boolean).map(line => JSON.parse(line)).find(message => message.type === 'result');
+        if (reply) { plain.destroy(); resolve(reply); }
+      });
+      plain.on('connect', () => plain.write(sent));
+    });
+    assert.deepEqual([answer.ok, answer.size, fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8')], [true, Buffer.byteLength(parted), parted]);
+    // And read back through a client, it comes whole.
+    assert.equal((await r.client.request('fileRead', { sessionId, path: 'e2e-new.txt' })).text, parted);
     // A picture isn't text to write, and nothing outside, or not there, is written.
     await assert.rejects(r.client.request('fileWrite', { sessionId, path: 'e2e-look.png', text: 'x', overwrite: true }), { code: 'not_text' });
     await assert.rejects(r.client.request('fileWrite', { sessionId, path: '../e2e-out.txt', text: 'x', overwrite: true }), { code: 'bad_path' });

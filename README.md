@@ -136,6 +136,8 @@ A client runs `~/.venes/venes attach` over SSH, or [through Rex](#connecting-thr
 
 The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok":true,…}` reply. On failure, `ok` is false and `error` holds `{code, message, details}`. Replies can arrive out of order, so match them by `id`.
 
+A line ends at a line feed and nowhere else. JSON leaves a line separator (U+2028) or a paragraph separator (U+2029) in a string as it is, and a reader that takes either for a line's end, as Node's `readline` does, loses any message with one in it, which a message's text or a file's can have. The helper reads a client's lines by the line feed alone (a helper before 0.19.1 didn't), and escapes those two in what it writes, so a client is safe to send them as they are or escaped, and to read with whatever splits lines.
+
 | Command | Fields | Reply or effect |
 |---|---|---|
 | `ping` | | `protocol`, `version`, `quiet` (whether the helper could restart now), and `tailscaleAccount` while Tailscale is on in Rex: the account Rex is signed in with, which a phone reaches this Mac as through Rex |

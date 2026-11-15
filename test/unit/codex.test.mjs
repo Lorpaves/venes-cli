@@ -4,8 +4,9 @@ import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  approvalRequest, Codex, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf, modeOf,
-  permissionsRequest, questionRequest, shellWords, statusLineOf, textOf, thinkingOf, trustedFolders, turnsOf, unwrapped,
+  approvalRequest, Codex, commandOf, COMMANDS, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
+  modeOf, permissionsRequest, questionRequest, shellWords, skillsNamed, skillsOf, statusLineOf, terminalCommand, textOf, thinkingOf, trustedFolders,
+  turnsOf, unwrapped,
 } from '../../src/codex.mjs';
 
 const FOLDER = os.homedir();
@@ -23,6 +24,11 @@ function fakeCodex() {
   const server = {
     threads: new Map(), loaded: new Set(), turns: new Map(), calls: [], answers: [], links: [], fails: {},
     isRunning: true, starts: 0, next: 1,
+    skills: [
+      { name: 'rex', description: 'Use the rex CLI to manage Rex sessions.\nMore about it.', path: '/skills/rex/SKILL.md', scope: 'user', enabled: true },
+      { name: 'pdf:pdf', description: 'Long words about PDFs', interface: { shortDescription: 'Read, create, render, and verify PDF files' }, path: '/skills/pdf/SKILL.md', scope: 'user', enabled: true },
+      { name: 'old', description: 'Turned off', path: '/skills/old/SKILL.md', scope: 'user', enabled: false },
+    ],
     limits: { primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1_800_000_000 }, secondary: { usedPercent: 31, windowDurationMins: 10080, resetsAt: 1_800_500_000 } },
     models: [
       { id: 'gpt-6', model: 'gpt-6', displayName: 'GPT-6', description: 'The big one', hidden: false, isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }] },
@@ -66,8 +72,15 @@ function fakeCodex() {
     'turn/start': () => ({ turn: { id: 'turn', status: 'inProgress', items: [] } }),
     'turn/steer': () => ({}),
     'thread/shellCommand': () => ({}),
+    'thread/compact/start': () => { if (server.fails.compact) throw rpcError('nothing to compact'); return {}; },
+    'review/start': ({ threadId }) => ({ reviewThreadId: threadId, turn: { id: 'review', status: 'inProgress', items: [] } }),
+    'thread/name/set': ({ threadId, name }) => { server.threads.get(threadId).name = name; return {}; },
     'turn/interrupt': () => ({}),
     'model/list': () => ({ data: server.models }),
+    'skills/list': ({ cwds = [] }) => {
+      if (server.fails.skills) throw rpcError('no skills here');
+      return { data: [{ cwd: cwds[0] ?? FOLDER, errors: [], skills: server.skills }] };
+    },
     'account/rateLimits/read': () => ({ rateLimits: server.limits }),
   };
   server.connect = async () => {
@@ -89,7 +102,7 @@ function fakeCodex() {
   return server;
 }
 
-function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true } = {}) {
+function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined } = {}) {
   const server = fakeCodex();
   server.isRunning = isRunning;
   for (const thread of threads) server.threads.set(thread.id, thread);
@@ -97,7 +110,10 @@ function setup({ threads = [], loaded = [], isRunning = true, trusts = () => tru
   const store = new SessionStore();
   const events = [];
   store.on('event', event => events.push(event));
-  const codex = new Codex({ store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, retryMs: 5, trusts, installed: () => isRunning });
+  const codex = new Codex({
+    store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, retryMs: 5, trusts, installed: () => isRunning, terminal,
+    env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on' },
+  });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
   return { server, store, events, codex, kinds, last };
@@ -658,7 +674,7 @@ test('a session runs on what the reader chose from its next turn', async () => {
   const { codex, store, server, events, last } = setup();
   const { sessionId } = await codex.start({ cwd: FOLDER });
   assert.deepEqual((await codex.capabilities()).models.map(model => model.value), ['gpt-6', 'gpt-5']);
-  assert.deepEqual((await codex.capabilities()).commands, []);
+  assert.deepEqual((await codex.capabilities()).commands.map(command => command.name), ['compact', 'review', 'init', 'rename']);
   assert.equal(server.called('model/list').length, 1);
   await assert.rejects(codex.configure({ sessionId, model: 'gpt-9' }), error => error.code === 'bad_model');
   await assert.rejects(codex.configure({ sessionId, model: 'gpt-5', effort: 'high' }), error => error.code === 'bad_effort');
@@ -677,6 +693,205 @@ test('a session runs on what the reader chose from its next turn', async () => {
   assert.equal(events.length, before);
   server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { model: 'gpt-6', effort: 'high' } });
   assert.deepEqual([store.get(sessionId).model, store.get(sessionId).effort], ['gpt-6', 'high']);
+});
+
+test('a line is a command when it starts with one the helper carries out, and a message otherwise', () => {
+  assert.deepEqual(commandOf('/compact'), { name: 'compact', argument: '' });
+  assert.deepEqual(commandOf('  /review  look at the tests\nand the docs  '), { name: 'review', argument: 'look at the tests\nand the docs' });
+  assert.deepEqual(commandOf('/rename My thread'), { name: 'rename', argument: 'My thread' });
+  assert.deepEqual(commandOf('/init'), { name: 'init', argument: '' });
+  for (const message of ['/tmp/a.txt is what?', '/model', '/compactor', '/Compact', 'please /compact', '/', '', undefined, '/rename-it x']) assert.equal(commandOf(message), undefined, `${message}`);
+  assert.deepEqual(COMMANDS.map(command => command.name), ['compact', 'review', 'init', 'rename']);
+});
+
+test('the commands on offer are carried out as Codex\'s terminal would, and aren\'t messages', async () => {
+  const { codex, server, events, last } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  assert.deepEqual((await codex.capabilities()).commands.map(command => [command.name, command.argumentHint]), [['compact', ''], ['review', '[instructions]'], ['init', ''], ['rename', '<name>']]);
+
+  await codex.send({ sessionId, text: '/compact', clientId: 'c1' });
+  assert.deepEqual(server.called('thread/compact/start'), [{ threadId: sessionId }]);
+  // The compaction it asked for is told as one made by hand, and the next one Codex makes by itself isn't.
+  server.say('item/started', { threadId: sessionId, turnId: 't', item: { type: 'contextCompaction', id: 'k1' } });
+  server.say('item/completed', { threadId: sessionId, turnId: 't', item: { type: 'contextCompaction', id: 'k1' } });
+  assert.deepEqual([last('compact.start').trigger, last('compact.end').trigger], ['manual', 'manual']);
+  server.say('item/started', { threadId: sessionId, turnId: 't', item: { type: 'contextCompaction', id: 'k2' } });
+  assert.equal(last('compact.start').trigger, 'auto');
+
+  await codex.send({ sessionId, text: '/review', clientId: 'c-review' });
+  // Codex opens the review with a message of its own, which is told as the line that asked for it.
+  server.say('item/started', { threadId: sessionId, turnId: 'r', item: { type: 'userMessage', id: 'u-review', clientId: null, content: [{ type: 'text', text: 'Review the current code changes.' }] } });
+  assert.deepEqual([last('message.user').text, last('message.user').clientId], ['Review the current code changes.', 'c-review']);
+  // Only that one message: the next with no send to name is someone's at Codex's own terminal.
+  server.say('item/started', { threadId: sessionId, turnId: 'r', item: { type: 'userMessage', id: 'u-other', clientId: null, content: [{ type: 'text', text: 'typed at the Mac' }] } });
+  assert.equal(last('message.user').clientId, undefined);
+  server.say('turn/completed', { threadId: sessionId, turn: { id: 'r', status: 'completed' } });
+  await codex.send({ sessionId, text: '/review only the tests' });
+  assert.deepEqual(server.called('review/start').map(call => call.target), [{ type: 'uncommittedChanges' }, { type: 'custom', instructions: 'only the tests' }]);
+
+  await codex.send({ sessionId, text: '/rename  Fix the header ' });
+  assert.deepEqual(server.called('thread/name/set'), [{ threadId: sessionId, name: 'Fix the header' }]);
+  await assert.rejects(codex.send({ sessionId, text: '/rename' }), error => error.code === 'command_failed' && /Usage: \/rename/.test(error.message));
+  // None of them went to Codex as something said, and none but the review's own opening is told as a message.
+  assert.equal(server.called('turn/start').length, 0);
+  assert.equal(events.filter(event => event.kind === 'message.user').length, 2);
+
+  // /init is a message, in the terminal's own words, and a path is one in the reader's.
+  await codex.send({ sessionId, text: '/init', clientId: 'c2' });
+  await codex.send({ sessionId, text: '/tmp/a.txt is what?' });
+  const [init, path] = server.called('turn/start');
+  assert.match(init.input[0].text, /^Generate a file named AGENTS\.md that serves as a contributor guide for this repository\./);
+  assert.match(init.input[0].text, /adapt as needed — add sections[\s\S]*project’s Git history/);
+  assert.equal(init.clientUserMessageId, 'c2');
+  assert.equal(path.input[0].text, '/tmp/a.txt is what?');
+});
+
+test('a command waits for the turn to end, as it does in Codex\'s terminal, and says why when Codex won\'t', async () => {
+  const { codex, sessionId, server } = await running();
+  await assert.rejects(codex.send({ sessionId, text: '/compact' }), error => error.code === 'command_failed' && error.message === "'/compact' is disabled while a task is in progress.");
+  await assert.rejects(codex.send({ sessionId, text: '/review' }), error => error.code === 'command_failed');
+  assert.deepEqual([server.called('thread/compact/start').length, server.called('review/start').length], [0, 0]);
+  // A name can be given at any time.
+  await codex.send({ sessionId, text: '/rename During a turn' });
+  assert.equal(server.called('thread/name/set').length, 1);
+
+  const idle = setup();
+  const started = await idle.codex.start({ cwd: FOLDER });
+  idle.server.fails.compact = true;
+  await assert.rejects(idle.codex.send({ sessionId: started.sessionId, text: '/compact' }), error => error.code === 'command_failed' && /nothing to compact/.test(error.message));
+  // One that failed isn't taken for the next compaction's cause.
+  idle.server.say('item/started', { threadId: started.sessionId, turnId: 't', item: { type: 'contextCompaction', id: 'k' } });
+  assert.equal(idle.last('compact.start').trigger, 'auto');
+});
+
+test('a folder\'s skills are those Codex has on, each with a line of what it\'s for', () => {
+  const data = [
+    { cwd: '/other', errors: [], skills: [{ name: 'theirs', description: 'Another folder\'s', path: '/o/SKILL.md', enabled: true }] },
+    { cwd: '/w', errors: [], skills: [
+      { name: 'rex', description: 'Use the rex CLI.\nAnd more.', path: '/s/rex/SKILL.md', enabled: true },
+      { name: 'pdf:pdf', description: 'Long', shortDescription: 'Older short', interface: { shortDescription: ' Read PDFs ' }, path: '/s/pdf/SKILL.md', enabled: true },
+      { name: 'docs', description: 'Long', shortDescription: 'Docs, briefly', path: '/s/docs/SKILL.md' },
+      { name: 'off', description: 'Turned off', path: '/s/off/SKILL.md', enabled: false }, { description: 'No name', path: '/s/x/SKILL.md', enabled: true },
+    ] },
+  ];
+  assert.deepEqual(skillsOf(data, '/w'), [
+    { name: 'rex', description: 'Use the rex CLI.', path: '/s/rex/SKILL.md' }, { name: 'pdf:pdf', description: 'Read PDFs', path: '/s/pdf/SKILL.md' },
+    { name: 'docs', description: 'Docs, briefly', path: '/s/docs/SKILL.md' },
+  ]);
+  // Asked of one folder, the answer is that folder's, whatever it's called there.
+  assert.deepEqual(skillsOf(data.slice(0, 1), '/elsewhere').map(skill => skill.name), ['theirs']);
+  assert.deepEqual([skillsOf(), skillsOf([]), skillsOf([{ cwd: '/w', errors: [] }], '/w')], [[], [], []]);
+});
+
+test('a message names a skill with a dollar sign at the start of a word', () => {
+  const skills = [{ name: 'rex', path: '/r' }, { name: 'pdf:pdf', path: '/p' }, { name: 'excel-live', path: '/e' }];
+  const named = text => skillsNamed(text, skills).map(skill => skill.name);
+  assert.deepEqual(named('$rex open a tab, then $pdf:pdf, and $rex again'), ['rex', 'pdf:pdf']);
+  assert.deepEqual(named('Use $excel-live.'), ['excel-live']);
+  assert.deepEqual(named('$rex: split the pane'), ['rex']);
+  // A shell variable, a price, a word with one in its middle, and a name that's no skill's name nothing.
+  for (const text of ['echo ${rex} and $HOME', 'it costs $5 or US$rex', 'a$rex', '$$rex', '$rexes', '$', '', undefined]) assert.deepEqual(named(text), [], `${text}`);
+  assert.deepEqual(skillsNamed('$rex'), []);
+});
+
+test('a session offers its folder\'s skills, and a message that names one takes it along', async () => {
+  const { codex, server } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  const { skills } = await codex.capabilities({ sessionId });
+  assert.deepEqual(skills, [{ name: 'rex', description: 'Use the rex CLI to manage Rex sessions.' }, { name: 'pdf:pdf', description: 'Read, create, render, and verify PDF files' }]);
+  assert.deepEqual(server.called('skills/list'), [{ cwds: [FOLDER] }]);
+
+  await codex.send({ sessionId, text: 'Use $rex and $pdf:pdf, not $old or $nothing', clientId: 'c1' });
+  const [turn] = server.called('turn/start');
+  assert.deepEqual(turn.input, [
+    { type: 'text', text: 'Use $rex and $pdf:pdf, not $old or $nothing', text_elements: [] },
+    { type: 'skill', name: 'rex', path: '/skills/rex/SKILL.md' }, { type: 'skill', name: 'pdf:pdf', path: '/skills/pdf/SKILL.md' },
+  ]);
+  // The list is asked for once for a while, and a message with no dollar sign in it asks for nothing.
+  await codex.send({ sessionId, text: 'plain words' });
+  assert.equal(server.called('skills/list').length, 1);
+  assert.deepEqual(server.called('turn/start')[1].input, [{ type: 'text', text: 'plain words', text_elements: [] }]);
+});
+
+test('a server that lists no skills leaves a message as it is, and the rest of what\'s on offer', async () => {
+  const { codex, server } = setup();
+  server.fails.skills = true;
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  const offered = await codex.capabilities({ sessionId });
+  assert.deepEqual([offered.skills, offered.commands.length, offered.models.length], [[], 4, 2]);
+  await codex.send({ sessionId, text: 'Use $rex' });
+  assert.deepEqual(server.called('turn/start')[0].input, [{ type: 'text', text: 'Use $rex', text_elements: [] }]);
+});
+
+test('Codex\'s terminal is opened on a thread as another client of the server that has it', () => {
+  // With nothing of the thread's permissions, which Codex refuses for a thread it joins on a server.
+  assert.deepEqual(terminalCommand('/s/c.sock', 'abc'), ['codex', '--remote', 'unix:///s/c.sock', 'resume', 'abc']);
+});
+
+// A terminal that writes down what it was asked to open.
+function fakeTerminal({ fails = false } = {}) {
+  const opened = [];
+  return { opened, startSession: async asked => { opened.push(asked); if (fails) throw new Error('no terminal here'); return { pane: '%1' }; } };
+}
+
+test('a session the helper starts is opened in Codex\'s terminal at the Mac once it has a turn, and only once', async () => {
+  const terminal = fakeTerminal();
+  const { codex, server } = setup({ terminal });
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  // Before its first turn there's nothing for another of Codex's clients to join.
+  assert.equal(terminal.opened.length, 0);
+  await codex.setMode({ sessionId, mode: 'readOnly' });
+  await codex.send({ sessionId, text: 'go' });
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-1' } });
+  await Promise.resolve();
+  assert.equal(terminal.opened.length, 1);
+  const [asked] = terminal.opened;
+  assert.deepEqual([asked.name, asked.cwd], [`venes-codex-${sessionId.slice(0, 8)}`, FOLDER]);
+  assert.deepEqual(asked.command, ['codex', '--remote', 'unix:///nowhere', 'resume', sessionId]);
+  assert.deepEqual(asked.env, { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home' });
+  server.say('turn/completed', { threadId: sessionId, turn: { id: 'turn-1', status: 'completed' } });
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-2' } });
+  await Promise.resolve();
+  assert.equal(terminal.opened.length, 1);
+});
+
+test('a stored session the helper loads gets a terminal too, and one another client started doesn\'t', async () => {
+  const terminal = fakeTerminal();
+  const { codex, server } = setup({ terminal, threads: [stored('old', { cwd: FOLDER })] });
+  await codex.send({ sessionId: 'old', text: 'carry on' });
+  server.say('turn/started', { threadId: 'old', turn: { id: 'turn-1' } });
+  await Promise.resolve();
+  assert.deepEqual(terminal.opened.map(asked => asked.command.at(-1)), ['old']);
+  // A thread started from Codex's own app or terminal is in front of whoever started it already.
+  const theirs = stored('theirs', { cwd: FOLDER, status: { type: 'idle' } });
+  server.threads.set('theirs', theirs);
+  server.loaded.add('theirs');
+  server.say('thread/started', { thread: theirs });
+  server.say('turn/started', { threadId: 'theirs', turn: { id: 'turn-9' } });
+  await Promise.resolve();
+  assert.equal(terminal.opened.length, 1);
+});
+
+test('with no terminal to open, or one that won\'t, the session goes on', async () => {
+  const none = setup();
+  const first = await none.codex.start({ cwd: FOLDER });
+  none.server.say('turn/started', { threadId: first.sessionId, turn: { id: 'turn-1' } });
+  assert.equal(none.store.get(first.sessionId).status, 'idle');
+
+  const terminal = fakeTerminal({ fails: true });
+  const { codex, server, store } = setup({ terminal });
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  const { error } = console;
+  console.error = () => {};
+  try {
+    server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-1' } });
+    await new Promise(resolve => { setTimeout(resolve, 5); });
+  } finally {
+    console.error = error;
+  }
+  assert.equal(terminal.opened.length, 1);
+  server.say('item/started', { threadId: sessionId, turnId: 'turn-1', item: { type: 'agentMessage', id: 'm1', text: '', phase: 'final_answer' } });
+  assert.equal(store.get(sessionId).status, 'running');
 });
 
 test('a thread\'s settings are one of the three choices Codex gives, or the reader\'s own', () => {

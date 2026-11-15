@@ -164,7 +164,10 @@ function startHelper(cli = CLI, codexStart = undefined) {
     VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS, VENES_PUSH_URL: PUSH_URL, VENES_CODEX_SOCKET: CODEX_SOCKET,
     VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
     ...(inRex && { REX_SERVER }),
-    ...(codexStart && { VENES_CODEX_START_ARGS: JSON.stringify(codexStart) }),
+    ...(codexStart && { VENES_CODEX_START_ARGS: JSON.stringify(Object.fromEntries(Object.entries(codexStart).filter(([key]) => key !== 'terminal'))) }),
+    // Codex's own terminal is opened on a session only in the case that looks for it: it's a real one, of
+    // whichever Codex this Mac has, and the other cases have no use for it.
+    VENES_CODEX_TERMINAL: codexStart?.terminal ? 'on' : 'off',
   };
   spawn(process.execPath, [cli, 'daemon'], { env, stdio: 'ignore', detached: true }).unref();
 }
@@ -1996,14 +1999,17 @@ async function startCodex(r) {
   await assert.rejects(r.client.request('start', { cwd, agent: 'codex' }), { code: 'needs_trust' });
   const { sessionId } = await r.client.request('start', { cwd, agent: 'codex', trust: true });
   const { models, commands } = await r.client.request('capabilities', { sessionId });
-  assert.deepEqual(commands, []);
+  assert.deepEqual(commands.map(command => command.name), ['compact', 'review', 'init', 'rename']);
+  // Whatever skills this Mac's Codex has on, each says its name and what it's for.
+  const { skills } = await r.client.request('capabilities', { sessionId });
+  assert.ok(Array.isArray(skills) && skills.every(skill => skill.name && typeof skill.description === 'string' && !('path' in skill)), JSON.stringify(skills).slice(0, 300));
   assert.ok(models.length > 0, 'Codex lists its models');
   const model = models.find(offer => offer.value === CODEX_MODEL) ?? models.find(offer => offer.isDefault) ?? models[0];
   await r.client.request('configure', { sessionId, model: model.value, effort: model.effortLevels.includes(CODEX_EFFORT) ? CODEX_EFFORT : model.effortLevels[0] });
   return { sessionId, model: model.value };
 }
 
-T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-only', approvalPolicy: 'on-request' } }, async r => {
+T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-only', approvalPolicy: 'on-request', terminal: true } }, async r => {
   const { sessionId, model } = await startCodex(r);
   const listed = (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
   assert.deepEqual([listed.agent, listed.status, listed.model, listed.pane], ['codex', 'idle', model, null]);
@@ -2038,6 +2044,28 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   assert.equal(status.model, model);
   assert.equal(status.effort, CODEX_EFFORT);
   assert.ok(status.context.percent > 0 && status.context.used > 0 && status.context.size > status.context.used, 'the context after a reply');
+
+  // With its first turn it was opened in Codex's own terminal at the Mac, as another client of the same thread.
+  // The terminal is only looked for: whatever it asks when it starts is for a person, and nothing is pressed in it.
+  const terminalName = `venes-codex-${sessionId.slice(0, 8)}`;
+  try {
+    let started = '';
+    for (const deadline = Date.now() + 10000; Date.now() < deadline && !started; await delay(200)) {
+      try { started = tmux('list-panes', '-t', terminalName, '-F', '#{pane_start_command}').trim(); } catch { /* not opened yet */ }
+    }
+    assert.match(started, new RegExp(`codex --remote unix://\\S+ resume ${sessionId}`), started);
+  } finally {
+    try { tmux('kill-session', '-t', terminalName); } catch { /* it had gone by itself */ }
+  }
+
+  // One of the commands the helper carries out. A name costs Codex nothing to take.
+  await r.client.request('send', { sessionId, text: '/rename E2E renamed', clientId: 'c-rename' });
+  let title;
+  for (const deadline = Date.now() + 5000; Date.now() < deadline && title !== 'E2E renamed'; await delay(200)) {
+    title = (await r.client.request('library', { limit: 100 })).items.find(item => item.id === sessionId)?.title;
+  }
+  assert.equal(title, 'E2E renamed');
+  await assert.rejects(r.client.request('send', { sessionId, text: '/rename' }), { code: 'command_failed' });
 
   // A line run with ! is the reader's own, and Codex has nothing to say to it. The turn before it has
   // been over long enough by then to be history.

@@ -160,6 +160,28 @@ export function inputOf(text, attachments = []) {
   ];
 }
 
+// The skills Codex has on in a folder, as its server lists them: each by the name a `$` calls it by,
+// with the short line that says what it's for, and where it is, which is how a turn names one.
+export function skillsOf(data = [], cwd = undefined) {
+  const entry = data.find(found => found.cwd === cwd) ?? data[0];
+  return (entry?.skills ?? []).filter(skill => skill.enabled !== false && typeof skill.name === 'string' && skill.name).map(skill => ({
+    name: skill.name, description: `${skill.interface?.shortDescription ?? skill.shortDescription ?? skill.description ?? ''}`.split('\n')[0].trim(),
+    path: skill.path,
+  }));
+}
+
+// The skills a message names with `$`, each once, in the order named. A `$` in the middle of a word,
+// as in a shell variable's `${HOME}` or a price, names nothing, and neither does a name that's no skill's.
+export function skillsNamed(text, skills = []) {
+  const named = [];
+  for (const [, name] of `${text ?? ''}`.matchAll(/(?<![\w$])\$([A-Za-z0-9][\w:.-]*)/g)) {
+    // A sentence's full stop or colon after the name isn't part of it.
+    const skill = skills.find(found => found.name === name) ?? skills.find(found => found.name === name.replace(/[.:-]+$/, ''));
+    if (skill && !named.includes(skill)) named.push(skill);
+  }
+  return named;
+}
+
 const shownUpload = ({ uploadId, name, mediaType, size }) => ({ uploadId, name, mediaType, size });
 
 // A stored turn, as history has it.
@@ -193,6 +215,67 @@ export function libraryItem(thread, status = null) {
   };
 }
 
+// The commands of Codex's terminal that its server can carry out, each named and described as the
+// terminal has it (0.153.4). The rest are the terminal's own doing, as its pickers and its settings are,
+// and a client has its own ways to those: the model, the mode, the status.
+export const COMMANDS = [
+  { name: 'compact', description: 'summarize conversation to prevent hitting the context limit', argumentHint: '' },
+  { name: 'review', description: 'review my current changes and find issues', argumentHint: '[instructions]' },
+  { name: 'init', description: 'create an AGENTS.md file with instructions for Codex', argumentHint: '' },
+  { name: 'rename', description: 'rename the current thread', argumentHint: '<name>' },
+];
+
+// What the terminal sends Codex for /init, word for word (codex-rs/tui/prompt_for_init_command.md).
+const INIT_PROMPT = `Generate a file named AGENTS.md that serves as a contributor guide for this repository.
+Before writing, check whether AGENTS.md already exists in the current working directory. If it does, do not overwrite or modify it.
+Your goal is to produce a clear, concise, and well-structured document with descriptive headings and actionable explanations for each section.
+Follow the outline below, but adapt as needed — add sections if relevant, and omit those that do not apply to this project.
+
+Document Requirements
+
+- Title the document "Repository Guidelines".
+- Use Markdown headings (#, ##, etc.) for structure.
+- Keep the document concise. 200-400 words is optimal.
+- Keep explanations short, direct, and specific to this repository.
+- Provide examples where helpful (commands, directory paths, naming patterns).
+- Maintain a professional, instructional tone.
+
+Recommended Sections
+
+Project Structure & Module Organization
+
+- Outline the project structure, including where the source code, tests, and assets are located.
+
+Build, Test, and Development Commands
+
+- List key commands for building, testing, and running locally (e.g., npm test, make build).
+- Briefly explain what each command does.
+
+Coding Style & Naming Conventions
+
+- Specify indentation rules, language-specific style preferences, and naming patterns.
+- Include any formatting or linting tools used.
+
+Testing Guidelines
+
+- Identify testing frameworks and coverage requirements.
+- State test naming conventions and how to run tests.
+
+Commit & Pull Request Guidelines
+
+- Summarize commit message conventions found in the project’s Git history.
+- Outline pull request requirements (descriptions, linked issues, screenshots, etc.).
+
+(Optional) Add other sections if relevant, such as Security & Configuration Tips, Architecture Overview, or Agent-Specific Instructions.
+`;
+
+// A line that's one of those commands, with what follows its name. Any other line that starts with a
+// slash, as a path does, is a message like any other.
+export function commandOf(text) {
+  const [, name, argument = ''] = /^\/([a-z][a-z-]*)(?:\s+([\s\S]*))?$/.exec(`${text ?? ''}`.trim()) ?? [];
+  return COMMANDS.some(command => command.name === name) ? { name, argument: argument.trim() } : undefined;
+}
+
 // What a session may do without asking, as the three choices Codex's own terminal gives under
 // /permissions (0.153.4): Read Only, Default and Full Access, each an approval policy and a sandbox.
 const MODES = {
@@ -203,6 +286,12 @@ const MODES = {
 export const MODE_IDS = Object.keys(MODES);
 // Settings that are none of the three, as from a config of the reader's own.
 export const CUSTOM_MODE = 'custom';
+
+// The command that opens Codex's terminal on a thread its server has: another client of the same thread,
+// which shows what's said from anywhere and can say things itself. It takes the thread as it is: Codex
+// refuses a sandbox or an approval policy given with it ("Permission overrides are not supported when
+// resuming a remote task", 0.169.0).
+export const terminalCommand = (socketPath, threadId) => ['codex', '--remote', `unix://${socketPath}`, 'resume', threadId];
 
 // Which of the choices a thread's settings are, or nothing when they aren't told.
 export function modeOf({ approvalPolicy, sandbox } = {}) {
@@ -341,6 +430,11 @@ export function statusLineOf({ session, usage, limits, branch, at = Date.now() }
   };
 }
 
+// What a terminal opened on a thread is called at the Mac, and what it's given of the helper's own surroundings.
+const TERMINAL_PREFIX = 'venes-codex-';
+const TERMINAL_ID_LENGTH = 8;
+const TERMINAL_ENV = ['PATH', 'LANG', 'LC_ALL', 'CODEX_HOME', 'VENES_TMUX_SOCKET'];
+
 function blankThread() {
   return {
     isSubscribed: false, turnId: undefined, messages: new Map(), tools: new Map(), items: new Set(), sent: new Map(), requests: new Map(),
@@ -372,6 +466,9 @@ export class Codex {
   #retryMs;
   #trusts;
   #installed;
+  #terminal;
+  #env;
+  #skills = new Map();
   #isStopped = false;
 
   constructor({
@@ -380,7 +477,11 @@ export class Codex {
     retryMs = RECONNECT_MS, trusts = isTrustedByCodex,
     // Told where to look, as a test run is, there's a Codex only if something listens there.
     installed = () => !process.env.VENES_CODEX_SOCKET && isInstalled(),
+    // What opens a terminal at the Mac, as for a Claude Code session that's resumed: none, and no session gets one.
+    terminal = undefined, env = process.env,
   }) {
+    this.#terminal = terminal;
+    this.#env = env;
     this.#installed = installed;
     this.#retryMs = retryMs;
     this.#trusts = trusts;
@@ -527,11 +628,31 @@ export class Codex {
   #noteSettings(threadId, { model, effort, approvalPolicy, sandbox }) {
     const session = this.#store.find(threadId);
     if (!session) return;
+
     if (model) this.#store.report(threadId, 'session.model', { model });
     if (effort && effort !== session.effort) this.#store.report(threadId, 'session.effort', { effort }, { effort });
     // A mode picked from here and not taken yet, which Codex does with the next turn, is the one to show.
     const mode = this.#chosen.get(threadId)?.approvalPolicy ? undefined : modeOf({ approvalPolicy, sandbox });
     if (mode && mode !== session.permissionMode) this.#noteMode(threadId, mode);
+  }
+
+  // A session the helper started or loaded has no terminal, where every Claude Code session is in one:
+  // Codex's server runs it. So Codex's own terminal is opened on it at the Mac, for whoever goes there,
+  // once the thread has a turn, which is when another of Codex's clients can join it. Once for a thread.
+  async #showAtMac(threadId, thread) {
+    if (!thread.wantsTerminal || thread.hasTerminal || !this.#terminal) return;
+    thread.hasTerminal = true;
+    const session = this.#store.find(threadId);
+    const variables = Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
+    try {
+      await this.#terminal.startSession({
+        name: `${TERMINAL_PREFIX}${threadId.slice(0, TERMINAL_ID_LENGTH)}`, cwd: session?.cwd ?? os.homedir(),
+        command: terminalCommand(this.#socketPath, threadId), env: variables,
+      });
+    } catch (error) {
+      // The session goes on without one, as it did before there were any.
+      console.error(`codex: no terminal for ${threadId}: ${error.message}`);
+    }
   }
 
   #noteMode(threadId, permissionMode) {
@@ -587,6 +708,7 @@ export class Codex {
         thread.usage = params.tokenUsage;
         break;
       case 'turn/started':
+        this.#showAtMac(threadId, thread);
         thread.turnId = params.turn?.id;
         thread.turnStarts.push({ id: thread.turnId, after: this.#store.seq });
         if (thread.turnStarts.length > TURNS_TRACKED) thread.turnStarts.shift();
@@ -668,8 +790,11 @@ export class Codex {
     const sent = item.clientId ? thread.sent.get(item.clientId) : undefined;
     if (item.clientId) thread.sent.delete(item.clientId);
     const text = sent?.text ?? textOf(item.content);
+    // The message a review opens with has no send of its own to name: it stands for the /review that asked for it.
+    const clientId = item.clientId ?? thread.reviewOf ?? undefined;
+    thread.reviewOf = undefined;
     this.#store.report(threadId, 'message.user', {
-      text, clientId: item.clientId ?? undefined, ...(sent?.attachments.length ? { attachments: sent.attachments } : {}),
+      text, clientId, ...(sent?.attachments.length ? { attachments: sent.attachments } : {}),
     }, { lastPrompt: text });
   }
 
@@ -681,7 +806,7 @@ export class Codex {
     this.#atWork(threadId, thread);
     if (item.type === 'userMessage') this.#onUserMessage(threadId, thread, item);
     else if (item.type === 'agentMessage') this.#messageOf(thread, item.id, item.phase);
-    else if (item.type === 'contextCompaction') this.#store.report(threadId, 'compact.start', { trigger: 'auto' });
+    else if (item.type === 'contextCompaction') this.#store.report(threadId, 'compact.start', { trigger: thread.compactsByHand ? 'manual' : 'auto' });
     else if (isTool(item)) this.#startTool(threadId, thread, item);
   }
 
@@ -709,8 +834,10 @@ export class Codex {
     } else if (item.type === 'reasoning') {
       const text = thinkingOf(item);
       if (text) report('message.thinking', { text });
-    } else if (item.type === 'contextCompaction') report('compact.end', { trigger: 'auto' });
-    else if (isTool(item)) {
+    } else if (item.type === 'contextCompaction') {
+      report('compact.end', { trigger: thread.compactsByHand ? 'manual' : 'auto' });
+      thread.compactsByHand = false;
+    } else if (isTool(item)) {
       // Some kinds are only said once they're done.
       if (!thread.tools.has(item.id)) this.#startTool(threadId, thread, item);
       const { at } = thread.tools.get(item.id);
@@ -787,6 +914,7 @@ export class Codex {
     // Whoever starts a thread hears all of it from then on.
     const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined, permissionMode: modeOf(started) });
     thread.isSubscribed = true;
+    thread.wantsTerminal = true;
     return { sessionId: started.thread.id };
   }
 
@@ -797,6 +925,7 @@ export class Codex {
       const joined = await link.request('thread/resume', { threadId, excludeTurns: true });
       const thread = this.#adopt(joined.thread, { model: joined.model, effort: joined.reasoningEffort ?? undefined, permissionMode: modeOf(joined) });
       thread.isSubscribed = true;
+      thread.wantsTerminal = true;
       this.#store.report(threadId, 'session.started', { source: 'resume', model: joined.model, cwd: joined.thread.cwd });
       return thread;
     } catch (error) {
@@ -834,8 +963,17 @@ export class Codex {
       await this.#runLine(link, thread, session.id, { command: text.slice(1).trim(), clientId });
       return;
     }
-    const input = inputOf(text, attachments);
-    if (clientId) thread.sent.set(clientId, { text, attachments: attachments.map(shownUpload) });
+    const command = attachments.length ? undefined : commandOf(text);
+    if (command && command.name !== 'init') {
+      await this.#runCommand(link, thread, session.id, command, clientId);
+      return;
+    }
+    // /init is a message, in the terminal's own words.
+    const said = command ? INIT_PROMPT : text;
+    // A skill named with `$` goes with the message as Codex's terminal sends one: by its name and where it is.
+    const skills = said.includes('$') ? skillsNamed(said, await this.#listSkills(link, session.cwd).catch(() => [])) : [];
+    const input = [...inputOf(said, attachments), ...skills.map(({ name, path: file }) => ({ type: 'skill', name, path: file }))];
+    if (clientId) thread.sent.set(clientId, { text: said, attachments: attachments.map(shownUpload) });
     const about = { threadId: session.id, input, ...(clientId && { clientUserMessageId: clientId }) };
     try {
       if (thread.turnId) {
@@ -963,9 +1101,22 @@ export class Codex {
     return { status: statusLineOf({ session, usage: thread?.usage, limits: this.#limits?.snapshot, branch: thread?.branch }) };
   }
 
-  // Codex's server has no list of commands: those are its terminal's own.
-  async capabilities() {
-    return { commands: [], models: await this.#listModels() };
+  // The skills on in a folder, asked for once in a while, since a new one soon wants to show up.
+  async #listSkills(link, cwd) {
+    const known = this.#skills.get(cwd);
+    if (known && Date.now() - known.at < MODELS_LIFETIME_MS) return known.list;
+    const { data } = await link.request('skills/list', cwd ? { cwds: [cwd] } : {});
+    const list = skillsOf(data, cwd);
+    this.#skills.set(cwd, { at: Date.now(), list });
+    return list;
+  }
+
+  // Codex's server has no list of commands: those are its terminal's own. The ones listed are those the
+  // helper carries out itself. Its skills, which a `$` names in a message, are the folder's.
+  async capabilities({ sessionId } = {}) {
+    const link = await this.#open({ start: true });
+    const skills = await this.#listSkills(link, this.#store.find(sessionId)?.cwd).catch(() => []);
+    return { commands: COMMANDS, models: await this.#listModels(), skills: skills.map(({ name, description }) => ({ name, description })) };
   }
 
   // What the session runs on from its next turn, which is when Codex takes it.
@@ -980,6 +1131,28 @@ export class Codex {
     this.#chosen.set(sessionId, change);
     this.#noteSettings(sessionId, change);
     return {};
+  }
+
+  // A command the reader typed, carried out as Codex's terminal would: none of these is a message for
+  // Codex to read. What comes of one is told as Codex tells it: a compaction, a review's turn, a name.
+  async #runCommand(link, thread, threadId, { name, argument }, clientId) {
+    // The terminal's own words for both.
+    if (thread.turnId && name !== 'rename') throw new HelperError('command_failed', `'/${name}' is disabled while a task is in progress.`);
+    if (name === 'rename' && !argument) throw new HelperError('command_failed', 'Usage: /rename <name>');
+    try {
+      if (name === 'compact') {
+        thread.compactsByHand = true;
+        await link.request('thread/compact/start', { threadId });
+      } else if (name === 'review') {
+        // Codex opens a review with a message of its own, which is the reader's line to whoever sent it.
+        thread.reviewOf = clientId;
+        await link.request('review/start', { threadId, target: argument ? { type: 'custom', instructions: argument } : { type: 'uncommittedChanges' } });
+      } else await link.request('thread/name/set', { threadId, name: argument });
+    } catch (error) {
+      thread.compactsByHand = false;
+      thread.reviewOf = undefined;
+      throw new HelperError('command_failed', `Codex wouldn't do that: ${error.message}`);
+    }
   }
 
   // What the session may do without asking, from its next turn, which is when Codex takes it, and for

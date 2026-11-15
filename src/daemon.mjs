@@ -699,7 +699,8 @@ export async function startDaemon(paths) {
   const rexAccount = cachedAccount();
   await rexAccount.refresh();
   // Codex's sessions, if its server is running on this Mac. Nothing is started for it here.
-  const codex = new Codex({ store });
+  // A Codex session the helper starts or loads is shown in a terminal at the Mac too, unless a run says not to.
+  const codex = new Codex({ store, terminal: process.env.VENES_CODEX_TERMINAL === 'off' ? undefined : resumeTerminal() });
   codex.restore().catch(error => console.error(`codex: ${error.message}`));
   const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex);
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });

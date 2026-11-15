@@ -287,11 +287,17 @@ A Codex session is told with the events and commands a Claude Code session has, 
 | `send` | Starts a turn, or, during one, goes into it for Codex to read between its steps (`lane: "next"`, or none). `later` is held by the helper until the turn ends. A stored session is loaded by its first message. A picture goes as an image, and any other file by its path at the head of the text. A line that starts with `!` is run in your shell. See below. |
 | `interrupt` | Stops the turn |
 | `join`, `history` | The same replies, read from Codex's stored turns a few at a time, so a page is whole turns. `before` is a number the helper gives out, good until it restarts. |
-| `capabilities` | `models` from Codex's own list, each with its `effortLevels`. `commands` is empty: Codex's slash commands are its terminal's own. |
+| `capabilities` | `models` from Codex's own list, each with its `effortLevels`. `commands` are the few of its terminal's that the helper carries out, and `skills` those a `$` names: see below. |
 | `configure` | `model` and `effort` take hold from the session's next turn, and `session.model` and `session.effort` say so at once |
 | `setMode` | One of Codex's three choices of what it may do without asking, from the session's next turn. See [Permission modes](#permission-modes). |
 | `respond` | Answers Codex. See below. |
 | `delete` | Stops a turn going on, and has Codex delete the thread for good |
+
+Codex's slash commands are its terminal's own doing, and its server lists none. Four of them are things the server can do, so `capabilities` lists those, named and described as the terminal has them, and `send` with one as its line carries it out instead of saying it to Codex: `/compact` has Codex summarize the conversation, told as `compact.start` and `compact.end` with `trigger: "manual"`; `/review` starts a review of what has changed in the folder, or with words after it, a review of what they say, which comes as a turn Codex opens with a message of its own, told as `message.user` with the `clientId` of the send that asked for it; `/init` is a message, in the words the terminal sends for it; and `/rename <name>` names the thread. `/compact` and `/rename` aren't echoed as `message.user`, and `/init` is, with the words the terminal sends. The first two wait for a turn to end, as in the terminal: until then, and whenever Codex won't, `send` fails with `command_failed` and a message for the reader. Any other line that starts with a slash, as a path does, is a message like any other.
+
+A `$` names a skill in a message to Codex, as in its terminal. `capabilities` lists the session's folder's `skills`, each `{name, description}`: the ones Codex has on there, with the short line that says what each is for. They're Codex's to list, asked for once in a few minutes. A message is sent as it's written, and each `$name` in it that is one of those skills goes to Codex with the message, by its name and where it is, as the terminal sends one. A `$` in the middle of a word, as in a shell variable or a price, names nothing, and neither does a name that's no skill's.
+
+A Codex session has no terminal of its own, where every Claude Code session is in one. So a session the helper starts or loads is opened in Codex's terminal at the Mac, in Rex or tmux as a resumed Claude Code session is, once it has a turn: `codex --remote` on the server's socket, resuming the thread, which makes the terminal another client of the same thread. It takes the thread as it is: Codex refuses a sandbox or an approval policy given with a thread joined this way, and joining changes neither. Nothing is pressed in it: what it asks when it starts, as about an update, is for whoever is at the Mac. A session started from Codex's own app or terminal gets none, and `VENES_CODEX_TERMINAL=off` turns this off.
 
 `statusLine` gives a `status` in the shape Claude Code's has, from what Codex's server says itself, since Codex has no status line: `model`, `effort`, `project`, `branch`, `context` after the last reply (`percent`, `used`, `size`), and the account's `fiveHour` and `sevenDay` limits, each `percent` and `resetsAt`.
 
@@ -506,6 +512,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
 | `bad_mode` | `setMode` was given something other than a mode a session of its kind can be switched to |
 | `mode_unavailable` | The session went all the way round its modes without coming to the one asked for, and is in the mode it was in |
+| `command_failed` | A Codex session wouldn't carry out a slash command: the message says why, as that a turn is going on |
 | `mode_failed` | The terminal didn't show the session's mode as expected, so it was left as it is. Claude Code's status bar may have changed. |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |

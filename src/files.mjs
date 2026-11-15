@@ -43,13 +43,18 @@ const MEDIA_TYPES = {
 
 export const mediaTypeOf = file => MEDIA_TYPES[path.extname(file).slice(1).toLowerCase()] ?? 'application/octet-stream';
 
+// Whether `target` is `root` or somewhere under it, the top of the disk being a root that ends in its own slash.
+export function isWithin(root, target) {
+  return target === root || target.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
+}
+
 // A path a client named, inside the session's folder: the folder itself with none, and one relative to
 // it or whole otherwise. Anything that would lead out of the folder is refused.
 export function insideFolder(root, named) {
   if (named === undefined || named === null || named === '') return root;
   if (typeof named !== 'string' || named.length > 4096) throw new HelperError('bad_path', 'That isn\'t a path.');
   const resolved = path.resolve(root, named);
-  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
+  if (!isWithin(root, resolved)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   return resolved;
 }
 
@@ -92,9 +97,7 @@ export function createEntry(root, named, { name, folder } = {}) {
   } catch {
     throw new HelperError('no_folder', `${parent} isn't a folder on this Mac.`);
   }
-  if (real.parent !== real.root && !real.parent.startsWith(`${real.root}${path.sep}`)) {
-    throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
-  }
+  if (!isWithin(real.root, real.parent)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   return makeIn(parent, name, { folder: folder === true });
 }
 
@@ -130,22 +133,21 @@ const isThere = file => {
 
 // A file or a folder of the session's goes to the Trash: something inside its folder, really inside it,
 // and neither the folder itself nor what a list of it leaves out, on a disk that tells no capitals apart
-// either.
-export async function trashEntry(root, named, { trash = moveToTrash } = {}) {
+// either. `keeps` are folders that stay whatever is asked, with all that's above them: the home folder
+// is one, wherever the session is.
+export async function trashEntry(root, named, { trash = moveToTrash, keeps = [] } = {}) {
   if (typeof named !== 'string' || named === '') throw new HelperError('bad_path', 'That isn\'t a path.');
   const target = insideFolder(root, named);
-  if (target === path.resolve(root)) throw new HelperError('bad_path', 'The session\'s own folder stays where it is.');
+  if (target === path.resolve(root)) throw new HelperError('bad_path', 'That folder stays where it is.');
   const name = path.basename(target);
-  if (isKept(root, target)) throw new HelperError('bad_path', `${name} stays where it is.`);
+  if (isKept(root, target) || keeps.some(kept => isWithin(target, path.resolve(kept)))) throw new HelperError('bad_path', `${name} stays where it is.`);
   let real;
   try {
     real = { root: fs.realpathSync(root), parent: fs.realpathSync(path.dirname(target)) };
   } catch {
     throw new HelperError('no_file', `${name} isn't there any more.`);
   }
-  if (real.parent !== real.root && !real.parent.startsWith(`${real.root}${path.sep}`)) {
-    throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
-  }
+  if (!isWithin(real.root, real.parent)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   // By where it really is, so that it's the thing named that goes and no link on the way to it.
   const really = path.join(real.parent, name);
   if (!isThere(really)) throw new HelperError('no_file', `${name} isn't there any more.`);
@@ -187,7 +189,9 @@ function changeOf(entry, git) {
 }
 
 // What's in a folder of the session's: its folders and files, with what git says has changed among them.
-export async function listFolder(root, named, { limit = FILE_ENTRIES, changes = changedPaths } = {}) {
+// Without `hidden`, those whose names start with a dot are left out, as Finder leaves them out: that's
+// for looking about the Mac, where a session's own folder is shown as it is.
+export async function listFolder(root, named, { limit = FILE_ENTRIES, changes = changedPaths, hidden = true } = {}) {
   const folder = insideFolder(root, named);
   let entries;
   try {
@@ -196,7 +200,7 @@ export async function listFolder(root, named, { limit = FILE_ENTRIES, changes = 
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new HelperError('no_folder', `${folder} isn't a folder on this Mac.`);
     throw new HelperError('unreadable_folder', `${folder} can't be read.`);
   }
-  const listed = entries.filter(entry => !HIDDEN.has(entry.name)).map(entry => entryOf(folder, entry)).filter(Boolean);
+  const listed = entries.filter(entry => !HIDDEN.has(entry.name) && (hidden || !entry.name.startsWith('.'))).map(entry => entryOf(folder, entry)).filter(Boolean);
   const sorted = [...listed.filter(entry => entry.kind === 'dir').sort(byName), ...listed.filter(entry => entry.kind === 'file').sort(byName)];
   const git = await changes(root).catch(() => undefined);
   return {
@@ -207,6 +211,13 @@ export async function listFolder(root, named, { limit = FILE_ENTRIES, changes = 
     }),
     truncated: sorted.length > limit,
   };
+}
+
+// What's in a folder anywhere on this Mac, for whoever is choosing where a session starts: listed as a
+// session's folder is, by what git says of that folder itself, and with no dot names unless they're asked for.
+export function listAnywhere(named, { hidden = false } = {}) {
+  const folder = path.resolve(named);
+  return listFolder(path.parse(folder).root, folder, { hidden, changes: () => changedPaths(folder) });
 }
 
 // Whether what a file starts with is text: nothing a text file can't have, and good UTF-8 as far as it was read.
@@ -280,7 +291,7 @@ export function writeFile(root, named, { text, was, overwrite = false, limit = W
   } catch {
     throw new HelperError('no_file', 'That file isn\'t there any more.');
   }
-  if (!real.file.startsWith(`${real.root}${path.sep}`)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
+  if (real.file === real.root || !isWithin(real.root, real.file)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   if (!stat.isFile()) throw new HelperError('no_file', 'That isn\'t a file.');
   const isAsRead = Number.isSafeInteger(was?.size) && Number.isSafeInteger(was?.modifiedAt)
     && was.size === stat.size && was.modifiedAt === Math.floor(stat.mtimeMs);

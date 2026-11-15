@@ -1357,6 +1357,24 @@ T('a_new_session_starts_in_a_folder_from_the_list_and_can_be_typed_into', {}, as
     await assert.rejects(r.client.request('folderFileCreate', { path: fresh, name: 'notes.md' }), { code: 'name_taken' });
     await assert.rejects(r.client.request('folderFileCreate', { path: fresh, name: 'a/b' }), { code: 'bad_name' });
     await assert.rejects(r.client.request('folderFileCreate', { path: 'e2e-fresh', name: 'x' }), { code: 'bad_folder' });
+    // With no session named, the folder is looked at as a session's is: its files too, what Claude Code
+    // thinks of it, and nothing whose name starts with a dot unless that's asked for.
+    fs.writeFileSync(path.join(fresh, '.hidden'), 'h');
+    const looked = await r.client.request('files', { path: fresh });
+    assert.deepEqual([looked.path, typeof looked.trusted, looked.entries.map(entry => [entry.name, entry.kind])], [fresh, 'boolean', [['notes.md', 'file']]]);
+    assert.deepEqual((await r.client.request('files', { path: fresh, hidden: true })).entries.map(entry => entry.name), ['.hidden', 'notes.md']);
+    // And a file in it is read, written and deleted by its whole path.
+    const where = path.join(fresh, 'notes.md');
+    const read = await r.client.request('fileRead', { path: where });
+    const wrote = await r.client.request('fileWrite', { path: where, text: '# notes\n', was: { size: read.size, modifiedAt: read.modifiedAt } });
+    assert.deepEqual([read.text, wrote.size, fs.readFileSync(where, 'utf8')], ['', 8, '# notes\n']);
+    assert.equal(Buffer.from((await r.client.request('fileChunk', { path: where, offset: 0 })).data, 'base64').toString(), '# notes\n');
+    await r.client.request('fileDelete', { path: where });
+    assert.deepEqual([fs.existsSync(where), fs.readdirSync(TRASH).some(name => name.endsWith('-notes.md'))], [false, true]);
+    // A path that isn't whole has nothing to be from.
+    await assert.rejects(r.client.request('files', { path: 'e2e-fresh' }), { code: 'bad_path' });
+    await assert.rejects(r.client.request('fileRead', {}), { code: 'bad_path' });
+    await assert.rejects(r.client.request('fileDelete', { path: 'notes.md' }), { code: 'bad_path' });
   } finally {
     fs.rmSync(fresh, { recursive: true, force: true });
   }
@@ -2301,7 +2319,8 @@ T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissio
 
     // And out of it again: a file, then a folder with what's in it, each to the Trash, which here is this
     // run's own folder. Neither is in the list after.
-    const trashed = () => fs.readdirSync(TRASH).map(name => name.replace(/^\d+-/, '')).sort();
+    // Another case's are there too, under names of their own.
+    const trashed = () => fs.readdirSync(TRASH).map(name => name.replace(/^\d+-/, '')).filter(name => name.startsWith('e2e-')).sort();
     const gone = await r.client.request('fileDelete', { sessionId, path: 'e2e-new.txt' });
     assert.deepEqual([gone.name, gone.path, fs.existsSync(path.join(WS, 'e2e-new.txt'))], ['e2e-new.txt', path.join(WS, 'e2e-new.txt'), false]);
     await r.client.request('fileDelete', { sessionId, path: made });

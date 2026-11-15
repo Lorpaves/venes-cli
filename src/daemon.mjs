@@ -11,7 +11,7 @@ import net from 'node:net';
 import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
 import { checkedToolUse, readArtifact } from './artifact.mjs';
-import { createEntry, listFolder, readChunk, readFile, trashEntry, writeFile } from './files.mjs';
+import { createEntry, listAnywhere, listFolder, readChunk, readFile, trashEntry, writeFile } from './files.mjs';
 import {
   branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
   countChanges, status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
@@ -326,6 +326,16 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return checkedFolder(cwd);
   };
 
+  // Where a file is looked for: in a session's folder, or with no session named, anywhere on this Mac,
+  // for whoever is choosing where a session starts. A path is whole then, there being no folder for it
+  // to be from.
+  const isAnywhere = sessionId => sessionId === undefined || sessionId === null;
+  const rootFor = async (sessionId, named) => {
+    if (!isAnywhere(sessionId)) return folderOf(sessionId);
+    if (typeof named !== 'string' || !path.isAbsolute(named)) throw new HelperError('bad_path', 'With no session, a path is whole.');
+    return path.parse(path.resolve(named)).root;
+  };
+
   // The repositories a session has to do with: see `repositoriesOf`. A session the helper doesn't
   // follow has only where it ran to go by.
   const repositoriesFor = async sessionId => {
@@ -466,7 +476,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
     },
     // What's in the session's folder, a level at a time, and what's in one of its files.
-    files: async ({ sessionId, path: named }) => listFolder(await folderOf(sessionId), named),
+    // With no session it's a folder anywhere on this Mac, which also says whether Claude Code trusts it,
+    // for a session that may start there.
+    files: async ({ sessionId, path: named, hidden }) => {
+      const root = await rootFor(sessionId, named);
+      if (!isAnywhere(sessionId)) return listFolder(root, named);
+      const listing = await listAnywhere(named, { hidden: hidden === true });
+      return { ...listing, trusted: isTrusted(listing.path, { config: readClaudeConfig(), home: homeFolder() }) };
+    },
     // Something new in a session's folder: an empty file, or a folder with `folder`. It's one more thing changed there.
     fileCreate: async ({ sessionId, path: named, name, folder }) => {
       const root = await folderOf(sessionId);
@@ -478,17 +495,18 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     },
     // A file or a folder of the session's goes to the Trash, which changes what git counts there.
     fileDelete: async ({ sessionId, path: named }) => {
-      const root = await folderOf(sessionId);
+      const root = await rootFor(sessionId, named);
       try {
-        return await trashEntry(root, named);
+        // The home folder stays, and what it's in, wherever it's asked from.
+        return await trashEntry(root, named, { keeps: [homeFolder()] });
       } finally {
         recount(sessionId);
       }
     },
-    fileRead: async ({ sessionId, path: named }) => readFile(await folderOf(sessionId), named),
+    fileRead: async ({ sessionId, path: named }) => readFile(await rootFor(sessionId, named), named),
     // New text for one of its files, as someone edited it from afar. It's one more thing changed there.
     fileWrite: async ({ sessionId, path: named, text, was, overwrite }) => {
-      const root = await folderOf(sessionId);
+      const root = await rootFor(sessionId, named);
       try {
         return writeFile(root, named, { text, was, overwrite: overwrite === true });
       } finally {
@@ -496,7 +514,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       }
     },
     // A file of any size, a piece at a time.
-    fileChunk: async ({ sessionId, path: named, offset, length }) => readChunk(await folderOf(sessionId), named, { offset, length }),
+    fileChunk: async ({ sessionId, path: named, offset, length }) => readChunk(await rootFor(sessionId, named), named, { offset, length }),
     // What git says of a session's repository: null for a session with none. A session can have several,
     // as it moves about, so `repositories` lists them, the first being the one told of when none is named.
     git: async ({ sessionId, root }) => {

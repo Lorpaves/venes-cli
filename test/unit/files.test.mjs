@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, listFolder, mediaTypeOf, moveToTrash, readChunk, readFile, trashEntry, writeFile } from '../../src/files.mjs';
+import {
+  CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, isWithin, listAnywhere, listFolder, mediaTypeOf, moveToTrash, readChunk, readFile, trashEntry,
+  writeFile,
+} from '../../src/files.mjs';
 import { createFile, createFolder } from '../../src/folders.mjs';
 
 function folder(t) {
@@ -367,5 +370,62 @@ test('only a text file that\'s there, inside the session\'s folder, is written, 
   // A link to a file of the session's own is that file.
   writeFile(root, 'same.txt', anyway);
   assert.deepEqual([fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), fs.lstatSync(path.join(root, 'same.txt')).isSymbolicLink()], ['mine', true]);
+});
+
+test('a folder is within itself and what\'s under it, and the top of the disk has everything under it', () => {
+  assert.deepEqual([isWithin('/w/app', '/w/app'), isWithin('/w/app', '/w/app/src'), isWithin('/w/app', '/w/application'), isWithin('/w/app', '/w')], [true, true, false, false]);
+  assert.deepEqual([isWithin('/', '/'), isWithin('/', '/w/app'), isWithin('/', '/etc')], [true, true, true]);
+  assert.equal(insideFolder('/', '/w/app/src/../a.js'), '/w/app/a.js');
+});
+
+test('a folder anywhere on the Mac is listed as a session\'s is, with no dot names unless they\'re asked for', async t => {
+  const { root, write } = folder(t);
+  write('src/a.js', 'a');
+  write('README.md', 'r');
+  write('.env', 'e');
+  write('.cache/x', 'x');
+  write('.git/HEAD', 'ref');
+  const shown = await listAnywhere(root);
+  assert.deepEqual([shown.root, shown.path, shown.name], ['/', root, path.basename(root)]);
+  assert.deepEqual(shown.entries.map(entry => [entry.name, entry.kind]), [['src', 'dir'], ['README.md', 'file']]);
+  assert.deepEqual((await listAnywhere(`${root}/`, { hidden: true })).entries.map(entry => entry.name), ['.cache', 'src', '.env', 'README.md']);
+  // A session's own folder is shown as it is.
+  assert.deepEqual((await listFolder(root, undefined, { changes: noGit })).entries.map(entry => entry.name), ['.cache', 'src', '.env', 'README.md']);
+  await assert.rejects(listAnywhere(path.join(root, 'gone')), { code: 'no_folder' });
+});
+
+test('with the whole disk to look in, a file is read, written and deleted by its whole path', async t => {
+  const { root, write } = folder(t);
+  write('notes.md', 'one\n');
+  const file = path.join(root, 'notes.md');
+  const read = readFile('/', file);
+  assert.deepEqual([read.path, read.text], [file, 'one\n']);
+  writeFile('/', file, { text: 'two\n', was: { size: read.size, modifiedAt: read.modifiedAt } });
+  assert.equal(fs.readFileSync(file, 'utf8'), 'two\n');
+  assert.equal(Buffer.from(readChunk('/', file).data, 'base64').toString(), 'two\n');
+  write('.git/config', '[core]');
+  assert.throws(() => writeFile('/', path.join(root, '.git/config'), { text: 'x', overwrite: true }), { code: 'bad_path' });
+  assert.throws(() => writeFile('/', '/', { text: 'x', overwrite: true }), { code: 'bad_path' });
+  const { taken, trash } = bin();
+  assert.deepEqual(await trashEntry('/', file, { trash }), { name: 'notes.md', path: file });
+  await assert.rejects(trashEntry('/', '/', { trash }), { code: 'bad_path' });
+  await assert.rejects(trashEntry('/', path.join(root, '.git'), { trash }), { code: 'bad_path' });
+  assert.deepEqual(taken, [file]);
+});
+
+test('a folder that\'s kept stays, with all that\'s above it, whatever asks', async t => {
+  const { root, write } = folder(t);
+  write('users/me/Documents/a.txt', 'a');
+  write('users/other/b.txt', 'b');
+  const home = path.join(root, 'users/me');
+  const { taken, trash } = bin();
+  for (const named of [home, `${home}/`, path.join(root, 'users'), 'users/me/Documents/..']) {
+    await assert.rejects(trashEntry(root, named, { trash, keeps: [home] }), { code: 'bad_path' }, named);
+  }
+  assert.deepEqual(taken, []);
+  // What's in it goes as anything does, and so does what's beside it.
+  await trashEntry(root, 'users/me/Documents', { trash, keeps: [home] });
+  await trashEntry(root, 'users/other', { trash, keeps: [home] });
+  assert.deepEqual(taken, [path.join(home, 'Documents'), path.join(root, 'users/other')]);
 });
 

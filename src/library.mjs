@@ -180,6 +180,11 @@ export class Library {
     return this.#read({ op: 'image', sessionId, id });
   }
 
+  // The file an Artifact call published: `{path}`, or nothing. `file` is the transcript, when it's known.
+  artifact(sessionId, id, file) {
+    return this.#read({ op: 'artifact', sessionId, id, file });
+  }
+
   // Its transcript and its subagents' are gone from this Mac after this.
   async delete(sessionId) {
     await this.#read({ op: 'delete', sdk: await this.prepare(), sessionId });

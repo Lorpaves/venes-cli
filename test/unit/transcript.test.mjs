@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  TranscriptTail, followTranscripts, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand, shellOutput, signalsFrom,
+  TranscriptTail, findArtifact, followTranscripts, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand, shellOutput,
+  signalsFrom,
   unwrapPasted,
 } from '../../src/transcript.mjs';
 
@@ -758,4 +759,55 @@ test('a page that starts at what a line printed reaches back to the line', () =>
   try {
     assert.deepEqual(shown(readHistory(file, { limit: 3 })), ['!pwd', 'output', 'It is /w.', 'turn_end']);
   } finally { cleanup(); }
+});
+
+// As Claude Code keeps an Artifact call: the call, its result with what was published kept beside it, and
+// the same blocks again in what it sent the model, which has no such thing beside it.
+const artifactRecords = ({ id = 'toolu_page', name = 'Artifact', asked = '/tmp/asked.html', published = '/tmp/published.html' } = {}) => [
+  { type: 'assistant', timestamp: '2026-11-15T05:59:40.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input: { file_path: asked, icon: 'gauge' } }] } },
+  {
+    type: 'user', timestamp: '2026-11-15T05:59:45.000Z',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Published ${published}` }] },
+    ...(published && { toolUseResult: { url: 'https://claude.ai/artifact/abc', path: published, title: 'A page', artifact_id: 'x', seq: 1 } }),
+  },
+  { type: 'api-request-blob', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Published ${published}` }] } },
+];
+
+test('in history an Artifact call has the page it published: where it is, its file and its title', t => {
+  const { file, cleanup } = tempFile(artifactRecords().map(line).join(''));
+  t.after(cleanup);
+  const item = readHistory(file).items.find(entry => entry.role === 'tool');
+  assert.deepEqual([item.name, item.page], ['Artifact', { url: 'https://claude.ai/artifact/abc', path: '/tmp/published.html', title: 'A page' }]);
+  // A call of another tool has no page, whatever was kept with its result.
+  const other = tempFile(artifactRecords({ name: 'Write' }).map(line).join(''));
+  t.after(other.cleanup);
+  assert.equal(readHistory(other.file).items.find(entry => entry.role === 'tool').page, undefined);
+});
+
+test('the file an Artifact call published is found by the call\'s id, and no other call\'s leads to a file', t => {
+  const { file, cleanup } = tempFile([
+    ...artifactRecords(),
+    ...artifactRecords({ id: 'toolu_unkept', published: null }),
+    ...artifactRecords({ id: 'toolu_write', name: 'Write', asked: '/etc/passwd', published: '/etc/passwd' }),
+    ...artifactRecords({ id: 'toolu_relative', asked: 'page.html', published: null }),
+  ].map(line).join(''));
+  t.after(cleanup);
+  // What the result kept, which is what was published.
+  assert.deepEqual(findArtifact(file, 'toolu_page'), { path: '/tmp/published.html' });
+  // With nothing kept, as when it's still running, the file the call was given.
+  assert.deepEqual(findArtifact(file, 'toolu_unkept'), { path: '/tmp/asked.html' });
+  // Another tool's call names a file too, and that's not a page.
+  assert.equal(findArtifact(file, 'toolu_write'), undefined);
+  // A path that isn't whole says nothing of where the file is.
+  assert.equal(findArtifact(file, 'toolu_relative'), undefined);
+  for (const id of ['toolu_nobody', '', undefined, 7]) assert.equal(findArtifact(file, id), undefined);
+  assert.equal(findArtifact(path.join(path.dirname(file), 'none.jsonl'), 'toolu_page'), undefined);
+});
+
+test('a call is found in a transcript far longer than is read at once, and across where a read ends', t => {
+  // Lines long enough that the call's own straddles the end of a megabyte.
+  const filler = line({ type: 'user', message: { role: 'user', content: 'x'.repeat(700_000) } });
+  const { file, cleanup } = tempFile([filler, ...artifactRecords().map(line), filler, filler].join(''));
+  t.after(cleanup);
+  assert.deepEqual(findArtifact(file, 'toolu_page'), { path: '/tmp/published.html' });
 });

@@ -2305,6 +2305,39 @@ T('a_change_is_staged_committed_and_the_branch_switched', { mode: 'bypassPermiss
   }
 });
 
+// A page published with the Artifact tool is private to its account on claude.ai, so a phone has it from the
+// file it was made from. Nothing is published here: the call is written into the session's own transcript the
+// way Claude Code writes one, which is all the helper goes by.
+T('a_page_a_session_published_is_read_from_its_file', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word PAGE.');
+  await r.turnEnd();
+  const { id: sessionId } = await r.session();
+  const { transcriptPath } = (await r.client.request('sessions')).sessions.find(s => s.id === sessionId);
+  const page = path.join(WS, 'e2e-page.html');
+  fs.writeFileSync(page, '<title>E2E</title>\n<p>页</p>\n');
+  const call = (id, name, kept) => [
+    { type: 'assistant', timestamp: new Date().toISOString(), sessionId, message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input: { file_path: page } }] } },
+    {
+      type: 'user', timestamp: new Date().toISOString(), sessionId,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Published ${page}` }] }, ...(kept && { toolUseResult: kept }),
+    },
+  ];
+  const kept = { url: 'https://claude.ai/artifact/e2e', path: page, title: 'E2E page', artifact_id: 'e2e', seq: 1 };
+  fs.appendFileSync(transcriptPath, [...call('toolu_e2e_page', 'Artifact', kept), ...call('toolu_e2e_write', 'Write')].map(record => `${JSON.stringify(record)}\n`).join(''));
+  assert.equal((await r.client.request('artifact', { sessionId, toolUseId: 'toolu_e2e_page' })).text, '<title>E2E</title>\n<p>页</p>\n');
+  // Only an Artifact call's file, and only by the call: another tool's call names a file too, and a path from a
+  // client names nothing.
+  for (const asked of [{ toolUseId: 'toolu_e2e_write' }, { toolUseId: 'toolu_nobody' }, { path: page }, { toolUseId: page }]) {
+    await assert.rejects(r.client.request('artifact', { sessionId, ...asked }), { code: 'unknown_artifact' });
+  }
+  // In the session's history the call has its page: where it is, its file and its title.
+  const { items } = await r.client.request('history', { sessionId, limit: 20 });
+  assert.deepEqual(items.find(item => item.toolUseId === 'toolu_e2e_page')?.page, { url: kept.url, path: page, title: kept.title });
+  assert.equal(items.find(item => item.toolUseId === 'toolu_e2e_write')?.page, undefined);
+  fs.rmSync(page);
+  await assert.rejects(r.client.request('artifact', { sessionId, toolUseId: 'toolu_e2e_page' }), { code: 'artifact_gone' });
+});
+
 T('a_session_has_the_repositories_inside_where_it_started', { mode: 'bypassPermissions' }, async r => {
   const { id: sessionId } = await r.session();
   if (fs.existsSync(path.join(WS, '.git'))) throw new Error(`${WS} is a repository of its own, so nothing inside it is looked for`);

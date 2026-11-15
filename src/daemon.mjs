@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
+import { checkedToolUse, readArtifact } from './artifact.mjs';
 import { listFolder, readChunk, readFile } from './files.mjs';
 import {
   branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
@@ -515,6 +516,13 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const image = file ? readImage(file, msg.imageId) : await library.image(msg.sessionId, msg.imageId);
       if (!image?.data) throw new HelperError('unknown_image', 'This image is no longer in the transcript.');
       return image;
+    },
+    // The page an Artifact call published, as text, for a client to show where claude.ai's own is private to
+    // whoever published it. The file is the one the call's record names, and no other.
+    artifact: async ({ sessionId, toolUseId }) => {
+      const id = checkedToolUse(toolUseId);
+      const found = await library.artifact(sessionId, id, store.find(sessionId)?.transcriptPath).catch(() => undefined);
+      return readArtifact(found?.path);
     },
     // Nothing here awaits for a session the helper knows, so every event is either in this
     // reply or follows it on the wire.

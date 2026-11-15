@@ -371,6 +371,12 @@ Images stay out of pages and events, because a page can have dozens of them. `hi
 
 During a turn, `tool.images` and `message.images` say the same. They come from the transcript, so they can arrive after what they belong to. `tool.end.response` doesn't carry the image itself: its base64 is left out, and the rest stays.
 
+### Published pages
+
+A page a session publishes with Claude Code's Artifact tool is private on claude.ai to the account that published it, so a client that isn't signed in there has only a link. The page is made from a file on this Mac, and `artifact` gives that file: `{sessionId, toolUseId}`, the id of the Artifact call, answers `{text}`, the file's text. The helper finds the file from the call in the session's transcript, the path Claude Code kept with the call's result or else the one the call was given, and takes no path from the client, so a client can have only what a session published. A call of any other tool, or an id the transcript doesn't have, is `unknown_artifact`. A file that's gone is `artifact_gone`, one that isn't UTF-8 text `artifact_not_text`, and one over 16 MB, which is the most claude.ai takes for a page, `artifact_too_big`.
+
+In `history`, an Artifact call's item has `page`: the `url` on claude.ai, the `path` of the file and the `title`, as Claude Code kept them with the result, whose printed text has no title. A live call has the same in `tool.end`'s `response`.
+
 ### Attachments
 
 A message can come with pictures, videos and files: `upload` each one, then `send` their `uploadId`s as `attachments`, in the order they should go. `text` can then be empty. An upload is kept for its session, so `send` has to name the same `sessionId`.
@@ -503,6 +509,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `bad_path` | `files`, `fileRead`, `fileChunk`, `gitDiff`, `gitStage` or `gitUnstage` was given a path that leads out of the session's folder, or out of its repository, or no path at all |
 | `no_file`, `unreadable_file` | `fileRead` or `fileChunk` was asked for a file that has gone, or one that can't be read |
 | `bad_range` | `fileChunk` was asked for a piece that isn't part of the file |
+| `unknown_artifact` | `artifact` was asked for a call that isn't an Artifact call in that session |
+| `artifact_gone`, `artifact_not_text`, `artifact_too_big` | The file a page was published from has gone, isn't UTF-8 text, or is over 16 MB |
 | `no_repository` | A git command was sent for a session that has no repository |
 | `bad_repository` | A git command named a `root` that isn't one of the session's repositories |
 | `bad_commit` | `gitCommit` or `gitDiff` was given something that isn't a commit of the repository |

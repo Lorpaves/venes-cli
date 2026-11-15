@@ -368,15 +368,90 @@ function subagentTranscripts(transcript) {
   return byParent;
 }
 
-function addToolBlock(block, at, items, tools) {
+// Claude Code's tool for publishing a page to claude.ai.
+const ARTIFACT_TOOL = 'Artifact';
+// How much of a transcript is read at a time when looking through all of it.
+const SEARCH_BYTES = 1024 * 1024;
+
+// The page an Artifact call published, as Claude Code kept it with the call's result: where it is on
+// claude.ai, the file on this Mac it was made from, and its title. What the result prints has no title.
+function pageOf(record) {
+  const { url, path: file, title } = record?.toolUseResult ?? {};
+  const page = {
+    ...(typeof url === 'string' && { url }), ...(typeof file === 'string' && { path: file }), ...(typeof title === 'string' && { title }),
+  };
+  return Object.keys(page).length ? page : undefined;
+}
+
+function addToolBlock(block, at, items, tools, record) {
   if (block.type === 'tool_use') {
     const item = { role: 'tool', at, toolUseId: block.id, name: block.name, input: block.input };
     tools.set(block.id, item);
     items.push(item);
   } else if (block.type === 'tool_result') {
     const item = tools.get(block.tool_use_id);
-    if (item) Object.assign(item, { result: resultText(block), isError: !!block.is_error });
+    if (!item) return;
+    Object.assign(item, { result: resultText(block), isError: !!block.is_error });
+    const page = item.name === ARTIFACT_TOOL ? pageOf(record) : undefined;
+    if (page) item.page = page;
   }
+}
+
+// The lines of a file that have `needle` in them, without holding the file: a transcript can be hundreds of
+// megabytes, and one call's records are a line or two of it.
+function* linesNaming(file, needle) {
+  const wanted = Buffer.from(needle);
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  try {
+    const chunk = Buffer.alloc(SEARCH_BYTES);
+    let rest = Buffer.alloc(0);
+    for (;;) {
+      const length = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (!length) break;
+      const data = rest.length ? Buffer.concat([rest, chunk.subarray(0, length)]) : chunk.subarray(0, length);
+      let start = 0;
+      for (let end = data.indexOf(0x0a, start); end >= 0; end = data.indexOf(0x0a, start)) {
+        const line = data.subarray(start, end);
+        if (line.includes(wanted)) yield line.toString();
+        start = end + 1;
+      }
+      rest = Buffer.from(data.subarray(start));
+    }
+    if (rest.includes(wanted)) yield rest.toString();
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// The file an Artifact call published, by the call's id: the path its result kept, or else the one the call
+// was given. Undefined for an id that's no Artifact call's in this transcript, so that the id of any other
+// call, which may name any file, leads nowhere.
+export function findArtifact(file, toolUseId) {
+  if (typeof toolUseId !== 'string' || !toolUseId) return undefined;
+  let isArtifact = false;
+  let asked;
+  let published;
+  for (const line of linesNaming(file, toolUseId)) {
+    const record = parseLine(line);
+    const blocks = Array.isArray(record?.message?.content) ? record.message.content : [];
+    for (const block of blocks) {
+      if (block?.type === 'tool_use' && block.id === toolUseId) {
+        isArtifact = block.name === ARTIFACT_TOOL;
+        asked = block.input?.file_path;
+      } else if (block?.type === 'tool_result' && block.tool_use_id === toolUseId) {
+        published = record.toolUseResult?.path ?? published;
+      }
+    }
+  }
+  if (!isArtifact) return undefined;
+  const found = [published, asked].find(candidate => typeof candidate === 'string' && path.isAbsolute(candidate));
+  return found ? { path: found } : undefined;
 }
 
 function subagentCalls(file, parentToolUseId) {
@@ -384,7 +459,7 @@ function subagentCalls(file, parentToolUseId) {
   const tools = new Map();
   for (const record of readRecords(file)) {
     for (const block of blocksOf(record)) {
-      if (block) addToolBlock(block, record.timestamp, items, tools);
+      if (block) addToolBlock(block, record.timestamp, items, tools, record);
     }
   }
   return items.map(item => ({ ...item, parentToolUseId }));
@@ -446,7 +521,7 @@ function conversationItems(file) {
       const first = items.length;
       for (const block of blocksOf(record)) {
         if (!block) continue;
-        addToolBlock(block, at, items, tools);
+        addToolBlock(block, at, items, tools, record);
         if (block.type === 'thinking' && (block.thinking || record.thinkingDurationMs)) {
           items.push({ role: 'thinking', at, text: block.thinking ?? '', durationMs: record.thinkingDurationMs });
         } else if (block.type === 'text') {

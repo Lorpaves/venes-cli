@@ -161,6 +161,17 @@ function latestLimits(dir, sessionId) {
 
 const withoutEmpty = object => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined && value !== null));
 
+// Where Claude Code says a session started, and the folders added to it since, from what its status
+// line was last told: nothing before it has run. A session's repositories are looked for there.
+export function readWorkspace(dir, sessionId) {
+  const workspace = readJSON(statusFile(dir, sessionId))?.workspace;
+  const folder = value => (typeof value === 'string' && path.isAbsolute(value) ? value : undefined);
+  return {
+    projectDir: folder(workspace?.project_dir),
+    addedDirs: (Array.isArray(workspace?.added_dirs) ? workspace.added_dirs : []).map(folder).filter(Boolean),
+  };
+}
+
 // What the phone shows of a session, from what its status line was last told: undefined until
 // Claude Code has run it. Limits are there with a plan that has them; with an API that has none,
 // there's the cost instead.

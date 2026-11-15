@@ -37,7 +37,7 @@ import {
 } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { screenAccess, sshAccess } from './ssh.mjs';
-import { pruneStatus, readStatus } from './status.mjs';
+import { pruneStatus, readStatus, readWorkspace } from './status.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
@@ -313,7 +313,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const repositoriesFor = async sessionId => {
     const now = await folderOf(sessionId);
     const session = store.find(sessionId);
-    return repositoriesOf({ now, recent: session?.folders, start: session?.startFolder ?? now });
+    // Claude Code's own word for where the session started comes first: the helper may have met the
+    // session part way through, as after it has started again, and then knows only where it was by then.
+    const { projectDir, addedDirs } = readWorkspace(statusDir, sessionId);
+    return repositoriesOf({ now, recent: [...(session?.folders ?? []), ...addedDirs], start: projectDir ?? session?.startFolder ?? now });
   };
   // The repository a git command is for: the one it names, which has to be one of the session's, or
   // with none named the first of them.

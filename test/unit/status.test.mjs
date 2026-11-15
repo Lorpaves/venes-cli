@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  checkedOutBranch, installStatusLine, keepStatus, pruneStatus, readStatus, removeStatusLine, standInCommand, statusFile, switchOnStatusLine,
+  checkedOutBranch, installStatusLine, keepStatus, pruneStatus, readStatus, readWorkspace, removeStatusLine, standInCommand, statusFile, switchOnStatusLine,
 } from '../../src/status.mjs';
 
 const STATUS = fileURLToPath(new URL('../../src/status.mjs', import.meta.url));
@@ -197,4 +197,15 @@ test('the branch checked out is asked of git, and is none outside a repository',
   execFileSync('git', ['init', '-q', '-b', 'feature-x', dir]);
   assert.equal(await checkedOutBranch(dir), 'feature-x');
   assert.equal(await checkedOutBranch(undefined), undefined);
+});
+
+test('where a session started, and the folders added to it, are as its status line was told', t => {
+  const dir = tempDir(t);
+  keepStatus(dir, JSON.stringify(input({ session_id: 'w', workspace: { current_dir: '/w/app/ios', project_dir: '/w/app', added_dirs: ['/w/other', 'relative', 7, '/w/more'] } })));
+  assert.deepEqual(readWorkspace(dir, 'w'), { projectDir: '/w/app', addedDirs: ['/w/other', '/w/more'] });
+  keepStatus(dir, JSON.stringify(input({ session_id: 'odd', workspace: { project_dir: 'not/absolute', added_dirs: 'none' } })));
+  assert.deepEqual(readWorkspace(dir, 'odd'), { projectDir: undefined, addedDirs: [] });
+  keepStatus(dir, JSON.stringify(input({ session_id: 'bare', workspace: undefined })));
+  assert.deepEqual(readWorkspace(dir, 'bare'), { projectDir: undefined, addedDirs: [] });
+  assert.deepEqual(readWorkspace(dir, 'nobody'), { projectDir: undefined, addedDirs: [] }, 'none before Claude Code has run its status line');
 });

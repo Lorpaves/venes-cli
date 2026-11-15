@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, showsDialog } from '../../src/agyscreen.mjs';
+import { asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog } from '../../src/agyscreen.mjs';
 import { choicesOf } from '../../src/prompt.mjs';
 
 // Screens as Antigravity's terminal drew them (1.5.8), 110 columns across.
@@ -66,4 +66,20 @@ test('what\'s open, what waits, and what isn\'t Antigravity at all', () => {
   assert.deepEqual([IDLE, WORKING, COMMAND, MENU, TRUST, TYPING].map(isUp), [true, true, true, true, true, true]);
   assert.deepEqual(['lorpaves@mac ~ % ', '', 'zsh: command not found: agy'].map(isUp), [false, false, false]);
   assert.deepEqual([asksTrust(TRUST), hasTrustPicked(TRUST), hasTrustPicked(TRUST.replace('> Yes', '  Yes').replace('  No', '> No')), asksTrust(IDLE)], [true, true, false, false]);
+});
+
+test('a document that waits to be looked over is a line over the box, and is answered in a panel of its own', () => {
+  // As the terminal drew them after a turn in plan mode, and with /artifact opened (1.5.8).
+  const hint = count => ['  I have created the plan for your review.', `${' '.repeat(80)}${count} artifact${count === 1 ? '' : 's'} · /artifact to review`, RULE, '>', RULE,
+    bar('? for shortcuts', 'plan · Gemini 4 Hydrogen · medium')].join('\n');
+  const panel = left => [RULE, '>', RULE, `Action required (${left} left)`, '› □ new implementation_plan.md   open  approve reject', '    │ 1. Open `note.txt`.', '    │ 2. Append a line.',
+    'Keyboard: ↑/↓ Navigate  y/n Approve/reject  shift+a Approve all  p Preview  ctrl+g open in editor  esc Done', bar('', 'plan · Gemini 4 Hydrogen · medium')].join('\n');
+  assert.deepEqual([reviewsWaiting(hint(1)), reviewsWaiting(hint(3)), reviewsWaiting(IDLE), reviewsWaiting(WORKING), reviewsWaiting(''), reviewsWaiting(undefined)], [1, 3, 0, 0, 0, 0]);
+  // The line is there while it waits for a message, and the session is still up and at rest.
+  assert.deepEqual([isIdle(hint(1)), isUp(hint(1)), readBar(hint(1)).mode, readPrompt(hint(1))], [true, true, 'plan', undefined]);
+  // Said further up, as in what Antigravity wrote, it isn't the line.
+  assert.equal(reviewsWaiting(['1 artifact · /artifact to review', ...Array.from({ length: 14 }, () => 'more'), RULE, '>', RULE, bar('? for shortcuts', 'Gemini 4 Hydrogen · xhigh')].join('\n')), 0);
+  assert.deepEqual([readReview(panel(1)), readReview(panel(2)), readReview(hint(1)), readReview(IDLE), readReview(COMMAND), readReview(undefined)], [{ left: 1 }, { left: 2 }, undefined, undefined, undefined, undefined]);
+  // The panel is Antigravity's own page: still up, not at rest, and no prompt with rows to press.
+  assert.deepEqual([isUp(panel(1)), isIdle(panel(1)), readPrompt(panel(1))], [true, false, undefined]);
 });

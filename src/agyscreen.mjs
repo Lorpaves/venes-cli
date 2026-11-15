@@ -100,5 +100,31 @@ export function isUp(screen) {
   return Boolean(readBar(screen)) || showsDialog(screen);
 }
 
+// A document Antigravity wrote for the reader to look over first, as the plan it writes in plan mode is,
+// waits behind a line over the box, "1 artifact · /artifact to review", and is answered in the panel
+// that command opens: "Action required (1 left)", a row for each, and its keys, "y/n Approve/reject".
+const REVIEW_HINT = /(\d+) artifacts? · \/artifact to review/;
+const REVIEW_PANEL = /Action required \((\d+) left\)/;
+const REVIEW_KEYS = /\by\/n Approve\/reject\b/;
+export const REVIEW_COMMAND = '/artifact';
+export const REVIEW_YES = 'y';
+export const REVIEW_NO = 'n';
+
+// The line is a few up from the bar: over the box, and the rules either side of it.
+const REVIEW_HINT_LINES = 12;
+
+// How many documents wait to be looked over, by the line that says so.
+export function reviewsWaiting(screen) {
+  const found = REVIEW_HINT.exec(linesOf(`${screen ?? ''}`).slice(-REVIEW_HINT_LINES).join('\n'));
+  return found ? Number(found[1]) : 0;
+}
+
+// The panel the documents are answered in, when it's open: how many are left to answer.
+export function readReview(screen) {
+  const shown = linesOf(`${screen ?? ''}`).join('\n');
+  const found = REVIEW_PANEL.exec(shown);
+  return found && REVIEW_KEYS.test(shown) ? { left: Number(found[1]) } : undefined;
+}
+
 export const asksTrust = screen => TRUST_QUESTION.test(screen);
 export const hasTrustPicked = screen => TRUST_PICKED.test(screen);

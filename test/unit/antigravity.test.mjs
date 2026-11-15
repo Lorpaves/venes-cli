@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  AGENT, Antigravity, conversationFiles, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, pictureSourcesOf, picturesOf, readPicture, requestOf,
-  resultOf, runsIn, saidPictures, stepsIn, toolOf, transcriptOf, typedText,
+  AGENT, Antigravity, asksReview, conversationFiles, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, pictureSourcesOf, picturesOf, readPicture, requestOf,
+  resultOf, reviewIn, reviewRequest, runsIn, saidOf, saidPictures, stepsIn, toolOf, transcriptOf, typedText,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -34,6 +34,16 @@ const result = (index, printed, { status = 'DONE', error } = {}) => ({
   content: `Created At: 2026-11-15T10:32:25Z\nCompleted At: 2026-11-15T10:32:25Z\nCreated At: 2026-11-15T10:32:25Z\nCompleted At: 2026-11-15T10:32:25Z\n${printed}`,
 });
 const READ = { name: 'read_file', args: { Path: '/w/note.txt' } };
+// The plan Antigravity writes in plan mode: a file of its own, written to be looked over first.
+const PLAN = {
+  name: 'write_file',
+  args: { Path: '/data/brain/9a2b/implementation_plan.md', Content: '1. Look\n2. Fix\n', Overwrite: true, ArtifactMetadata: { RequestFeedback: true, UserFacing: true, Summary: 'A plan' } },
+};
+// What its terminal shows while the plan waits, and the panel it's answered in.
+const reviewHint = (count = 1) => ['  I have written the plan for your review.', `${' '.repeat(40)}${count} artifact${count === 1 ? '' : 's'} · /artifact to review`, RULE, '> ', RULE,
+  bar('? for shortcuts', 'plan · Gemini 4 Hydrogen · xhigh')].join('\n');
+const reviewPanel = (left = 1) => [RULE, '>', RULE, `Action required (${left} left)`, '› □ new implementation_plan.md   open  approve reject',
+  'Keyboard: ↑/↓ Navigate  y/n Approve/reject  shift+a Approve all  p Preview  ctrl+g open in editor  esc Done', `${' '.repeat(40)}plan · Gemini 4 Hydrogen · xhigh`].join('\n');
 const RUN = { name: 'run_command', args: { CommandLine: 'echo done', WaitMsBeforeAsync: 5000, toolSummary: 'Echo done' } };
 const RAN = 'Command exited with code 0.\n\nCommand output:\ndone\r\n';
 
@@ -257,6 +267,146 @@ test('nothing is typed while something is open in the terminal, or with no termi
   const bare = setup(t);
   await bare.hook('SessionStart', {}, {});
   await assert.rejects(bare.agent.send({ sessionId: ID, text: 'hello' }), { code: 'no_pane' });
+});
+
+test('what\'s said in plan mode is told without the command Antigravity puts before it', async t => {
+  assert.deepEqual([saidOf('/plan write a plan'), saidOf('/plan\twrite'), saidOf('/planning ahead'), saidOf('/plan'), saidOf('a /plan b'), saidOf(undefined)],
+    ['write a plan', 'write', '/planning ahead', '/plan', 'a /plan b', '']);
+  assert.deepEqual([requestOf(user(0, '/plan write a plan').content), requestOf(user(0, '[Approved] implementation_plan.md\n').content)], ['write a plan', '[Approved] implementation_plan.md']);
+  assert.equal(historyOf([user(0, '/plan write a plan'), reply(1, { content: 'Here.' })])[0].text, 'write a plan');
+
+  // A message typed from a client in plan mode is the client's own, though Antigravity kept it otherwise.
+  const { agent, events, hook } = setup(t);
+  await hook('SessionStart');
+  await agent.send({ sessionId: ID, text: 'write a plan', clientId: 'c1' });
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: '/plan write a plan' });
+  assert.deepEqual(events.filter(event => event.kind === 'message.user').map(event => [event.text, event.clientId]), [['write a plan', 'c1']]);
+  // One typed at the Mac is told as it was said, and the command itself typed from a client is its own too.
+  await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 3, lastUserInput: '/plan again' });
+  await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
+  await agent.send({ sessionId: ID, text: '/plan once more', clientId: 'c2' });
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 5, lastUserInput: '/plan once more' });
+  assert.deepEqual(events.filter(event => event.kind === 'message.user').slice(1).map(event => [event.text, event.clientId]), [['again', undefined], ['/plan once more', 'c2']]);
+});
+
+test('a document written to be looked over is a proposed plan, and the one that waits is the last with nothing said since', () => {
+  assert.deepEqual([asksReview(PLAN), asksReview({ name: 'write_file', args: { Path: '/w/a.txt', Content: 'a' } }), asksReview({ ...PLAN, name: 'edit_file' }),
+    asksReview({ name: 'write_file', args: { ...PLAN.args, ArtifactMetadata: { RequestFeedback: false, UserFacing: true } } }), asksReview()], [true, false, false, false, false]);
+  assert.deepEqual(toolOf(PLAN), { name: 'ExitPlanMode', input: { plan: '1. Look\n2. Fix\n' } });
+  assert.deepEqual(toolOf({ name: 'write_file', args: { Path: '/w/a.txt', Content: 'a' } }), { name: 'Write', input: { file_path: '/w/a.txt', content: 'a' } });
+  const steps = [user(0, '/plan it'), reply(1, { calls: [PLAN] }), result(2, 'Created file'), reply(3, { content: 'For your review.' })];
+  assert.deepEqual(reviewIn(steps), { call: PLAN, index: 2 });
+  // The later of two, and none once it's been answered, or with nothing written to look over.
+  const again = { ...PLAN, args: { ...PLAN.args, Content: 'Shorter' } };
+  assert.equal(reviewIn([...steps, user(4, '/plan shorter'), reply(5, { calls: [READ, again] }), result(6, 'x'), result(7, 'Created file')]).index, 7);
+  assert.deepEqual([reviewIn([...steps, user(4, '[Approved] implementation_plan.md')]), reviewIn([user(0, 'hi'), reply(1, { calls: [READ] })]), reviewIn([])], [undefined, undefined, undefined]);
+  // In history it's the same call.
+  const [, call] = historyOf(steps);
+  assert.deepEqual([call.role, call.name, call.toolUseId, call.input], ['tool', 'ExitPlanMode', 'step-2', { plan: '1. Look\n2. Fix\n' }]);
+
+  const { fields, decide } = reviewRequest(PLAN, 2);
+  assert.deepEqual(fields, { kind: 'plan', agent: AGENT, toolName: 'ExitPlanMode', toolUseId: 'step-2', input: { plan: '1. Look\n2. Fix\n' }, options: [{ id: 'approve', label: 'Approve' }] });
+  assert.deepEqual([decide({ decision: 'allow' }), decide({ decision: 'allow', option: 'approve' }), decide({ decision: 'deny' }), decide({ decision: 'deny', message: '  ' }), decide({ decision: 'deny', message: ' Less. ' })],
+    [{ key: 'y' }, { key: 'y' }, { key: 'n' }, { key: 'n' }, { followUp: 'Less.' }]);
+  assert.throws(() => decide({ decision: 'allow', option: '2' }), { code: 'bad_option' });
+  assert.throws(() => decide({ decision: 'maybe' }), { code: 'bad_decision' });
+});
+
+// A session whose turn wrote a plan to be looked over, with the terminal saying it waits.
+async function planned(t, options) {
+  const made = setup(t, options);
+  const { terminal, write, hook, store, until } = made;
+  await hook('SessionStart');
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: '/plan it' });
+  write([user(0, '/plan it'), reply(1, { calls: [PLAN] }), result(2, 'Created file'), reply(3, { content: 'For your review.' })]);
+  await hook('PostToolUse', { stepIdx: 2, toolCall: PLAN });
+  terminal.screen = reviewHint();
+  await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
+  await until(() => store.requests().length === 1, 'the plan\'s request');
+  return made;
+}
+
+test('a plan that waits to be looked over is asked about, and a yes is its key in Antigravity\'s own panel', async t => {
+  const { agent, store, events, terminal, hook, until, kinds } = await planned(t);
+  const [request] = store.requests();
+  assert.deepEqual([request.kind, request.agent, request.toolName, request.toolUseId, request.input, request.options],
+    ['plan', AGENT, 'ExitPlanMode', 'step-2', { plan: '1. Look\n2. Fix\n' }, [{ id: 'approve', label: 'Approve' }]]);
+  // The plan was told as a proposed plan, and it's asked about once the turn is over, and once.
+  const started = events.find(event => event.kind === 'tool.start');
+  assert.deepEqual([started.name, started.toolUseId, started.input], ['ExitPlanMode', 'step-2', { plan: '1. Look\n2. Fix\n' }]);
+  assert.ok(kinds().indexOf('turn.end') < kinds().indexOf('request.opened'));
+  assert.equal(store.get(ID).status, 'waiting');
+  await new Promise(resolve => { setTimeout(resolve, 80); });
+  assert.deepEqual([store.requests().length, store.get(ID).status, kinds().filter(kind => kind === 'request.opened').length], [1, 'waiting', 1]);
+  // A client that joins has it, and the turn as history.
+  const joined = await agent.join({ sessionId: ID });
+  assert.deepEqual([joined.requests.map(open => open.kind), joined.turn, joined.items.map(item => item.role)], [['plan'], [], ['user', 'tool', 'assistant', 'turn_end']]);
+  // The mode can be switched past it, as at the Mac.
+  assert.deepEqual(await agent.setMode({ sessionId: ID, mode: 'plan' }), {});
+
+  // Yes: the panel is opened with its command, and its key pressed until the panel has gone.
+  terminal.keys.length = 0;
+  terminal.onKey = key => {
+    if (key === 'Enter') terminal.screen = reviewPanel(2);
+    else if (key === 'y') terminal.screen = terminal.keys.filter(pressed => pressed === 'y').length < 2 ? reviewPanel(1) : BUSY;
+  };
+  store.respond(request.id, { decision: 'allow', option: 'approve' });
+  await until(() => terminal.keys.filter(key => key === 'y').length === 2, 'both keys');
+  assert.deepEqual([terminal.pasted, terminal.keys], [['/artifact'], ['Enter', 'y', 'y']]);
+  assert.deepEqual([events.findLast(event => event.kind === 'request.closed').decision, events.findLast(event => event.kind === 'request.closed').by, store.get(ID).status], ['allow', 'client', 'running']);
+  // Antigravity says so itself, as the next thing said, and nothing's asked again.
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 5, lastUserInput: '[Approved] implementation_plan.md' });
+  assert.deepEqual([events.findLast(event => event.kind === 'message.user').text, store.requests().length], ['[Approved] implementation_plan.md', 0]);
+});
+
+test('a plan sent back with what to change is typed as a message, and a bare no is the panel\'s own', async t => {
+  const first = await planned(t);
+  const [request] = first.store.requests();
+  first.terminal.keys.length = 0;
+  first.terminal.screen = reviewHint();
+  first.store.respond(request.id, { decision: 'deny', message: ' Make it shorter. ' });
+  await first.until(() => first.terminal.keys.length === 1, 'the message sent');
+  assert.deepEqual([first.terminal.pasted, first.terminal.keys, first.store.get(ID).status], [['Make it shorter.'], ['Enter'], 'running']);
+
+  const second = await planned(t);
+  second.terminal.keys.length = 0;
+  second.terminal.onKey = key => { second.terminal.screen = key === 'Enter' ? reviewPanel(1) : BUSY; };
+  second.store.respond(second.store.requests()[0].id, { decision: 'deny' });
+  await second.until(() => second.terminal.keys.length === 2, 'the panel\'s no');
+  assert.deepEqual([second.terminal.pasted, second.terminal.keys], [['/artifact'], ['Enter', 'n']]);
+
+  // A panel that doesn't open leaves nothing answered, puts away what did, and the plan is asked about again.
+  const third = await planned(t);
+  third.terminal.keys.length = 0;
+  third.store.respond(third.store.requests()[0].id, { decision: 'allow' });
+  await third.until(() => third.terminal.keys.includes('Escape'), 'what opened put away');
+  assert.deepEqual(third.terminal.keys, ['Enter', 'Escape']);
+  await third.until(() => third.store.requests().length === 1, 'asked again');
+  assert.equal(third.store.get(ID).status, 'waiting');
+});
+
+test('a plan answered at the Mac, or put away there, stops being asked about', async t => {
+  const { store, events, terminal, hook, write } = await planned(t);
+  // Something said in the terminal starts a turn, which is the answer.
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 5, lastUserInput: '[Rejected] implementation_plan.md' });
+  assert.deepEqual([store.requests().length, events.findLast(event => event.kind === 'request.closed').by, store.get(ID).status], [0, 'terminal', 'running']);
+  // Answered, it isn't asked about again, whatever the screen still says.
+  write([user(0, '/plan it'), reply(1, { calls: [PLAN] }), result(2, 'Created file'), reply(3, { content: 'For your review.' }),
+    user(4, '[Rejected] implementation_plan.md'), reply(5, { content: 'What should change?' })]);
+  terminal.screen = reviewHint();
+  await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
+  await new Promise(resolve => { setTimeout(resolve, 80); });
+  assert.equal(store.requests().length, 0, 'nothing waits once it\'s been answered');
+
+  // The line gone from the screen with no turn, it's no longer waited on.
+  const other = await planned(t);
+  other.terminal.screen = idleIn('plan');
+  await other.until(() => other.store.requests().length === 0, 'its end');
+  assert.deepEqual([other.events.findLast(event => event.kind === 'request.closed').by, other.store.get(ID).status], ['terminal', 'idle']);
+  // With no line there's nothing to ask, whatever the conversation has.
+  await new Promise(resolve => { setTimeout(resolve, 80); });
+  assert.equal(other.store.requests().length, 0);
 });
 
 test('a prompt in the terminal is a request, answered by pressing its row', async t => {

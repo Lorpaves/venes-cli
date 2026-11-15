@@ -24,7 +24,9 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
-import { MODE_IDS, asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, showsDialog } from './agyscreen.mjs';
+import {
+  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog,
+} from './agyscreen.mjs';
 import { mediaTypeOf, moveToTrash } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
 import { checkedFolder } from './folders.mjs';
@@ -68,6 +70,8 @@ const STEP_WAIT_MS = 1500;
 const STEP_CHECK_MS = 100;
 // More presses than there are modes to go round.
 const MOST_MODE_PRESSES = 6;
+// A turn rarely leaves more than a document or two to look over.
+const MOST_REVIEW_PRESSES = 12;
 const KEY_LIMIT_MS = 2000;
 const KEY_CHECK_MS = 50;
 // A command of the terminal's own said what it did within a second when measured.
@@ -200,8 +204,12 @@ export function stepsIn(text) {
 }
 
 const USER_REQUEST = /<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>/;
+// In plan mode Antigravity puts its own command before what's typed, "/plan ", and keeps the message
+// and shows it that way. What was said is what follows it.
+const PLAN_COMMAND = /^\/plan[ \t]+(?=\S)/;
+export const saidOf = text => `${text ?? ''}`.replace(PLAN_COMMAND, '');
 // What someone said, out of what Antigravity wraps it in for the model.
-export const requestOf = content => (typeof content === 'string' ? (content.match(USER_REQUEST)?.[1] ?? content) : '');
+export const requestOf = content => (typeof content === 'string' ? saidOf((content.match(USER_REQUEST)?.[1] ?? content).trim()) : '');
 
 const isUserStep = step => step.type === 'USER_INPUT';
 const isReplyStep = step => step.type === 'PLANNER_RESPONSE';
@@ -269,6 +277,39 @@ export function picturesOf(step, root) {
 }
 
 // A call as a client is told of it, in a Claude Code call's shape where it has one: its name, and what it was given.
+// A document Antigravity writes for the reader to look over before it goes on, as the plan it writes
+// in plan mode is (implementation_plan.md): it says so with the file, and waits for an answer to it.
+export const PLAN_TOOL = 'ExitPlanMode';
+export const asksReview = ({ name, args } = {}) => name === 'write_file' && args?.ArtifactMetadata?.RequestFeedback === true;
+// Its own words for a yes, in the panel a document is answered in.
+const REVIEW_OPTION = { id: 'approve', label: 'Approve' };
+
+// What's asked about a document that waits: to approve it, which Antigravity goes on from, or not,
+// with what to change said or not. `key` is the panel's key for the answer, where the panel is how
+// it's given: what to change is typed as a message, which Antigravity plans again from.
+export function reviewRequest(call, index) {
+  return {
+    fields: { kind: 'plan', agent: AGENT, toolName: PLAN_TOOL, toolUseId: toolUseId(index), input: { plan: call.args?.Content ?? '' }, options: [REVIEW_OPTION] },
+    decide({ decision, option, message }) {
+      if (decision === 'deny') {
+        const said = typeof message === 'string' ? message.trim() : '';
+        return said ? { followUp: said } : { key: REVIEW_NO };
+      }
+      if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
+      if (option != null && option !== REVIEW_OPTION.id) throw new HelperError('bad_option', 'That choice isn\'t offered for this request. Choose again.');
+      return { key: REVIEW_YES };
+    },
+  };
+}
+
+// The document that waits for an answer, from a conversation's steps: the last one written to be
+// looked over, unless something's been said since, which is how it's answered.
+export function reviewIn(steps) {
+  const said = steps.findLastIndex(step => isUserStep(step));
+  const calls = steps.slice(said + 1).flatMap(step => (step.tool_calls ?? []).map((call, at) => ({ call, index: resultIndex(step, at) })));
+  return calls.findLast(({ call }) => asksReview(call));
+}
+
 export function toolOf({ name, args = {} } = {}) {
   const file = args.Path ?? args.AbsolutePath ?? args.TargetFile;
   switch (name) {
@@ -276,6 +317,9 @@ export function toolOf({ name, args = {} } = {}) {
     case 'view_file':
       return { name: 'Read', input: { file_path: file } };
     case 'write_file':
+      // A document for the reader to look over first is told as Claude Code's own call that ends its
+      // planning, which a client already shows as a proposed plan.
+      if (asksReview({ name, args })) return { name: PLAN_TOOL, input: { plan: args.Content ?? '' } };
       return { name: 'Write', input: { file_path: file, content: args.Content ?? '' } };
     case 'edit_file':
       return { name: 'Edit', input: { file_path: file, old_string: args.Target ?? '', new_string: args.Replacement ?? '' } };
@@ -473,6 +517,8 @@ function blankSession() {
     goneLooks: 0, isLooking: false,
     // Until when it's looked at as often as one at work: its bar is still being drawn when it starts.
     settlesAt: 0,
+    // The request made of a document that waits to be looked over, and how many looks found none waiting.
+    review: undefined, reviewLooks: 0,
   };
 }
 
@@ -739,7 +785,11 @@ export class Antigravity {
   #beginTurn(id, session, payload) {
     // A turn before this one that nothing ended was stopped, which no hook says.
     if (session.turn) this.#endTurn(id, session, { isInterrupted: true });
-    const said = typeof payload.lastUserInput === 'string' ? payload.lastUserInput : '';
+    // As Antigravity kept it, and as it was said: in plan mode those aren't the same.
+    const kept = typeof payload.lastUserInput === 'string' ? payload.lastUserInput : '';
+    const said = saidOf(kept.trim());
+    // Whatever started the turn, a document that waited has been answered, or left behind.
+    this.#closeReview(id, session);
     session.typed = session.typed.filter(typed => Date.now() - typed.at < TYPED_LIFETIME_MS);
     const steps = this.#steps(id);
     session.turn = { id: crypto.randomUUID(), messages: 0 };
@@ -748,7 +798,7 @@ export class Antigravity {
     // the model is then something other than what someone said, and nothing new was said.
     const last = steps.find(step => step.step_index === session.seen - 1);
     if (!last || isUserStep(last)) {
-      const at = session.typed.findIndex(typed => sameWords(typed.typed, said));
+      const at = session.typed.findIndex(typed => sameWords(typed.typed, said) || sameWords(typed.typed, kept));
       const [mine] = at >= 0 ? session.typed.splice(at, 1) : [];
       const text = mine?.text ?? said;
       this.#store.report(id, 'message.user', {
@@ -832,6 +882,9 @@ export class Antigravity {
     if (isInterrupted) report('turn.interrupted', {});
     else if (error) report('turn.error', { error });
     else report('turn.end', { lastMessage: this.#store.find(id)?.lastMessage, backgroundTasks: 0, tasks: [] });
+    // A document it wrote to be looked over is asked about once the screen says it waits, which is
+    // a moment after the turn's end.
+    session.settlesAt = Date.now() + SETTLE_MS;
   }
 
   #end(id, reason) {
@@ -849,7 +902,8 @@ export class Antigravity {
     for (const known of this.#store.liveSessions()) {
       if (known.agent !== AGENT || !known.pane) continue;
       const session = this.#session(known.id);
-      const isAtWork = Boolean(session.turn) || known.status === 'running' || known.status === 'waiting';
+      // One that only waits for a document to be looked over is at rest: nothing's going on in its terminal.
+      const isAtWork = Boolean(session.turn) || known.status === 'running' || (known.status === 'waiting' && !session.review);
       const every = isAtWork || now < session.settlesAt ? this.#timing.watch : this.#timing.rest;
       if (now - session.lastLookAt < every - 20 || session.isLooking) continue;
       session.lastLookAt = now;
@@ -884,8 +938,9 @@ export class Antigravity {
     this.#noteBar(id, bar);
     if (session.turn) this.#tell(id, session);
     this.#notePrompt(id, session, known, prompt);
+    this.#noteReview(id, session, screen);
     // Waiting for a message, twice over and with no hook since: the turn was stopped.
-    const isAtWork = Boolean(session.turn) || known.status === 'running' || known.status === 'waiting';
+    const isAtWork = Boolean(session.turn) || known.status === 'running' || (known.status === 'waiting' && !session.review);
     if (isAtWork && !prompt && isIdle(screen) && Date.now() - session.lastHookAt > this.#timing.watch) {
       session.idleLooks += 1;
       if (session.idleLooks >= 2) {
@@ -943,6 +998,90 @@ export class Antigravity {
     });
   }
 
+  // A document Antigravity wrote to be looked over, as its plan in plan mode, waits behind a line on
+  // the screen and nothing else: no hook tells of it, and no prompt opens. So while the session rests
+  // with that line showing, the document is asked about, as a plan is: the last one the conversation
+  // has that nothing's been said since. It's asked once, and again if the helper starts over.
+  #noteReview(id, session, screen) {
+    if (session.turn || !isIdle(screen)) return;
+    const waits = reviewsWaiting(screen) > 0;
+    if (session.review) {
+      // Twice without the line, it was answered or put away at the Mac, with no turn to say so.
+      session.reviewLooks = waits ? 0 : session.reviewLooks + 1;
+      if (session.reviewLooks >= 2) {
+        this.#closeReview(id, session);
+        this.#store.report(id, 'session.status', { status: 'idle' });
+      }
+      return;
+    }
+    const found = waits ? reviewIn(this.#steps(id)) : undefined;
+    if (!found) return;
+    const { fields, decide } = reviewRequest(found.call, found.index);
+    const { request, decision } = this.#store.ask(id, fields, decide);
+    session.review = request.id;
+    session.reviewLooks = 0;
+    decision.then(async answer => {
+      if (session.review === request.id) session.review = undefined;
+      const known = this.#typable(id);
+      if (!known) return;
+      let isSent = false;
+      try {
+        // Answered where a person at the Mac answers it, so Antigravity does all it does for that.
+        if (answer?.key) isSent = await this.#inLine(id, () => this.#answerReview(known, answer.key));
+        else if (answer?.followUp) {
+          await this.deliver(known, { text: answer.followUp });
+          isSent = true;
+        }
+      } catch (error) {
+        // What goes wrong in line is said there.
+        if (!answer?.key) console.error(`antigravity ${id}: ${error.message}`);
+      }
+      // With nothing sent and no turn going, the session is at rest, where the turn left it.
+      if (!isSent && !session.turn) this.#store.report(id, 'session.status', { status: 'idle' });
+    });
+  }
+
+  // The request's answered somewhere else, as in the panel at the Mac.
+  #closeReview(id, session) {
+    const requestId = session.review;
+    session.review = undefined;
+    session.reviewLooks = 0;
+    if (requestId) this.#store.settle(requestId, { decision: 'unknown', by: 'terminal' });
+  }
+
+  // Opens the panel the documents are answered in, and presses its key for the answer for each that
+  // waits, until the panel has gone, which is when Antigravity takes the answer and starts on it.
+  async #answerReview(known, key) {
+    const read = () => this.#terminal.readScreen(known).catch(() => '');
+    const until = async test => {
+      for (const end = Date.now() + this.#timing.commandLimit; Date.now() < end; await pause(this.#timing.keyCheck)) {
+        const found = test(await read());
+        if (found) return found;
+      }
+      return undefined;
+    };
+    if (showsDialog(await read())) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
+    await this.#terminal.paste(known, REVIEW_COMMAND);
+    await pause(this.#timing.pasteSettle);
+    await this.#terminal.pressKey(known, 'Enter');
+    let panel = await until(readReview);
+    if (!panel) {
+      // Whatever opened instead is put away, and the box cleared of what was typed.
+      await this.#terminal.pressKey(known, 'Escape').catch(() => {});
+      throw new HelperError('review_failed', 'The terminal didn\'t open its review as expected, so nothing was answered.');
+    }
+    for (let presses = 0; panel && presses < MOST_REVIEW_PRESSES; presses++) {
+      const { left } = panel;
+      await this.#terminal.pressKey(known, key);
+      // One fewer to answer, or the panel gone with the last of them.
+      const after = await until(screen => { const now = readReview(screen); return !now || now.left < left ? { now } : undefined; });
+      if (!after) throw new HelperError('review_failed', 'The terminal didn\'t take the answer as expected.');
+      panel = after.now;
+    }
+    this.#session(known.id).lastHookAt = Date.now();
+    return true;
+  }
+
   #closeAsked(id, session, by, decision = 'unknown') {
     if (!session.asked) return;
     const { requestId } = session.asked;
@@ -983,7 +1122,9 @@ export class Antigravity {
   }
 
   async #refuseIfOpen(known) {
-    const pending = this.#store.pendingFor(known)[0];
+    // A document that waits to be looked over leaves the terminal free: a message can be typed past it,
+    // and the mode switched, as at the Mac.
+    const pending = this.#store.pendingFor(known).find(request => request.id !== this.#session(known.id).review);
     if (pending) throw new HelperError('request_pending', 'Answer the open request first.', { requestId: pending.id });
     if (showsDialog(await this.#terminal.readScreen(known))) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
   }

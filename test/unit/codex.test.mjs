@@ -4,8 +4,8 @@ import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  Codex, approvalRequest, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, modelsOf, permissionsRequest, questionRequest,
-  shellWords, statusLineOf, textOf, thinkingOf, trustedFolders, turnsOf, unwrapped,
+  approvalRequest, Codex, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf, modeOf,
+  permissionsRequest, questionRequest, shellWords, statusLineOf, textOf, thinkingOf, trustedFolders, turnsOf, unwrapped,
 } from '../../src/codex.mjs';
 
 const FOLDER = os.homedir();
@@ -677,6 +677,51 @@ test('a session runs on what the reader chose from its next turn', async () => {
   assert.equal(events.length, before);
   server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { model: 'gpt-6', effort: 'high' } });
   assert.deepEqual([store.get(sessionId).model, store.get(sessionId).effort], ['gpt-6', 'high']);
+});
+
+test('a thread\'s settings are one of the three choices Codex gives, or the reader\'s own', () => {
+  assert.equal(modeOf({ approvalPolicy: 'on-request', sandbox: { type: 'readOnly' } }), 'readOnly');
+  assert.equal(modeOf({ approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false } }), 'workspace');
+  assert.equal(modeOf({ approvalPolicy: 'never', sandbox: { type: 'dangerFullAccess' } }), 'fullAccess');
+  for (const own of [
+    { approvalPolicy: 'never', sandbox: { type: 'workspaceWrite' } }, { approvalPolicy: 'untrusted', sandbox: { type: 'readOnly' } },
+    { approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite', networkAccess: true } }, { approvalPolicy: 'on-request', sandbox: { type: 'dangerFullAccess' } },
+    { approvalPolicy: { granular: { rules: true, sandbox_approval: true, mcp_elicitations: true } }, sandbox: { type: 'workspaceWrite' } },
+    { approvalPolicy: 'never', sandbox: { type: 'externalSandbox' } },
+  ]) assert.equal(modeOf(own), 'custom', JSON.stringify(own));
+  for (const untold of [undefined, {}, { approvalPolicy: 'never' }, { sandbox: { type: 'readOnly' } }, { approvalPolicy: 'never', sandbox: {} }]) assert.equal(modeOf(untold), undefined);
+  assert.deepEqual(MODE_IDS, ['readOnly', 'workspace', 'fullAccess']);
+});
+
+test('a session may do what the reader chose from its next turn, and says so at once', async () => {
+  const { codex, store, server, last } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  assert.deepEqual(store.get(sessionId).permissionModes, MODE_IDS);
+  assert.deepEqual(store.sessions().find(session => session.id === sessionId).permissionModes, MODE_IDS);
+  // What it runs with is told when it's joined, and whenever Codex says it has changed.
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { model: 'gpt-6', approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } } });
+  assert.deepEqual([store.get(sessionId).permissionMode, last('session.mode').permissionMode, last('session.mode').permissionModes], ['fullAccess', 'fullAccess', MODE_IDS]);
+
+  for (const mode of ['custom', 'bypassPermissions', undefined, 'constructor']) await assert.rejects(codex.setMode({ sessionId, mode }), error => error.code === 'bad_mode', `${mode}`);
+  await assert.rejects(codex.setMode({ sessionId: 'nobody', mode: 'readOnly' }), error => error.code === 'unknown_session');
+  assert.deepEqual(await codex.setMode({ sessionId, mode: 'readOnly' }), {});
+  assert.deepEqual([store.get(sessionId).permissionMode, last('session.mode').permissionMode], ['readOnly', 'readOnly']);
+  // Until the turn that takes it, Codex still says what the thread had, which isn't what's shown.
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { model: 'gpt-6', approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } } });
+  assert.equal(store.get(sessionId).permissionMode, 'readOnly');
+  await codex.configure({ sessionId, effort: 'low' });
+  await codex.send({ sessionId, text: 'go' });
+  const [first] = server.called('turn/start');
+  assert.deepEqual([first.approvalPolicy, first.sandboxPolicy, first.effort], ['on-request', { type: 'readOnly' }, 'low']);
+  // It holds for the turns after, so it's sent once.
+  await codex.send({ sessionId, text: 'again' });
+  assert.deepEqual([server.called('turn/start')[1].approvalPolicy, server.called('turn/start')[1].sandboxPolicy], [undefined, undefined]);
+  // Settings of the reader's own, from Codex's terminal, are told as that.
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { approvalPolicy: 'never', sandboxPolicy: { type: 'workspaceWrite', networkAccess: true } } });
+  assert.equal(store.get(sessionId).permissionMode, 'custom');
+  await codex.setMode({ sessionId, mode: 'workspace' });
+  await codex.send({ sessionId, text: 'third' });
+  assert.deepEqual(server.called('turn/start')[2].sandboxPolicy, { type: 'workspaceWrite' });
 });
 
 test('the library has Codex\'s stored threads, and says which are going on', async () => {

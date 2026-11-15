@@ -16,6 +16,7 @@ import {
   status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
 } from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
+import { readMode, switchMode } from './mode.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession } from './remove.mjs';
@@ -239,6 +240,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return session;
   };
 
+  // The mode a session's terminal says it's in. A hook says the mode only when the session does
+  // something, so one that hasn't yet, or was switched in the terminal since, is read off its screen
+  // when someone opens it.
+  const noteShownMode = async session => {
+    if (!session?.pane || session.status === 'ended') return;
+    const mode = readMode(await readScreen(session).catch(() => ''));
+    if (mode) store.noteMode(session.id, mode);
+  };
+
   // The uploads a message names, in its order. Every one has to be there.
   const attachmentsOf = ({ sessionId, attachments }) => {
     if (attachments === undefined) return [];
@@ -433,6 +443,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     gitUnstage: async ({ sessionId, root, paths, all }) => gitUnstage(await repositoryFor(sessionId, root), { paths, all }),
     gitCommitStaged: async ({ sessionId, root, message }) => gitCommitStaged(await repositoryFor(sessionId, root), { message }),
     gitSwitch: async ({ sessionId, root, branch }) => gitSwitch(await repositoryFor(sessionId, root), { branch }),
+    // The mode a session asks permission in. A Claude Code session's is changed in its terminal, as a
+    // person changes it, and a Codex session's through Codex's server, from its next turn.
+    setMode: forCodex('setMode', async ({ sessionId, mode }) => {
+      const session = sessionWithPane(sessionId);
+      const { passed } = await typing(session.id, () => switchMode(session, mode, () => store.pendingFor(session)[0]));
+      store.noteMode(session.id, mode, passed);
+      return {};
+    }),
     capabilities: forCodex('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);
@@ -468,6 +486,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     join: async msg => {
       if (await isCodex(msg.sessionId)) return codex.join(msg);
       const session = store.find(msg.sessionId);
+      await noteShownMode(session);
       if (!session?.transcriptPath) return joinStored(msg);
       const turn = store.openTurn(session);
       const [first] = turn;

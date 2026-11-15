@@ -144,6 +144,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). |
 | `mentions` | `sessionId`, `query`, `limit` | `items`: what an `@` followed by `query` can name for the session, as Claude Code's own `@` offers it: each with its `path` and `kind`, `file` or `dir`, a folder's path ending in `/`. A `query` that starts like a path (`./`, `../`, `~/`, `/`, or just `~`, `.` or `..`) lists the folder it points into, folders first, hidden entries left out, written the way it was typed, as in `../helper/`. Anything else is looked for among the project's files and the folders above them, best match first, scored as Claude Code scores them: in a git repository every file git has, from the session's folder, then new ones unless ignored; elsewhere what ripgrep finds. With nothing typed, or just `.` or `./`, it's what's in the session's folder. A leading `@` in `query` is ignored. As many as Claude Code shows, 15, or 10 of a folder, and fewer if `limit` asks |
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
+| `setMode` | `sessionId`, `mode` | Changes the mode a session asks permission in. See [Permission modes](#permission-modes). |
 | `delete` | `sessionId` | Deletes the session from this Mac for good. See [Deleting a session](#deleting-a-session). |
 | `folders` | `path`, `hidden` (both optional) | Where a new session can start. Without `path`: `home`, and `recent`, the folders sessions ran in lately. With it: that folder's `path`, `name` and `trusted`, its `entries`, and `truncated`. See [Starting a session](#starting-a-session). |
 | `pushRegister` | `deviceId`, `token`, `key`, `sandbox`, `mac`, `agents` | A phone that wants notifications while it isn't connected. See [Notifications](#notifications). |
@@ -228,6 +229,14 @@ A session that isn't running keeps the choice for its next `send`, which passes 
 
 A session reports its model and effort through `session.model`, `session.effort`, and `model` and `effort` in `sessions`. Effort is only known from the first hook that carries it, usually the end of the first turn. For a session that isn't running, `join` gives the model that last replied.
 
+### Permission modes
+
+A session says the mode it asks permission in as `permissionMode`, and the modes it can be switched to as `permissionModes`, in `sessions`, a snapshot and `join`, and in a `session.mode` event when either changes. `setMode` switches to one of them.
+
+A Claude Code session's are Claude Code's own: `default`, which its terminal calls Manual, `acceptEdits` and `plan` always, then `bypassPermissions` and `auto` for a session that has them. Claude Code tells no one which a session has, so those two are listed once the session has been seen in them. Its mode is changed where a person changes it, in its terminal: the helper presses Shift+Tab, which goes round the session's modes, and reads the status bar after each press, until the bar says the mode asked for. A mode the bar comes all the way round without is one the session doesn't have, as `bypassPermissions` is for a session that wasn't started with it: the command fails with `mode_unavailable`, and the session is back in the mode it was in. The modes passed on the way are ones the session has, and are listed from then on. A hook says a session's mode only when the session does something, so the status bar is also read when a session is joined, which catches a mode switched to in the terminal since. A session outside Rex and tmux is refused with `no_pane`, and one with a dialog open with `dialog_open`. `dontAsk` is only ever started in, so it can be a session's `permissionMode` and never one of its `permissionModes`.
+
+A Codex session's are the three choices Codex's terminal gives under `/permissions`: `readOnly` (Read Only), `workspace` (Default) and `fullAccess` (Full Access), each an approval policy and a sandbox. `setMode` takes hold from the session's next turn and holds for the turns after, and `session.mode` says so at once. Settings that are none of the three, as from a config of the reader's own, are `custom`, which can't be switched to.
+
 ### Rex
 
 A session running in Rex needs no tmux. Its hooks carry `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, and `pane` in `sessions` is then a block id, which is all a client has to know: everything above works the same. The helper uses the `rex` command, and finds it in Rex's install folder when it was started over SSH. It reaches the Mac's own Rex server, so none of this needs Rex's network access turned on.
@@ -280,6 +289,7 @@ A Codex session is told with the events and commands a Claude Code session has, 
 | `join`, `history` | The same replies, read from Codex's stored turns a few at a time, so a page is whole turns. `before` is a number the helper gives out, good until it restarts. |
 | `capabilities` | `models` from Codex's own list, each with its `effortLevels`. `commands` is empty: Codex's slash commands are its terminal's own. |
 | `configure` | `model` and `effort` take hold from the session's next turn, and `session.model` and `session.effort` say so at once |
+| `setMode` | One of Codex's three choices of what it may do without asking, from the session's next turn. See [Permission modes](#permission-modes). |
 | `respond` | Answers Codex. See below. |
 | `delete` | Stops a turn going on, and has Codex delete the thread for good |
 
@@ -425,7 +435,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.started` | `source`, `model`, `cwd` |
 | `session.attached` | `pane` |
 | `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
-| `session.mode` | `permissionMode` |
+| `session.mode` | `permissionMode`, `permissionModes` |
 | `session.model` | `model` |
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
@@ -494,6 +504,9 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `session_running` | The session wouldn't stop, so `delete` left it alone |
 | `background_session` | `delete` doesn't handle background sessions. Use `claude rm`, which has its own rules about their worktrees. |
 | `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
+| `bad_mode` | `setMode` was given something other than a mode a session of its kind can be switched to |
+| `mode_unavailable` | The session went all the way round its modes without coming to the one asked for, and is in the mode it was in |
+| `mode_failed` | The terminal didn't show the session's mode as expected, so it was left as it is. Claude Code's status bar may have changed. |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |
 | `bad_upload`, `too_large` | An upload had no type, nothing in it, or more than 30 MB |

@@ -1671,3 +1671,40 @@ test('a session keeps where it started and where it has worked, the latest first
   for (let number = 0; number < 20; number++) at(`/w/folder-${number}`);
   assert.deepEqual([session.folders.length, session.folders[0], session.startFolder], [12, '/w/folder-19', '/w']);
 });
+
+test('a session can be switched to the modes it always has, and to those it has been seen in', () => {
+  const store = new SessionStore();
+  const events = [];
+  store.on('event', event => events.push(event));
+  const at = (permission_mode, fields = {}) => store.handleHook({ session_id: 'm', cwd: '/w', permission_mode, hook_event_name: 'UserPromptSubmit', prompt: 'go', ...fields });
+  const view = () => store.sessions().find(session => session.id === 'm');
+  const modeEvents = () => events.filter(event => event.kind === 'session.mode').map(event => [event.permissionMode, event.permissionModes]);
+  at('default');
+  assert.deepEqual([view().permissionMode, view().permissionModes], ['default', ['default', 'acceptEdits', 'plan']]);
+  // A subagent's own mode isn't one the session has been in.
+  at('bypassPermissions', { agent_id: 'sub' });
+  at('default');
+  assert.deepEqual(view().permissionModes, ['default', 'acceptEdits', 'plan']);
+  at('auto');
+  at('bypassPermissions');
+  assert.deepEqual(view().permissionModes, ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'auto']);
+  assert.deepEqual(modeEvents().at(-1), ['bypassPermissions', ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'auto']]);
+
+  // Switched from afar, it says so at once, and the modes it passed on the way are ones it has.
+  const other = new SessionStore();
+  const told = [];
+  other.on('event', event => told.push(event));
+  other.handleHook({ session_id: 'n', cwd: '/w', permission_mode: 'default', hook_event_name: 'UserPromptSubmit', prompt: 'go' });
+  other.noteMode('n', 'plan', ['acceptEdits', 'plan']);
+  const session = other.get('n');
+  assert.deepEqual([session.permissionMode, session.modeBeforePlan, session.modes], ['plan', 'default', ['default', 'acceptEdits', 'plan']]);
+  // The mode a session is first met in comes with the session, and only a change is told of by itself.
+  assert.deepEqual(told.filter(event => event.kind === 'session.mode').map(event => event.permissionMode), ['plan']);
+  other.noteMode('n', 'default', ['bypassPermissions', 'auto', 'default']);
+  assert.deepEqual(other.sessions()[0].permissionModes, ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'auto']);
+  // The same mode again is nothing to say, and a session that isn't known is no one's.
+  const before = told.length;
+  other.noteMode('n', 'default');
+  other.noteMode('nobody', 'plan');
+  assert.equal(told.length, before);
+});

@@ -193,6 +193,26 @@ export function libraryItem(thread, status = null) {
   };
 }
 
+// What a session may do without asking, as the three choices Codex's own terminal gives under
+// /permissions (0.153.4): Read Only, Default and Full Access, each an approval policy and a sandbox.
+const MODES = {
+  readOnly: { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly' } },
+  workspace: { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } },
+  fullAccess: { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } },
+};
+export const MODE_IDS = Object.keys(MODES);
+// Settings that are none of the three, as from a config of the reader's own.
+export const CUSTOM_MODE = 'custom';
+
+// Which of the choices a thread's settings are, or nothing when they aren't told.
+export function modeOf({ approvalPolicy, sandbox } = {}) {
+  if (typeof approvalPolicy !== 'string' && typeof approvalPolicy !== 'object') return undefined;
+  if (!sandbox?.type) return undefined;
+  const found = MODE_IDS.find(id => MODES[id].approvalPolicy === approvalPolicy && MODES[id].sandboxPolicy.type === sandbox.type);
+  // Read Only and Default leave the network off, which a thread with it on isn't.
+  return found && !(found !== 'fullAccess' && sandbox.networkAccess === true) ? found : CUSTOM_MODE;
+}
+
 export function modelsOf(models = []) {
   return models.filter(model => !model.hidden).map(model => ({
     value: model.id, displayName: model.displayName, description: model.description, resolvedModel: model.model,
@@ -485,7 +505,7 @@ export class Codex {
     this.#threads.get(thread.id).branch = thread.gitInfo?.branch ?? undefined;
     const known = this.#store.find(thread.id);
     this.#store.adopt(thread.id, {
-      agent: AGENT, cwd: thread.cwd, model: thread.model ?? known?.model, effort: thread.reasoningEffort ?? known?.effort,
+      agent: AGENT, permissionModes: MODE_IDS, cwd: thread.cwd, model: thread.model ?? known?.model, effort: thread.reasoningEffort ?? known?.effort,
       startedAt: thread.createdAt ? thread.createdAt * 1000 : known?.startedAt, lastPrompt: known?.lastPrompt ?? (thread.preview || undefined), ...extra,
     });
     this.#store.report(thread.id, 'session.status', { status: statusOf(thread.status) });
@@ -501,14 +521,21 @@ export class Codex {
     thread.isSubscribed = true;
     // Joined part way through a turn, what's heard of that turn from here on isn't all of it.
     thread.isPartial = joined.thread?.status?.type === 'active' && !thread.turnId;
-    this.#noteSettings(threadId, { model: joined.model, effort: joined.reasoningEffort });
+    this.#noteSettings(threadId, { model: joined.model, effort: joined.reasoningEffort, approvalPolicy: joined.approvalPolicy, sandbox: joined.sandbox });
   }
 
-  #noteSettings(threadId, { model, effort }) {
+  #noteSettings(threadId, { model, effort, approvalPolicy, sandbox }) {
     const session = this.#store.find(threadId);
     if (!session) return;
     if (model) this.#store.report(threadId, 'session.model', { model });
     if (effort && effort !== session.effort) this.#store.report(threadId, 'session.effort', { effort }, { effort });
+    // A mode picked from here and not taken yet, which Codex does with the next turn, is the one to show.
+    const mode = this.#chosen.get(threadId)?.approvalPolicy ? undefined : modeOf({ approvalPolicy, sandbox });
+    if (mode && mode !== session.permissionMode) this.#noteMode(threadId, mode);
+  }
+
+  #noteMode(threadId, permissionMode) {
+    this.#store.report(threadId, 'session.mode', { permissionMode, permissionModes: MODE_IDS }, { permissionMode });
   }
 
   #onNotification({ method, params = {} }) {
@@ -551,7 +578,10 @@ export class Codex {
         this.#forget(threadId);
         break;
       case 'thread/settings/updated':
-        this.#noteSettings(threadId, { model: params.threadSettings?.model, effort: params.threadSettings?.effort });
+        this.#noteSettings(threadId, {
+          model: params.threadSettings?.model, effort: params.threadSettings?.effort, approvalPolicy: params.threadSettings?.approvalPolicy,
+          sandbox: params.threadSettings?.sandboxPolicy,
+        });
         break;
       case 'thread/tokenUsage/updated':
         thread.usage = params.tokenUsage;
@@ -755,7 +785,7 @@ export class Codex {
     // A test run starts its threads sandboxed, whatever this Mac's own Codex settings are.
     const started = await link.request('thread/start', { cwd: folder, ...JSON.parse(process.env.VENES_CODEX_START_ARGS ?? '{}') });
     // Whoever starts a thread hears all of it from then on.
-    const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined });
+    const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined, permissionMode: modeOf(started) });
     thread.isSubscribed = true;
     return { sessionId: started.thread.id };
   }
@@ -765,7 +795,7 @@ export class Codex {
   async #load(link, threadId) {
     try {
       const joined = await link.request('thread/resume', { threadId, excludeTurns: true });
-      const thread = this.#adopt(joined.thread, { model: joined.model, effort: joined.reasoningEffort ?? undefined });
+      const thread = this.#adopt(joined.thread, { model: joined.model, effort: joined.reasoningEffort ?? undefined, permissionMode: modeOf(joined) });
       thread.isSubscribed = true;
       this.#store.report(threadId, 'session.started', { source: 'resume', model: joined.model, cwd: joined.thread.cwd });
       return thread;
@@ -813,8 +843,10 @@ export class Codex {
         const isSteered = await link.request('turn/steer', { ...about, expectedTurnId: thread.turnId }).then(() => true, () => false);
         if (isSteered) return;
       }
-      const { model, effort } = this.#chosen.get(session.id) ?? {};
-      await link.request('turn/start', { ...about, ...(model && { model }), ...(effort && { effort }) });
+      const { model, effort, approvalPolicy, sandboxPolicy } = this.#chosen.get(session.id) ?? {};
+      await link.request('turn/start', {
+        ...about, ...(model && { model }), ...(effort && { effort }), ...(approvalPolicy && { approvalPolicy }), ...(sandboxPolicy && { sandboxPolicy }),
+      });
       this.#chosen.delete(session.id);
     } catch (error) {
       if (clientId) thread.sent.delete(clientId);
@@ -947,6 +979,16 @@ export class Codex {
     const change = { ...this.#chosen.get(sessionId), ...(model !== undefined && { model: chosen.value }), ...(effort !== undefined && { effort }) };
     this.#chosen.set(sessionId, change);
     this.#noteSettings(sessionId, change);
+    return {};
+  }
+
+  // What the session may do without asking, from its next turn, which is when Codex takes it, and for
+  // the turns after.
+  async setMode({ sessionId, mode }) {
+    if (!Object.hasOwn(MODES, mode)) throw new HelperError('bad_mode', `Not a mode a Codex session can be switched to: ${mode}`);
+    if (!this.#store.find(sessionId)) throw new HelperError('unknown_session', `No session ${sessionId}`);
+    this.#chosen.set(sessionId, { ...this.#chosen.get(sessionId), ...MODES[mode] });
+    this.#noteMode(sessionId, mode);
     return {};
   }
 

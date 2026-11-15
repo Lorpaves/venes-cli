@@ -138,6 +138,18 @@ function withoutImageData(response) {
 // The folders remembered of where a session has worked.
 const RECENT_FOLDERS = 12;
 
+// The modes a Claude Code session always comes round to with Shift+Tab, and those it only has when it
+// was started with them or its plan allows them, in the order it goes round. Claude Code tells no one
+// which a session has, so the optional ones are those it has been seen in.
+const ALWAYS_MODES = ['default', 'acceptEdits', 'plan'];
+const OPTIONAL_MODES = ['bypassPermissions', 'auto'];
+
+// The modes a session can be switched to: what whoever follows it says, as for a Codex session, or else
+// a Claude Code session's own.
+export function modesOf(s) {
+  return s.permissionModes ?? [...ALWAYS_MODES, ...OPTIONAL_MODES.filter(mode => s.modes.includes(mode) || s.permissionMode === mode)];
+}
+
 function blankSession(id) {
   return {
     id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0, modes: [],
@@ -558,6 +570,23 @@ export class SessionStore extends EventEmitter {
     if (request) request.choosing = false;
   }
 
+  #setMode(s, mode) {
+    if (mode === s.permissionMode) return;
+    // The mode it planned from, which approving the plan goes back to.
+    if (mode === 'plan' && s.permissionMode && s.permissionMode !== 'plan') s.modeBeforePlan = s.permissionMode;
+    s.permissionMode = mode;
+    this.#emit(s, 'session.mode', { permissionMode: mode, permissionModes: modesOf(s) });
+  }
+
+  // A session's mode was changed some other way than a hook saying so, as from afar in its terminal,
+  // which passes other modes on the way to the one asked for. Those are modes it has, too.
+  noteMode(id, mode, passed = []) {
+    const s = this.#sessions.get(id);
+    if (!s) return;
+    for (const seen of [...passed, mode]) if (!s.modes.includes(seen)) s.modes.push(seen);
+    this.#setMode(s, mode);
+  }
+
   #touch(ev, tmux) {
     let s = this.#sessions.get(ev.session_id);
     if (!s) {
@@ -573,14 +602,10 @@ export class SessionStore extends EventEmitter {
     s.cwd = ev.cwd ?? s.cwd;
     noteFolder(s, s.cwd);
     s.transcriptPath = ev.transcript_path ?? s.transcriptPath;
-    if (ev.permission_mode && ev.permission_mode !== s.permissionMode) {
-      // The mode it planned from, which approving the plan goes back to.
-      if (ev.permission_mode === 'plan' && s.permissionMode && s.permissionMode !== 'plan') s.modeBeforePlan = s.permissionMode;
-      s.permissionMode = ev.permission_mode;
-      this.#emit(s, 'session.mode', { permissionMode: s.permissionMode });
-    }
-    // Every mode it has been in, which says what a plan can offer. A subagent can run in a mode of its own.
+    // Every mode it has been in, which says what a plan can offer and what it can be switched to. A
+    // subagent can run in a mode of its own.
     if (ev.permission_mode && !ev.agent_id && !s.modes.includes(ev.permission_mode)) s.modes.push(ev.permission_mode);
+    if (ev.permission_mode) this.#setMode(s, ev.permission_mode);
     // A subagent can run at a level of its own, which says nothing about the session.
     if (ev.effort?.level && !ev.agent_id && ev.effort.level !== s.effort) {
       s.effort = ev.effort.level;
@@ -902,7 +927,7 @@ export class SessionStore extends EventEmitter {
     return {
       id: s.id, status: s.status, cwd: s.cwd, pane: s.pane ?? null, tmuxSocket: s.tmuxSocket ?? null,
       model: s.model, effort: s.effort, lastPrompt: s.lastPrompt, lastMessage: s.lastMessage,
-      permissionMode: s.permissionMode, transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
+      permissionMode: s.permissionMode, permissionModes: modesOf(s), transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
       startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id),
       ...(s.agent && { agent: s.agent }),

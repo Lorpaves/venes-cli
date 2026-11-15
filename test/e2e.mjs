@@ -2007,6 +2007,11 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   const { sessionId, model } = await startCodex(r);
   const listed = (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
   assert.deepEqual([listed.agent, listed.status, listed.model, listed.pane], ['codex', 'idle', model, null]);
+  // What it may do without asking is one of Codex's three choices, here the one this run starts its threads with.
+  assert.deepEqual([listed.permissionMode, listed.permissionModes], ['readOnly', ['readOnly', 'workspace', 'fullAccess']]);
+  await assert.rejects(r.client.request('setMode', { sessionId, mode: 'bypassPermissions' }), { code: 'bad_mode' });
+  // Chosen again, it goes to Codex with the turn below, which Codex has to take as it's put.
+  await r.client.request('setMode', { sessionId, mode: 'readOnly' });
   // A client that doesn't say it can show Codex sessions, as an app from before them, is told of none.
   const older = await connect();
   const heard = [];
@@ -2028,6 +2033,7 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   assert.equal(deltas.at(-1).final, true);
   assert.deepEqual(r.events.filter(event => event.kind === 'session.status').map(event => event.status), ['running', 'idle']);
 
+  assert.equal((await r.client.request('sessions')).sessions.find(session => session.id === sessionId).permissionMode, 'readOnly');
   const { status } = await r.client.request('statusLine', { sessionId });
   assert.equal(status.model, model);
   assert.equal(status.effort, CODEX_EFFORT);
@@ -2234,6 +2240,47 @@ T('a_session_has_the_repositories_inside_where_it_started', { mode: 'bypassPermi
   } finally {
     for (const folder of [one, two]) fs.rmSync(folder, { recursive: true, force: true });
   }
+});
+
+T('a_sessions_mode_is_switched_in_its_terminal', { mode: 'bypassPermissions' }, async r => {
+  const { id: sessionId } = await r.session();
+  const view = async () => (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
+  // Started skipping permissions, it has that mode to come round to. No hook has said so yet, so it's
+  // read off the terminal when the session is opened.
+  await r.client.request('join', { sessionId });
+  const first = await view();
+  assert.equal(first.permissionMode, 'bypassPermissions');
+  assert.deepEqual(first.permissionModes.slice(0, 4), ['default', 'acceptEdits', 'plan', 'bypassPermissions']);
+  r.mark();
+  await r.client.request('setMode', { sessionId, mode: 'plan' });
+  await r.waitForPane(/plan mode on/, 5000);
+  const told = await r.kind('session.mode', 5000);
+  assert.deepEqual([told.permissionMode, told.permissionModes.includes('bypassPermissions'), (await view()).permissionMode], ['plan', true, 'plan']);
+  await r.client.request('setMode', { sessionId, mode: 'bypassPermissions' });
+  await r.waitForPane(/bypass permissions on/, 5000);
+  assert.equal((await view()).permissionMode, 'bypassPermissions');
+  // The same mode again presses nothing, and a mode that's only ever started in isn't one to switch to.
+  await r.client.request('setMode', { sessionId, mode: 'bypassPermissions' });
+  await assert.rejects(r.client.request('setMode', { sessionId, mode: 'dontAsk' }), { code: 'bad_mode' });
+  await r.waitForPane(/bypass permissions on/, 5000);
+  // Claude Code's own word for the mode, with its next hook, is the one it was put in.
+  await r.client.request('setMode', { sessionId, mode: 'acceptEdits' });
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  assert.equal((await view()).permissionMode, 'acceptEdits');
+});
+
+T('a_session_cant_be_switched_to_a_mode_it_wasnt_started_with', {}, async r => {
+  const { id: sessionId } = await r.session();
+  const view = async () => (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
+  assert.ok(!(await view()).permissionModes.includes('bypassPermissions'));
+  // It goes all the way round without coming to it, and is left where it was.
+  await assert.rejects(r.client.request('setMode', { sessionId, mode: 'bypassPermissions' }), { code: 'mode_unavailable' });
+  await r.waitForPane(/manual mode on/, 5000);
+  assert.equal((await view()).permissionMode ?? 'default', 'default');
+  await r.client.request('setMode', { sessionId, mode: 'acceptEdits' });
+  await r.waitForPane(/accept edits on/, 5000);
+  assert.equal((await view()).permissionMode, 'acceptEdits');
 });
 
 Run.prototype.waitForPane = async function waitForPane(re, ms) {

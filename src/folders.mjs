@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { makeIn } from './files.mjs';
 import { HelperError } from './sessions.mjs';
 
 // How many recent folders to offer, and how many stored sessions to look through for them.
@@ -26,6 +27,12 @@ export function checkedFolder(folder) {
   const resolved = path.resolve(folder);
   if (!isFolder(resolved)) throw new HelperError('no_folder', `${resolved} isn't a folder on this Mac.`);
   return resolved;
+}
+
+// A new folder in one the reader is looking at, for a session to start in: where it is, and its name.
+export function createFolder(folder, name) {
+  const made = makeIn(checkedFolder(folder), name, { folder: true });
+  return { name: made.name, path: made.path };
 }
 
 // The folders in one, as Claude Code's @ lists a folder: no hidden ones unless asked for, by name as

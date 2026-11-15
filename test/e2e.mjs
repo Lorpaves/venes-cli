@@ -1337,6 +1337,18 @@ T('a_new_session_starts_in_a_folder_from_the_list_and_can_be_typed_into', {}, as
   assert.equal(listed?.name, path.basename(workspace), 'a folder lists the folders in it');
   assert.equal(level.entries.some(entry => entry.name.startsWith('.')), false);
   await assert.rejects(r.client.request('start', { cwd: path.join(workspace, 'e2e-none') }), { code: 'no_folder' });
+  // A new folder is made where the reader is looking, for a session to start in, and is listed there after.
+  const fresh = path.join(workspace, 'e2e-fresh');
+  try {
+    const made = await r.client.request('folderCreate', { path: workspace, name: 'e2e-fresh' });
+    assert.deepEqual([made.name, made.path, typeof made.trusted, fs.statSync(fresh).isDirectory()], ['e2e-fresh', fresh, 'boolean', true]);
+    assert.ok((await r.client.request('folders', { path: workspace })).entries.some(entry => entry.path === fresh));
+    await assert.rejects(r.client.request('folderCreate', { path: workspace, name: 'e2e-fresh' }), { code: 'name_taken' });
+    await assert.rejects(r.client.request('folderCreate', { path: workspace, name: '../e2e-up' }), { code: 'bad_name' });
+    await assert.rejects(r.client.request('folderCreate', { path: path.join(workspace, 'e2e-none'), name: 'x' }), { code: 'no_folder' });
+  } finally {
+    fs.rmSync(fresh, { recursive: true, force: true });
+  }
 
   const { sessionId } = await r.client.request('start', { cwd: workspace });
   try {
@@ -2238,6 +2250,27 @@ T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissio
   await assert.rejects(r.client.request('fileRead', { sessionId, path: '/etc/hosts' }), { code: 'bad_path' });
   await assert.rejects(r.client.request('fileRead', { sessionId, path: 'e2e-not-there.txt' }), { code: 'no_file' });
   await assert.rejects(r.client.request('files', { sessionId: 'no-such-session' }), { code: 'unknown_session' });
+
+  // Something new in the folder: an empty file, and a folder with a file in it. A folder isn't one of the files
+  // every case clears away, so it goes when this is done with it.
+  const made = path.join(WS, 'e2e-made');
+  try {
+    const file = await r.client.request('fileCreate', { sessionId, name: 'e2e-new.txt' });
+    assert.deepEqual([file.name, file.kind, file.size, fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8')], ['e2e-new.txt', 'file', 0, '']);
+    const dir = await r.client.request('fileCreate', { sessionId, name: 'e2e-made', folder: true });
+    assert.deepEqual([dir.name, dir.kind, fs.statSync(made).isDirectory()], ['e2e-made', 'dir', true]);
+    await r.client.request('fileCreate', { sessionId, path: 'e2e-made', name: 'inside.md' });
+    const inside = await r.client.request('files', { sessionId, path: 'e2e-made' });
+    assert.deepEqual(inside.entries.map(entry => [entry.name, entry.kind, entry.size]), [['inside.md', 'file', 0]]);
+    // What's there is left as it is, and a name is one name.
+    await assert.rejects(r.client.request('fileCreate', { sessionId, name: 'e2e-look.txt' }), { code: 'name_taken' });
+    await assert.rejects(r.client.request('fileCreate', { sessionId, name: 'e2e-made', folder: true }), { code: 'name_taken' });
+    await assert.rejects(r.client.request('fileCreate', { sessionId, name: 'a/b' }), { code: 'bad_name' });
+    await assert.rejects(r.client.request('fileCreate', { sessionId, path: '..', name: 'e2e-out.txt' }), { code: 'bad_path' });
+    assert.equal(fs.readFileSync(path.join(WS, 'e2e-look.txt'), 'utf8'), 'first line\nsecond line\n');
+  } finally {
+    fs.rmSync(made, { recursive: true, force: true });
+  }
 
   // The workspace is in no repository, unless whoever runs this put it in one: either way git has an answer.
   const { git } = await r.client.request('git', { sessionId });

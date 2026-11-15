@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CHUNK_BYTES, insideFolder, isText, listFolder, mediaTypeOf, readChunk, readFile } from '../../src/files.mjs';
+import { CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, listFolder, mediaTypeOf, readChunk, readFile } from '../../src/files.mjs';
+import { createFolder } from '../../src/folders.mjs';
 
 function folder(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-files-')));
@@ -163,4 +164,55 @@ test('a file of any size and any kind goes a piece at a time, each saying how bi
   assert.throws(() => readChunk(root, '../outside'), error => error.code === 'bad_path');
   assert.throws(() => readChunk(root, 'gone.bin'), error => error.code === 'no_file');
   assert.throws(() => readChunk(root, '.'), error => error.code === 'no_file');
+});
+
+test('a name for something new is one name, and not a path', () => {
+  assert.equal(checkedName('notes.md'), 'notes.md');
+  assert.equal(checkedName('  新建文件夹  '), '新建文件夹');
+  assert.equal(checkedName('.gitignore'), '.gitignore');
+  for (const bad of ['', '   ', '.', '..', 'a/b', '/a', 'a:b', 'a\0b', 'x'.repeat(256), undefined, 7, null]) {
+    assert.throws(() => checkedName(bad), { code: 'bad_name' }, String(bad).slice(0, 12));
+  }
+  // The limit is the disk's, in bytes.
+  assert.equal(checkedName('x'.repeat(255)).length, 255);
+  assert.throws(() => checkedName('字'.repeat(86)), { code: 'bad_name' });
+});
+
+test('a new file or folder is made empty in a folder of the session\'s, under a name that isn\'t taken', t => {
+  const { root, write } = folder(t);
+  write('src/a.js', 'a');
+  assert.deepEqual(createEntry(root, undefined, { name: 'notes.md' }), { name: 'notes.md', path: path.join(root, 'notes.md'), kind: 'file', size: 0 });
+  assert.equal(fs.readFileSync(path.join(root, 'notes.md'), 'utf8'), '');
+  assert.deepEqual(createEntry(root, 'src', { name: 'lib', folder: true }), { name: 'lib', path: path.join(root, 'src/lib'), kind: 'dir' });
+  assert.ok(fs.statSync(path.join(root, 'src/lib')).isDirectory());
+  // What's there stays as it is, a file or a folder, whichever was asked for.
+  for (const taken of [{ name: 'notes.md' }, { name: 'notes.md', folder: true }, { name: 'src' }]) {
+    assert.throws(() => createEntry(root, undefined, taken), { code: 'name_taken' });
+  }
+  assert.equal(fs.readFileSync(path.join(root, 'src/a.js'), 'utf8'), 'a');
+  assert.throws(() => createEntry(root, undefined, { name: 'a/b' }), { code: 'bad_name' });
+  // In a folder that isn't there, or in a file, nothing is made.
+  assert.throws(() => createEntry(root, 'gone', { name: 'x' }), { code: 'no_folder' });
+  assert.throws(() => createEntry(root, 'src/a.js', { name: 'x' }), { code: 'no_folder' });
+});
+
+test('nothing is made outside the session\'s folder, by a path or through a link', t => {
+  const { root } = folder(t);
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-outside-')));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  assert.throws(() => createEntry(root, '..', { name: 'x' }), { code: 'bad_path' });
+  assert.throws(() => createEntry(root, outside, { name: 'x' }), { code: 'bad_path' });
+  fs.symlinkSync(outside, path.join(root, 'out'));
+  assert.throws(() => createEntry(root, 'out', { name: 'x', folder: true }), { code: 'bad_path' });
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
+
+test('a new folder for a session to start in is made in the folder the reader is looking at', t => {
+  const { root } = folder(t);
+  assert.deepEqual(createFolder(root, 'project'), { name: 'project', path: path.join(root, 'project') });
+  assert.ok(fs.statSync(path.join(root, 'project')).isDirectory());
+  assert.throws(() => createFolder(root, 'project'), { code: 'name_taken' });
+  assert.throws(() => createFolder(root, '../up'), { code: 'bad_name' });
+  assert.throws(() => createFolder(path.join(root, 'gone'), 'x'), { code: 'no_folder' });
+  assert.throws(() => createFolder('relative', 'x'), { code: 'bad_folder' });
 });

@@ -1,5 +1,7 @@
 // A session's folder, for someone following the work from afar: what's in it, a level at a time, and
-// what's in a file. Everything is inside the folder the session works in, and nothing here changes it.
+// what's in a file. Everything is inside the folder the session works in. Nothing here changes what's
+// there: the one thing it does besides reading is make something new, an empty file or folder, under a
+// name that isn't taken.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -40,6 +42,51 @@ export function insideFolder(root, named) {
   const resolved = path.resolve(root, named);
   if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   return resolved;
+}
+
+// The longest a file's name can be on a Mac's disk, in bytes.
+const NAME_BYTES = 255;
+
+// A name for something new in a folder: one name and not a path, as Finder would take it, which has no
+// slash in it, and no colon, which Finder shows as one.
+export function checkedName(name) {
+  const given = typeof name === 'string' ? name.trim() : '';
+  if (!given || given === '.' || given === '..' || /[/:\0]/.test(given) || Buffer.byteLength(given) > NAME_BYTES) {
+    throw new HelperError('bad_name', 'That isn\'t a name a file or a folder can have.');
+  }
+  return given;
+}
+
+// Something new in a folder, and empty: a folder, or a file. A name that's taken is refused, so nothing
+// that's there is written over.
+export function makeIn(parent, name, { folder = false } = {}) {
+  const given = checkedName(name);
+  const target = path.join(parent, given);
+  try {
+    if (folder) fs.mkdirSync(target);
+    else fs.closeSync(fs.openSync(target, 'wx'));
+  } catch (error) {
+    if (error.code === 'EEXIST') throw new HelperError('name_taken', `${given} is already there.`);
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new HelperError('no_folder', `${parent} isn't a folder on this Mac.`);
+    throw new HelperError('unwritable_folder', `Nothing can be made in ${parent}.`);
+  }
+  return folder ? { name: given, path: target, kind: 'dir' } : { name: given, path: target, kind: 'file', size: 0 };
+}
+
+// Something new in a folder of the session's: its own with no `named`, or one inside it. Really inside
+// it: a link that leads out of the session's folder isn't followed to make things elsewhere.
+export function createEntry(root, named, { name, folder } = {}) {
+  const parent = insideFolder(root, named);
+  let real;
+  try {
+    real = { root: fs.realpathSync(root), parent: fs.realpathSync(parent) };
+  } catch {
+    throw new HelperError('no_folder', `${parent} isn't a folder on this Mac.`);
+  }
+  if (real.parent !== real.root && !real.parent.startsWith(`${real.root}${path.sep}`)) {
+    throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
+  }
+  return makeIn(parent, name, { folder: folder === true });
 }
 
 // Folders first, then files, each by name as Finder sorts them.

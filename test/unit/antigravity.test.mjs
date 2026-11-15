@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  AGENT, Antigravity, historyOf, isTrusted, libraryItem, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, stepsIn, toolOf, transcriptOf, typedText,
+  AGENT, Antigravity, historyOf, isTrusted, levelFor, libraryItem, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, stepsIn, toolOf, transcriptOf, typedText,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -63,6 +63,9 @@ test('a model is named with how hard it thinks, and the ones on offer are put to
     { value: 'gemini-pro-orchestrator-g1-pro', displayName: 'Orchestrator (Argon)', effortLevels: [] },
     { value: 'claude-opus-5-5', displayName: 'Claude Opus 5.5', effortLevels: ['high'] },
   ]);
+  // A model that can't think the way that's wanted thinks the nearest way it can.
+  assert.deepEqual([levelFor(['low', 'medium', 'high'], 'xhigh'), levelFor(['low', 'medium', 'high', 'xhigh'], 'xhigh'), levelFor(['high', 'xhigh'], 'low')], ['high', 'xhigh', 'high']);
+  assert.deepEqual([levelFor(['low', 'medium', 'high'], undefined), levelFor(['low', 'high'], undefined), levelFor([], 'high'), levelFor(['medium'], 'max')], ['medium', 'low', undefined, 'medium']);
 });
 
 test('a conversation is what was said, each call with how it ended, and its turns\' ends', () => {
@@ -121,7 +124,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {} } = {}) 
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
     env: { PATH: '/bin', VENES_HOME: '/h', SECRET: 'x' },
-    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, ...timing },
+    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, modelsWait: 200, ...timing },
   });
   t.after(() => agent.stop());
   const file = transcriptOf(data, ID);
@@ -374,7 +377,9 @@ test('a new session is an empty conversation of Antigravity\'s, opened in a term
   assert.deepEqual(terminal.started, [{ name: 'venes-agy-9a2b37ed', cwd: folder, command: ['agy', '--conversation', ID], env: { PATH: '/bin', VENES_HOME: '/h' } }]);
   const known = store.get(ID);
   assert.deepEqual([known.agent, known.cwd, known.pane, known.tmuxSocket, known.status, known.permissionMode], [AGENT, folder, '%9', '/tmp/sock', 'idle', 'auto']);
-  assert.deepEqual(events.map(event => event.kind), ['session.discovered', 'session.started', 'session.mode']);
+  // What it runs on is read off its bar, with nothing said in it yet, and named as the models on offer are.
+  assert.deepEqual([known.model, known.effort], ['gemini-4-hydrogen', 'xhigh']);
+  assert.deepEqual(events.map(event => event.kind), ['session.discovered', 'session.started', 'session.mode', 'session.model', 'session.effort']);
   // Its first hook tells nothing of its start again.
   await agent.handleHook({ conversationId: ID, cwd: folder, hookEventName: 'SessionStart', modelName: 'gemini-4-hydrogen-xhigh' }, { pane: '%9', socket: '/tmp/sock' });
   assert.equal(events.filter(event => event.kind === 'session.started').length, 1);
@@ -435,7 +440,7 @@ test('its mode is changed with Shift+Tab, and what it runs on with its own comma
   terminal.onKey = key => { if (key === 'Enter') terminal.screen = `> /model\n  ⎿  Model set to Gemini 4 Hydrogen (High)\n${IDLE}`; };
   await agent.configure({ sessionId: ID, model: 'gemini-4-hydrogen', effort: 'high' });
   assert.deepEqual([terminal.pasted, terminal.keys, store.get(ID).effort], [['/model gemini-4-hydrogen-high'], ['Enter'], 'high']);
-  // A model that can't think the way the session does is given a way it can.
+  // A model that can't think the way the session does is given the nearest way it can.
   await agent.configure({ sessionId: ID, model: 'gemini-3.8-flash' });
   assert.deepEqual([terminal.pasted.at(-1), store.get(ID).model, store.get(ID).effort], ['/model gemini-3.8-flash-low', 'gemini-3.8-flash', 'low']);
   terminal.onKey = key => { if (key === 'Enter') terminal.screen = `> /effort\n  ⎿  Effort set to xhigh\n${IDLE}`; };
@@ -452,6 +457,31 @@ test('its mode is changed with Shift+Tab, and what it runs on with its own comma
   const can = await agent.capabilities({ sessionId: ID });
   assert.deepEqual([can.commands, can.skills, can.models.map(model => model.value)], [[], [], ['gemini-4-hydrogen', 'gemini-3.8-flash']]);
   assert.deepEqual((await agent.status({ sessionId: ID })).status.project, 'w');
+});
+
+test('a model picked for a session with nothing said in it keeps how hard its bar says it thinks', async t => {
+  // The models aren't known when it's first heard of, so only its bar says how it thinks.
+  const { agent, store, terminal, hook } = setup(t, { screen: idleIn('auto'), timing: { watch: 100_000 } });
+  await hook('SessionStart', { modelName: undefined });
+  assert.deepEqual([store.get(ID).model, store.get(ID).effort], [undefined, undefined]);
+  terminal.onKey = key => { if (key === 'Enter') terminal.screen = `> /model\n  ⎿  Model set to Gemini 4 Hydrogen (XHigh)\n${idleIn('auto')}`; };
+  await agent.configure({ sessionId: ID, model: 'gemini-4-hydrogen' });
+  assert.deepEqual([terminal.pasted, store.get(ID).model, store.get(ID).effort], [['/model gemini-4-hydrogen-xhigh'], 'gemini-4-hydrogen', 'xhigh']);
+});
+
+test('what its bar says it runs on is told when it\'s changed at the Mac, between turns', async t => {
+  const { agent, store, events, terminal, hook, until } = setup(t);
+  await hook('SessionStart');
+  await agent.capabilities({ sessionId: ID });
+  terminal.screen = ['> ', RULE, bar('? for shortcuts', 'plan · Gemini 3.8 Flash · low')].join('\n');
+  await until(() => store.get(ID).model === 'gemini-3.8-flash', 'the model');
+  assert.deepEqual([store.get(ID).effort, store.get(ID).permissionMode], ['low', 'plan']);
+  // During a turn a hook's word stands, as for a single message sent to another model.
+  terminal.screen = ['⣾  Generating...', RULE, '>', RULE, bar('esc to cancel', 'Gemini 3.8 Flash · low')].join('\n');
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: 'go', modelName: 'gemini-4-hydrogen-high' });
+  const told = events.length;
+  await new Promise(resolve => { setTimeout(resolve, 80); });
+  assert.deepEqual([store.get(ID).model, store.get(ID).effort, events.slice(told).filter(event => event.kind === 'session.model').length], ['gemini-4-hydrogen', 'high', 0]);
 });
 
 test('with no Antigravity on the Mac there\'s nothing to list or start', async t => {

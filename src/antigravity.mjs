@@ -75,6 +75,8 @@ const MODELS_LIFETIME_MS = 10 * 60_000;
 const MODELS_LIMIT_MS = 20_000;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_SUFFIX = new RegExp(`-(${EFFORTS.join('|')})$`);
+// How long a session just opened waits for the models Antigravity lists, to name the one its bar shows.
+const MODELS_WAIT_MS = 5000;
 
 const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
@@ -120,6 +122,17 @@ export function modelsFrom(listing) {
     models.set(model, known);
   }
   return [...models.values()].map(model => ({ ...model, effortLevels: EFFORTS.filter(effort => model.effortLevels.includes(effort)) }));
+}
+
+// How hard a model is told to think when it can't think the way that's wanted: the most it can short of
+// that, or the least it can past it. With nothing wanted, in the middle where it can.
+export function levelFor(levels, wanted) {
+  if (!levels.length || levels.includes(wanted)) return levels.length ? wanted : undefined;
+  const at = EFFORTS.indexOf(wanted);
+  if (at < 0) return levels.includes('medium') ? 'medium' : levels[0];
+  const order = level => EFFORTS.indexOf(level);
+  const below = levels.filter(level => order(level) < at).sort((a, b) => order(b) - order(a));
+  return below[0] ?? [...levels].sort((a, b) => order(a) - order(b))[0];
 }
 
 // The steps of a conversation, as its transcript has them: a line each. One half written is left for later.
@@ -350,7 +363,7 @@ export class Antigravity {
     this.#timing = {
       watch: WATCH_MS, rest: REST_CHECK_MS, startLimit: START_LIMIT_MS, startCheck: START_CHECK_MS, keySettle: KEY_SETTLE_MS,
       pasteSettle: PASTE_SETTLE_MS, stepWait: STEP_WAIT_MS, stepCheck: STEP_CHECK_MS, keyLimit: KEY_LIMIT_MS, keyCheck: KEY_CHECK_MS,
-      commandLimit: COMMAND_LIMIT_MS, ...timing,
+      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, ...timing,
     };
     this.#timer = setInterval(() => this.#lookAtAll(), this.#timing.watch);
     this.#timer.unref();
@@ -683,8 +696,7 @@ export class Antigravity {
     session.goneLooks = 0;
     const prompt = readPrompt(screen);
     const bar = readBar(screen);
-    // The bar names the mode only while it waits for a message.
-    if (bar?.hint === 'idle' && bar.mode !== known.permissionMode) this.#noteMode(id, bar.mode);
+    this.#noteBar(id, bar);
     if (session.turn) this.#tell(id, session);
     this.#notePrompt(id, session, known, prompt);
     // Waiting for a message, twice over and with no hook since: the turn was stopped.
@@ -754,6 +766,20 @@ export class Antigravity {
     this.#store.settle(requestId, { decision, by });
   }
 
+  // What the bar says of a session: its mode, which it names only while it waits for a message, and
+  // what it runs on. The bar has a model's name where a hook has its id, so it's told by the models
+  // Antigravity lists, once they're known. During a turn a hook's word stands.
+  #noteBar(id, bar) {
+    const known = this.#store.find(id);
+    if (!known || !bar) return;
+    if (bar.hint === 'idle' && bar.mode !== known.permissionMode) this.#noteMode(id, bar.mode);
+    if (this.#sessions.get(id)?.turn) return;
+    const model = this.#modelList.models.find(found => found.displayName === bar.model);
+    if (!model) return;
+    if (model.value !== known.model) this.#store.report(id, 'session.model', { model: model.value });
+    if (model.effortLevels.includes(bar.effort) && bar.effort !== known.effort) this.#store.report(id, 'session.effort', { effort: bar.effort }, { effort: bar.effort });
+  }
+
   #noteMode(id, permissionMode) {
     this.#store.report(id, 'session.mode', { permissionMode, permissionModes: MODE_IDS }, { permissionMode });
   }
@@ -820,10 +846,12 @@ export class Antigravity {
     return known;
   }
 
-  // What the bar says once the terminal is up: the mode it's in, which no hook tells.
-  async #readMode(known) {
-    const bar = readBar(await this.#terminal.readScreen(known).catch(() => ''));
-    if (bar?.hint === 'idle' && bar.mode !== known.permissionMode) this.#noteMode(known.id, bar.mode);
+  // What the bar says once the terminal is up: the mode it's in, which no hook tells, and what it runs
+  // on, which a hook tells only once something is said. The models are waited for a while, to name its
+  // model by, and what the bar says is read again each time the terminal is looked at.
+  async #readBar(known) {
+    await Promise.race([this.#knownModels().catch(() => []), pause(this.#timing.modelsWait)]);
+    this.#noteBar(known.id, readBar(await this.#terminal.readScreen(known).catch(() => '')));
   }
 
   // A new conversation in a folder, in a terminal of its own at the Mac.
@@ -832,6 +860,8 @@ export class Antigravity {
     if (!this.#installed()) throw new HelperError('no_antigravity', 'Antigravity isn\'t on this Mac.');
     if (!this.#terminal) throw new HelperError('no_tmux', 'Install tmux or Rex on your Mac to run this session.');
     if (trust !== true && !isTrusted(folder, this.#data)) throw new HelperError('needs_trust', 'Antigravity asks whether to trust this folder first.');
+    // Asked for now, to be there by the time the terminal is up.
+    this.#knownModels().catch(() => {});
     let sessionId;
     try {
       sessionId = await this.#mint(folder);
@@ -841,7 +871,7 @@ export class Antigravity {
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new HelperError('start_failed', 'Antigravity didn\'t say which session it started.');
     const target = await this.#open(sessionId, folder, { trust });
     const known = this.#adopt(sessionId, folder, target, 'startup');
-    await this.#readMode(known);
+    await this.#readBar(known);
     return { sessionId };
   }
 
@@ -860,7 +890,7 @@ export class Antigravity {
       throw new HelperError('resume_failed', `Antigravity couldn't open this session: ${error.message}`);
     }
     const known = this.#adopt(sessionId, cwd, target, 'resume');
-    await this.#readMode(known);
+    await this.#readBar(known);
     return known;
   }
 
@@ -972,8 +1002,9 @@ export class Antigravity {
     if (model !== undefined) {
       const chosen = (await this.#knownModels()).find(found => found.value === model);
       if (!chosen) throw new HelperError('bad_model', `Antigravity has no model ${model}.`);
-      const wanted = effort ?? known.effort;
-      const level = chosen.effortLevels.includes(wanted) ? wanted : chosen.effortLevels.includes('medium') ? 'medium' : chosen.effortLevels[0];
+      // It keeps thinking the way it does, which its bar says where nothing else has.
+      const wanted = effort ?? known.effort ?? readBar(await this.#terminal.readScreen(known).catch(() => ''))?.effort;
+      const level = levelFor(chosen.effortLevels, wanted);
       if (effort !== undefined && level !== effort) throw new HelperError('bad_effort', `${chosen.displayName} can't be told to think that way.`);
       if (!(await this.#run(known, `/model ${level ? `${model}-${level}` : model}`, /Model set to /))) throw new HelperError('bad_model', 'Antigravity didn\'t take that model.');
       if (model !== known.model) this.#store.report(sessionId, 'session.model', { model });

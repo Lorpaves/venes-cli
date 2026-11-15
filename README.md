@@ -350,7 +350,7 @@ What a session does is told in the shapes a Claude Code session's are, so that a
 | `interrupt` | Esc in the terminal: on a prompt it says no, and in a turn it stops it |
 | `join`, `history` | Read from the conversation's transcript, a page being whole turns |
 | `capabilities` | `models` from `agy models`, each with its `effortLevels`. `commands` is empty: its slash commands are its terminal's own. |
-| `configure` | `/model` and `/effort` typed in the terminal, between turns. Antigravity keeps the choice for the sessions started after, as it does one made at the Mac. |
+| `configure` | `/model` and `/effort` typed in the terminal, between turns. A model picked by itself keeps how hard the session thinks, or the nearest to it the model can. Antigravity keeps the choice for the sessions started after, as it does one made at the Mac. |
 | `setMode` | Shift+Tab in the terminal until its bar names the mode, between turns |
 | `respond` | Presses the prompt's row in the terminal. See below. |
 | `delete` | Fails with `cant_delete`: Antigravity has no way to be asked to drop a conversation |
@@ -359,6 +359,8 @@ Two things a hook doesn't tell are read off the terminal's screen, which is look
 
 - **A prompt to allow a tool.** Antigravity draws it and waits. Once it reads the same twice it's a `permission` request, with the call it's about and, as `options`, its rows past Yes and before No, each `{id, label}` in Antigravity's words, such as always allowing commands that start the same way. `respond` presses a row as a person at the Mac would: the first for `allow`, the last for `deny`, and an option's own for `option`. One answered at the Mac closes with `by: "terminal"`.
 - **A turn stopped with Esc.** Nothing is told of its end, so a turn is taken as stopped, with `turn.interrupted`, once the terminal has twice been seen waiting for a message with no hook since.
+
+The bar at the foot of the terminal says the session's mode, its model and how hard it thinks. A hook says the last two only once something is said, and the mode never, so a session's are read off the bar when its terminal opens and each time it's looked at between turns, and told with `session.mode`, `session.model` and `session.effort`. That's also how a change made at the Mac is told. The bar has a model's name where a hook has its id, so the model is told once the models `agy models` lists are known, which `capabilities` and `start` ask for.
 
 A session ends, with `reason: "closed"`, when its terminal has gone, or shows something other than Antigravity and says it's running something else, which is checked every half minute while it's at rest. Another conversation in the same terminal, as after `/clear`, ends the one before it with `replaced`. One that turns up there while a turn is going on is a conversation Antigravity started itself to help with that turn, and isn't a session of its own.
 

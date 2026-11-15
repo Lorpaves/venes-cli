@@ -40,7 +40,10 @@ test('a copy in Claude Code\'s cache counts only while the plugin is installed',
 
 function installed(t) {
   const dir = folder(t);
-  const paths = { ...helperPaths(path.join(dir, '.venes')), claudeSettings: path.join(dir, 'settings.json') };
+  const paths = {
+    ...helperPaths(path.join(dir, '.venes')), claudeSettings: path.join(dir, 'settings.json'),
+    antigravityPlugin: path.join(dir, 'antigravity', 'config', 'plugins', 'venes'),
+  };
   fs.mkdirSync(paths.home);
   fs.writeFileSync(paths.launcher, '#!/bin/sh\n');
   fs.writeFileSync(paths.statusLineState, JSON.stringify({ statusLine: { type: 'command', command: 'my-line' } }));
@@ -58,7 +61,7 @@ test('one go takes it all off, the plugin first, and puts the status line back',
     paths, authorizedKeys: keys, stopHelper: async () => { stopped = true; }, run: async args => { ran.push(args.join(' ')); },
   });
   assert.deepEqual(steps.map(s => [s.name, s.ok]), [
-    ['plugin', true], ['marketplace', true], ['statusLine', true], ['helper', true], ['keys', true], ['folder', true],
+    ['plugin', true], ['marketplace', true], ['statusLine', true], ['antigravity', true], ['helper', true], ['keys', true], ['folder', true],
   ]);
   assert.deepEqual(ran, ['plugin uninstall venes@venes', 'plugin marketplace remove venes']);
   assert.equal(stopped, true);

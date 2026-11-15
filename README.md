@@ -73,6 +73,7 @@ Over SSH, the code holds this Mac's name, address and host key, and a one-time k
 - **It keeps what you attach.** A picture, video or file sent with a message from the app is saved in your Downloads folder, where Claude can read it and you can find it. They stay there when you delete the session. What the helper knows of them is in `~/.venes/uploads`, until the session is deleted, or for 30 days.
 - **It stands in as your status line.** A plugin can't set Claude Code's status line, and what Claude Code tells a status line is the only place a session's limits are, so the helper sets `statusLine` in `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) to `~/.venes/venes statusline`. That keeps what Claude Code sends in `~/.venes/status`, a file a session for a week, and runs the status line you had with the same input, so your terminal shows what it did. The one you had is kept in `~/.venes/statusline.json`. With none before, it shows nothing, and Claude Code then leaves out the key hints it shows under the box when there's no status line. `~/.venes/venes statusline off` puts yours back and keeps it there; `statusline on` stands in again. A settings file that isn't plain JSON is left alone.
 - **It can let your phone in over SSH.** The app asks to, to send files over SSH, and the helper adds the phone's own public key to `~/.ssh/authorized_keys`, as pairing over SSH does. That only works while Remote Login is on.
+- **It follows Antigravity, if you use it.** On a Mac that has Google's Antigravity (a `~/.gemini` folder), the helper puts a plugin of its own in `~/.gemini/config/plugins/venes`, whose hooks hand what an Antigravity session does to the helper, as the Claude Code plugin's do. No hook of it is asked whether a tool may run, so Antigravity decides that as it would without it, and with no helper running the hooks do nothing. A session you start from the app runs `agy` in Rex or tmux, and `agy acp` once, for a moment, to make the empty conversation. It reads Antigravity's own list of your conversations and their transcripts, and writes nothing there. See [Antigravity sessions](#antigravity-sessions).
 - **It talks to Codex, if you use it.** Codex keeps a server of its own on this Mac for its apps, and the helper connects to it over the socket in `~/.codex/app-server-control`, to list your Codex sessions and work them. It only starts that server, with `codex app-server daemon start`, when you start or open a Codex session from the app. See [Codex sessions](#codex-sessions).
 - **It never touches your Claude or Codex credentials.**
 
@@ -104,7 +105,7 @@ brew uninstall venes
 Installed without Homebrew, run `~/.venes/venes uninstall`, which is what Homebrew runs too. It asks first, or doesn't with `--yes`. Then it:
 
 - takes the plugin and its marketplace out of Claude Code;
-- puts your status line back and stops the helper;
+- puts your status line back, takes its plugin out of Antigravity's folder, and stops the helper;
 - takes the keys phones were let in with out of `~/.ssh/authorized_keys`: only lines marked `venes-phone`, or `venes-pairing-…` from a pairing that never finished;
 - deletes `~/.venes`.
 
@@ -332,6 +333,41 @@ A line that starts with `!` is your own command, as in Codex's terminal: `send` 
 
 **What it doesn't do yet.** Slash commands, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
 
+### Antigravity sessions
+
+Google's Antigravity has a command line, `agy`, and a session of it runs in a terminal, as a Claude Code session does: in Rex or tmux at the Mac, where you can go on with it yourself. The helper follows one the way it follows Claude Code. When it starts, it puts a plugin of its own where Antigravity looks for the plugins of every project, `~/.gemini/config/plugins/venes`, on a Mac that has `~/.gemini`. The plugin's hooks hand each event to the helper: a session's start, each call to the model, each tool's end, and the turn's end. What was said is read from the transcript Antigravity keeps of each conversation, which a hook names. So a session you start yourself with `agy` in Rex or tmux is followed too, once the plugin is there, and can be typed into from a client. One started in any other terminal is followed and only read. `venes uninstall` takes the plugin away again.
+
+No hook is asked whether a tool may run. A hook asked that has to answer, and one that couldn't would stop every call in every session, so the helper leaves the question to Antigravity and reads the answer's prompt off the screen instead.
+
+A client says it can show these with `agents: ["antigravity"]`, as it does for Codex's, and gets none of them otherwise. Each says whose it is, with `agent: "antigravity"`, wherever a Codex session says `codex`. `folders` says `antigravity: true` on a Mac that has `agy`.
+
+What a session does is told in the shapes a Claude Code session's are, so that a client which shows those shows these with nothing new to learn. A call's `name` and `input` are a Claude Code call's of its kind: a file read is `Read` with its `file_path`, a command `Bash` with its `command` and `description`, a change `Edit` with `old_string` and `new_string` or `Write` with `content`, and anything else goes by Antigravity's own name for it with what it was given. A call's `toolUseId` is `step-` and the number of its step in the transcript. A reply comes whole when Antigravity has written it, as one `message.assistant.delta` and its `final`, and what it thought as `message.thinking`. The modes go by Claude Code's names: `default`, `acceptEdits`, `auto` and `plan`.
+
+| Command | For an Antigravity session |
+|---|---|
+| `start` | With `agent: "antigravity"`: a new conversation in `cwd`, in a terminal of its own. A conversation has no id until its first message, so an empty one is made first through Antigravity's own protocol server (`agy acp`), which says its id and is let go, and the terminal is opened on that: `agy --conversation <id>`. Antigravity asks about a folder it doesn't trust yet, as Claude Code does: `needs_trust` unless `trust: true`, which answers its question in the terminal. |
+| `send` | Typed into the terminal, with any attached file named by its path at the head of the text. During a turn, or while a request is open, it's held and goes when that's over. A stored session is opened in a terminal again by its first message. A session with no terminal the helper can reach fails with `no_pane`, and a dialog open in the terminal with `dialog_open`. |
+| `interrupt` | Esc in the terminal: on a prompt it says no, and in a turn it stops it |
+| `join`, `history` | Read from the conversation's transcript, a page being whole turns |
+| `capabilities` | `models` from `agy models`, each with its `effortLevels`. `commands` is empty: its slash commands are its terminal's own. |
+| `configure` | `/model` and `/effort` typed in the terminal, between turns. Antigravity keeps the choice for the sessions started after, as it does one made at the Mac. |
+| `setMode` | Shift+Tab in the terminal until its bar names the mode, between turns |
+| `respond` | Presses the prompt's row in the terminal. See below. |
+| `delete` | Fails with `cant_delete`: Antigravity has no way to be asked to drop a conversation |
+
+Two things a hook doesn't tell are read off the terminal's screen, which is looked at every 0.7 s while a turn goes on:
+
+- **A prompt to allow a tool.** Antigravity draws it and waits. Once it reads the same twice it's a `permission` request, with the call it's about and, as `options`, its rows past Yes and before No, each `{id, label}` in Antigravity's words, such as always allowing commands that start the same way. `respond` presses a row as a person at the Mac would: the first for `allow`, the last for `deny`, and an option's own for `option`. One answered at the Mac closes with `by: "terminal"`.
+- **A turn stopped with Esc.** Nothing is told of its end, so a turn is taken as stopped, with `turn.interrupted`, once the terminal has twice been seen waiting for a message with no hook since.
+
+A session ends, with `reason: "closed"`, when its terminal has gone, or shows something other than Antigravity and says it's running something else, which is checked every half minute while it's at rest. Another conversation in the same terminal, as after `/clear`, ends the one before it with `replaced`. One that turns up there while a turn is going on is a conversation Antigravity started itself to help with that turn, and isn't a session of its own.
+
+A turn Antigravity goes on with by itself, as when a command it left running ends, starts with no `message.user`: nothing new was said.
+
+- `library` lists the conversations Antigravity has stored that have something said in them, newest first, with the first page, from Antigravity's own summary of them (`~/.gemini/antigravity-cli/conversation_summaries.db`, read with `/usr/bin/sqlite3` and never written). Whether a session is Antigravity's is told by its file in `~/.gemini/antigravity-cli/conversations`.
+- `statusLine` gives `model`, `effort` and `project`. `page`, `pageKey`, `pageText`, `pageClose`, `image` and `taskOutput` have nothing for an Antigravity session.
+- Antigravity's hooks are the same in its desktop app, which reads the same plugin folder, so a conversation there would be followed and read. The desktop app wasn't on the Mac this was made on, so that's untried.
+
 ### Files and git
 
 A session's folder can be looked at from afar, for a Claude Code session and a Codex one alike: a session the helper follows by where it is now, and a stored one by where it ran. Most of it is read. Three commands change what's in the folder: `fileCreate` makes something new and empty, `fileWrite` gives a text file new text, and `fileDelete` moves a file or a folder to the Trash. The four at the end change the repository: what the next commit takes, the commit, and the branch. Nothing is written over without the client saying so, and nothing is deleted for good.
@@ -521,8 +557,11 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
-| `needs_trust` | Claude Code asks first whether to trust the folder, or Codex would trust it without asking. Ask the reader, and send `start` again with `trust: true`. |
+| `needs_trust` | Claude Code or Antigravity asks first whether to trust the folder, or Codex would trust it without asking. Ask the reader, and send `start` again with `trust: true`. |
 | `no_codex` | Codex isn't installed, or its server wouldn't start, so a Codex session can't be started or opened |
+| `no_antigravity` | Antigravity's `agy` isn't on the PATH, so an Antigravity session can't be started |
+| `session_busy` | An Antigravity session's model, effort or mode was to change during a turn. They're changed in its terminal, between turns. |
+| `cant_delete` | `delete` was sent for an Antigravity session, which only Antigravity can delete |
 | `session_elsewhere` | The Codex session is open in a terminal of its own at the Mac, which has to close it first |
 | `send_failed` | Codex didn't take a message |
 | `bad_agent` | `start` was asked for something other than Claude Code or Codex |

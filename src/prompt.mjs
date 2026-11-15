@@ -122,15 +122,17 @@ const promptChanged = () => new HelperError('prompt_changed', 'The prompt change
 // prompt to go.
 export async function chooseRow(session, { number, label }, {
   read = readScreen, press = pressKey, limit = PRESS_LIMIT_MS, inputSettle = INPUT_SETTLE_MS,
+  // What reads a prompt off a screen: Claude Code's, unless another terminal's is given.
+  parse = readPrompt,
 } = {}) {
-  const before = readPrompt(await read(session));
+  const before = parse(await read(session));
   if (!before?.rows.some(row => row.number === number && sameLabel(row.label, label))) throw promptChanged();
   await press(session, String(number));
   const pressedAt = Date.now();
   let entered = false;
   for (;;) {
     await pause(PRESS_CHECK_MS);
-    const now = readPrompt(await read(session));
+    const now = parse(await read(session));
     if (!isSamePrompt(before, now)) return;
     const waited = Date.now() - pressedAt;
     if (!entered && waited >= inputSettle && now.rows.find(row => row.marked)?.number === number) {

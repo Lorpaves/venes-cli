@@ -8,7 +8,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
-import { AGENT as CODEX, Codex } from './codex.mjs';
+import { installHooks } from './agyhooks.mjs';
+import { AGENT as ANTIGRAVITY, Antigravity } from './antigravity.mjs';
+import { Codex } from './codex.mjs';
 import { checkedToolUse, readArtifact } from './artifact.mjs';
 import { lineOf, onLines } from './lines.mjs';
 import { createEntry, listAnywhere, listFolder, readChunk, readFile, trashEntry, writeFile } from './files.mjs';
@@ -102,7 +104,7 @@ function readBody(req) {
   });
 }
 
-function createHookServer(store) {
+function createHookServer(store, antigravity = undefined) {
   return http.createServer(async (req, res) => {
     let event;
     try {
@@ -110,6 +112,13 @@ function createHookServer(store) {
     } catch {
       res.statusCode = 400;
       res.end();
+      return;
+    }
+    // One of Antigravity's, which its plugin marks. Antigravity waits on its hooks, so it's answered
+    // before anything is made of the event.
+    if (req.headers['x-venes-agent'] === ANTIGRAVITY) {
+      res.end();
+      antigravity?.handleHook(event, terminalFrom(req.headers));
       return;
     }
     try {
@@ -164,7 +173,10 @@ async function reofferPromptRows(store, request) {
   if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined) {
+  // The agents other than Claude Code, each with sessions of its own that it runs through its own server.
+  const others = [codex, antigravity].filter(Boolean);
+  const named = agent => others.find(other => other.name === agent);
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
   const bootId = randomUUID();
@@ -195,9 +207,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   // A client that can show a page, which it says with `pages`, has one a command opens left open
   // for it, and is told. Otherwise it goes, as the next message would act on it.
   const deliver = (session, { clientId, text, attachments = [], pages = false }) => typing(session.id, async () => {
-    // A Codex session takes it through Codex's own server, and says nothing of a page.
-    if (session.agent === CODEX) {
-      await codex.deliver(session, { clientId, text, attachments });
+    // A Codex session takes it through Codex's own server, as an Antigravity session does through
+    // Antigravity's, and says nothing of a page.
+    const other = named(session.agent);
+    if (other) {
+      await other.deliver(session, { clientId, text, attachments });
       return false;
     }
     if (clientId) store.expectEcho(session, clientId, text);
@@ -313,15 +327,27 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   };
 
   // A Codex session's commands go to Codex's server, and any other's the way they always did.
-  const isCodex = async sessionId => (await codex?.owns(sessionId)) === true;
-  const forCodex = (name, otherwise) => async (msg, socket) => ((await isCodex(msg.sessionId)) ? codex[name](msg) : otherwise(msg, socket));
+  // The agent a session is another's than Claude Code's, if it is.
+  const otherOf = async sessionId => {
+    for (const other of others) if ((await other.owns(sessionId)) === true) return other;
+    return undefined;
+  };
+  const forOther = (name, otherwise) => async (msg, socket) => {
+    const other = await otherOf(msg.sessionId);
+    return other ? other[name](msg) : otherwise(msg, socket);
+  };
+  // Where a session the helper doesn't follow ran.
+  const storedFolder = async sessionId => {
+    const other = await otherOf(sessionId);
+    return other ? other.folderOf(sessionId) : (await library.info(sessionId).catch(() => undefined))?.cwd;
+  };
 
   // The folder a session works in, which is where its files and its git are looked at: a session the
   // helper follows says where it is now, and a stored one where it ran.
   const folderOf = async sessionId => {
     if (typeof sessionId !== 'string') throw new HelperError('unknown_session', 'No such session.');
     const cwd = store.find(sessionId)?.cwd
-      ?? ((await isCodex(sessionId)) ? await codex.folderOf(sessionId) : (await library.info(sessionId).catch(() => undefined))?.cwd);
+      ?? await storedFolder(sessionId);
     if (!cwd) throw new HelperError('unknown_session', `No session ${sessionId}`);
     return checkedFolder(cwd);
   };
@@ -388,7 +414,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const listLibrary = async ({ limit, offset }, socket) => {
     const [page, threads] = await Promise.all([
       library.page({ limit, offset }),
-      offset || !shows(socket, CODEX) ? [] : codex?.library().catch(error => { console.error(`codex library: ${error.message}`); return []; }) ?? [],
+      offset ? [] : Promise.all(others.filter(other => shows(socket, other.name)).map(other => other.library().catch(error => {
+        console.error(`${other.name} library: ${error.message}`);
+        return [];
+      }))).then(lists => lists.flat()),
     ]);
     return threads.length ? { ...page, items: [...page.items, ...threads] } : page;
   };
@@ -452,6 +481,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         home, recent: recentFolders(stored).map(where => ({ ...named(where), running: counts.get(where) ?? 0 })),
         // A client offers Codex for a new session only where there is one.
         ...(codex?.isAvailable() && { codex: true }),
+        ...(antigravity?.isAvailable() && { antigravity: true }),
       };
     },
     // A new folder where the reader is looking, for a session to start in.
@@ -463,14 +493,15 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     folderFileCreate: async ({ path: folder, name }) => createFile(folder, name),
     start: msg => {
       if (msg.agent === undefined || msg.agent === 'claude') return startNewSession({ store, terminal: resumeTerminal() }, msg);
-      if (msg.agent !== CODEX || !codex) throw new HelperError('bad_agent', `Nothing here starts ${msg.agent}.`);
-      return codex.start(msg);
+      const other = named(msg.agent);
+      if (!other) throw new HelperError('bad_agent', `Nothing here starts ${msg.agent}.`);
+      return other.start(msg);
     },
     // What an @ in a message can name, from the session's folder: files, and folders ending in /.
     mentions: async ({ sessionId, query = '', limit = MENTION_LIMIT }) => {
       if (typeof query !== 'string' || query.length > 500) throw new HelperError('bad_query', 'That can\'t be looked for.');
       const cwd = store.find(sessionId)?.cwd
-        ?? ((await isCodex(sessionId)) ? await codex.folderOf(sessionId) : (await library.info(sessionId).catch(() => undefined))?.cwd);
+        ?? await storedFolder(sessionId);
       if (!cwd) return { items: [] };
       const wanted = Number.isInteger(limit) ? Math.max(limit, 1) : MENTION_LIMIT;
       return { items: await findMentions(cwd, query.replace(/^@/, ''), wanted) };
@@ -533,20 +564,21 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     gitSwitch: async ({ sessionId, root, branch }) => thenRecount(sessionId, gitSwitch(await repositoryFor(sessionId, root), { branch })),
     // The mode a session asks permission in. A Claude Code session's is changed in its terminal, as a
     // person changes it, and a Codex session's through Codex's server, from its next turn.
-    setMode: forCodex('setMode', async ({ sessionId, mode }) => {
+    setMode: forOther('setMode', async ({ sessionId, mode }) => {
       const session = sessionWithPane(sessionId);
       const { passed } = await typing(session.id, () => switchMode(session, mode, () => store.pendingFor(session)[0]));
       store.noteMode(session.id, mode, passed);
       return {};
     }),
-    capabilities: forCodex('capabilities', async msg => {
+    capabilities: forOther('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);
     }),
-    configure: forCodex('configure', configure),
+    configure: forOther('configure', configure),
     delete: async ({ sessionId }) => {
-      if (await isCodex(sessionId)) {
-        await codex.remove({ sessionId });
+      const other = await otherOf(sessionId);
+      if (other) {
+        await other.remove({ sessionId });
         removeUploads(uploads, sessionId);
         return {};
       }
@@ -556,7 +588,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       removeUploads(uploads, sessionId);
       return {};
     },
-    history: forCodex('history', msg => {
+    history: forOther('history', msg => {
       const file = store.find(msg.sessionId)?.transcriptPath;
       return file ? readHistory(file, msg) : library.history(msg.sessionId, msg);
     }),
@@ -564,7 +596,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     avatar: async () => (await avatar()) ?? {},
     // `imageId`, because `id` is the request's own.
     image: async msg => {
-      if (await isCodex(msg.sessionId)) return codex.image(msg);
+      const other = await otherOf(msg.sessionId);
+      if (other) return other.image(msg);
       const file = store.find(msg.sessionId)?.transcriptPath;
       const image = file ? readImage(file, msg.imageId) : await library.image(msg.sessionId, msg.imageId);
       if (!image?.data) throw new HelperError('unknown_image', 'This image is no longer in the transcript.');
@@ -581,7 +614,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // reply or follows it on the wire.
     join: async msg => {
       await countedChanges(msg.sessionId);
-      if (await isCodex(msg.sessionId)) return codex.join(msg);
+      const other = await otherOf(msg.sessionId);
+      if (other) return other.join(msg);
       const session = store.find(msg.sessionId);
       await noteShownMode(session);
       if (!session?.transcriptPath) return joinStored(msg);
@@ -599,7 +633,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const request = store.requestOf(msg.requestId);
       // A permission prompt's own rows are pressed in the terminal, which then answers Claude Code.
       // Codex's are answers its server takes, as any other.
-      if (request?.kind === 'permission' && msg.option != null && request.agent !== CODEX) {
+      if (request?.kind === 'permission' && msg.option != null && !named(request.agent)) {
         const row = store.choose(msg.requestId, msg.option);
         try {
           const session = sessionWithPane(request.sessionId);
@@ -624,7 +658,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // What the session's status line was last told, or null before Claude Code has run it.
     statusLine: async ({ sessionId }) => {
       // Codex has no status line, and says what one would itself.
-      if (await isCodex(sessionId)) return codex.status({ sessionId });
+      const other = await otherOf(sessionId);
+      if (other) return other.status({ sessionId });
       store.get(sessionId);
       const status = await readStatus(statusDir, sessionId);
       // A week's limit that's for one model, as Fable's is, isn't in what a status line is told. It's
@@ -647,7 +682,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const text = typeof msg.text === 'string' ? msg.text : '';
       if (!text.trim() && !attachments.length) throw new HelperError('bad_text', 'Nothing to send.');
       if (msg.lane !== undefined && msg.lane !== 'next' && msg.lane !== 'later') throw new HelperError('bad_lane', `Unknown lane: ${msg.lane}`);
-      if (await isCodex(msg.sessionId)) return codex.send({ ...msg, text, attachments });
+      const other = await otherOf(msg.sessionId);
+      if (other) return other.send({ ...msg, text, attachments });
       const change = attachments.length ? undefined : readSwitch(text);
       if (change) {
         await configure({ sessionId: msg.sessionId, ...change });
@@ -697,7 +733,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return readTail(task.outputFile, TASK_OUTPUT_BYTES);
     },
     interrupt: async msg => {
-      if (await isCodex(msg.sessionId)) return codex.interrupt(msg);
+      const other = await otherOf(msg.sessionId);
+      if (other) return other.interrupt(msg);
       const session = sessionWithPane(msg.sessionId);
       if (session.status !== 'running' && session.status !== 'waiting') throw new HelperError('not_running', 'Nothing to interrupt.');
       await sendEscape(session);
@@ -782,7 +819,6 @@ export async function startDaemon(paths) {
   // start, so a failure that stopped the helper would stop it every time.
   await restoreSessions(store, paths).catch(error => console.error(`restore: ${error.stack}`));
   const stopSaving = startRegistrySaving(store, paths);
-  const hookServer = createHookServer(store);
   const updater = startAutoUpdate(store, paths);
   const library = new Library(paths);
   fs.mkdirSync(paths.sdkDir, { recursive: true, mode: 0o700 });
@@ -797,7 +833,16 @@ export async function startDaemon(paths) {
   // A Codex session the helper starts or loads is shown in a terminal at the Mac too, unless a run says not to.
   const codex = new Codex({ store, terminal: process.env.VENES_CODEX_TERMINAL === 'off' ? undefined : resumeTerminal() });
   codex.restore().catch(error => console.error(`codex: ${error.message}`));
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex);
+  // Antigravity's, each in a terminal as Claude Code's are, and told of by the hooks of a plugin put
+  // where Antigravity finds it. A Mac with no Antigravity gets none.
+  const antigravity = new Antigravity({ store, terminal: resumeTerminal() });
+  try {
+    installHooks(paths.antigravityPlugin, { always: Boolean(process.env.VENES_AGY_CONFIG) });
+  } catch (error) {
+    console.error(`antigravity hooks: ${error.message}`);
+  }
+  const hookServer = createHookServer(store, antigravity);
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity);
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -811,6 +856,7 @@ export async function startDaemon(paths) {
       stopSaving();
       transcripts.stop();
       codex.stop();
+      antigravity.stop();
       updater.stop();
       clearInterval(heldTimer);
       for (const socket of subscribers) socket.destroy();

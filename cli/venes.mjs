@@ -192,6 +192,7 @@ const commands = {
       plugin: 'Removed the plugin from Claude Code.',
       marketplace: 'Removed its marketplace.',
       statusLine: 'Put your status line back.',
+      antigravity: had => (had ? 'Removed the plugin from Antigravity.' : 'Antigravity had no plugin to remove.'),
       helper: 'Stopped the helper.',
       keys: count => `Took ${count} phone key${count === 1 ? '' : 's'} out of ${keys}.`,
       folder: `Deleted ${paths.home}.`,

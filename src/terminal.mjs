@@ -184,5 +184,9 @@ export function terminalFrom(headers) {
 export function resumeTerminal(env = process.env) {
   const useRex = env.VENES_TERMINAL ? env.VENES_TERMINAL === 'rex' : rex.isInstalled();
   const backend = useRex ? rex : tmux;
-  return { startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, pressKey };
+  return {
+    startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, pressKey,
+    paste: (session, text) => backendOf(session).paste(session, text),
+    foreground: session => backendOf(session).foreground(session),
+  };
 }

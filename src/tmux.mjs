@@ -27,6 +27,9 @@ export const readScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-p
 export const readStyledScreen = ({ pane, tmuxSocket }) => tmux(tmuxSocket, ['capture-pane', '-p', '-e', '-t', pane]);
 export const pressKey = ({ pane, tmuxSocket }, key) => tmux(tmuxSocket, ['send-keys', '-t', pane, key]);
 
+// The program a pane is running now, by its name.
+export const foreground = async ({ pane, tmuxSocket }) => (await tmux(tmuxSocket, ['display-message', '-p', '-t', pane, '#{pane_current_command}'])).trim();
+
 // Always a paste: as send-keys arguments, a leading "-" or trailing ";" would be read by tmux
 // itself instead of reaching Claude.
 export async function paste({ pane, tmuxSocket }, text) {

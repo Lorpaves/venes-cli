@@ -177,6 +177,9 @@ export async function isSessionOpen(_, target) {
   }
 }
 
+// The program a block is running now, by its name.
+export const foreground = async session => (await callBlock(session, 'process', {})).foreground?.name;
+
 // Whether a block from before a restart still has Claude in it.
 export async function runsClaude(session) {
   try {

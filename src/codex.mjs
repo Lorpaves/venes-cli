@@ -578,6 +578,10 @@ export class Codex {
     this.#startDaemon = startDaemon;
   }
 
+  get name() {
+    return AGENT;
+  }
+
   // The sessions already on the daemon when the helper starts, if it's running.
   async restore() {
     await this.#open({ start: false }).catch(() => {});

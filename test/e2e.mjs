@@ -201,6 +201,8 @@ function startHelper(cli = CLI, codexStart = undefined) {
   const env = {
     ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR, VENES_TERMINAL: inRex ? 'rex' : 'tmux',
     VENES_DOWNLOADS: DOWNLOADS, VENES_AUTHORIZED_KEYS: AUTHORIZED_KEYS, VENES_PUSH_URL: PUSH_URL, VENES_CODEX_SOCKET: CODEX_SOCKET,
+    // The plugin Antigravity would run goes in the helper's own folder, where no Antigravity looks.
+    VENES_AGY_CONFIG: path.join(HOME, 'antigravity'),
     VENES_TMUX_SOCKET: tmux('display-message', '-p', '#{socket_path}').trim(), VENES_RESUME_ARGS: JSON.stringify(RESUME_ARGS),
     ...(inRex && { REX_SERVER }),
     ...(codexStart && { VENES_CODEX_START_ARGS: JSON.stringify(Object.fromEntries(Object.entries(codexStart).filter(([key]) => key !== 'terminal'))) }),

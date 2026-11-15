@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { removeHooks } from './agyhooks.mjs';
 import { removePhoneKeys } from './pairing.mjs';
 import { removeStatusLine } from './status.mjs';
 
@@ -70,6 +71,8 @@ export async function uninstall({ paths, authorizedKeys, stopHelper, run = runCl
     fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 }); // where it notes that it's off, until the folder goes
     removeStatusLine({ settingsFile: paths.claudeSettings, stateFile: paths.statusLineState });
   });
+  // And the one Antigravity ran, so that its sessions stop looking for the helper.
+  await step('antigravity', () => removeHooks(paths.antigravityPlugin));
   await step('helper', () => stopHelper());
   await step('keys', () => removePhoneKeys(authorizedKeys));
   await step('folder', () => removeHome(paths.home));

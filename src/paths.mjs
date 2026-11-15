@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { pluginFolder } from './agyhooks.mjs';
 
 export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedir(), '.venes')) {
   return {
@@ -24,6 +25,8 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     statusLineState: path.join(home, 'statusline.json'),
     // The phones to notify while they aren't connected, each with its device token and key.
     pushFile: path.join(home, 'push.json'),
+    // The plugin Antigravity runs the helper's hooks from.
+    antigravityPlugin: pluginFolder(process.env, os.homedir()),
     // Claude Code's own settings, where the status line is set up.
     claudeSettings: process.env.VENES_CLAUDE_SETTINGS
       || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json'),

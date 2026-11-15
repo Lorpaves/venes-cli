@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { insideFolder, isText, listFolder, mediaTypeOf, readFile } from '../../src/files.mjs';
+import { CHUNK_BYTES, insideFolder, isText, listFolder, mediaTypeOf, readChunk, readFile } from '../../src/files.mjs';
 
 function folder(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-files-')));
@@ -124,4 +124,43 @@ test('a file that isn\'t there, a folder, or one outside is refused', t => {
   assert.throws(() => readFile(root, 'gone.txt'), error => error.code === 'no_file');
   assert.throws(() => readFile(root, 'src'), error => error.code === 'no_file');
   assert.throws(() => readFile(root, '../x'), error => error.code === 'bad_path');
+});
+
+test('a file of any size and any kind goes a piece at a time, each saying how big the file is and when it changed', t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-chunks-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bytes = Buffer.alloc(CHUNK_BYTES * 2 + 5);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = (index * 31 + 7) % 256;
+  fs.writeFileSync(path.join(root, 'big.bin'), bytes);
+  const modifiedAt = Math.floor(fs.statSync(path.join(root, 'big.bin')).mtimeMs);
+
+  const whole = [];
+  for (let offset = 0; ; ) {
+    const piece = readChunk(root, 'big.bin', { offset });
+    assert.deepEqual([piece.name, piece.size, piece.modifiedAt, piece.offset, piece.mediaType], ['big.bin', bytes.length, modifiedAt, offset, 'application/octet-stream']);
+    const data = Buffer.from(piece.data, 'base64');
+    whole.push(data);
+    offset += data.length;
+    if (offset >= piece.size) break;
+    assert.equal(data.length, CHUNK_BYTES);
+  }
+  assert.deepEqual(whole.map(data => data.length), [CHUNK_BYTES, CHUNK_BYTES, 5]);
+  assert.ok(Buffer.concat(whole).equals(bytes));
+
+  // A shorter piece when that's asked for, never a longer one than the helper sends, and nothing at the end.
+  assert.ok(Buffer.from(readChunk(root, 'big.bin', { offset: 3, length: 4 }).data, 'base64').equals(bytes.subarray(3, 7)));
+  assert.equal(Buffer.from(readChunk(root, 'big.bin', { offset: 1, length: CHUNK_BYTES * 9 }).data, 'base64').length, CHUNK_BYTES);
+  assert.equal(readChunk(root, 'big.bin', { offset: bytes.length }).data, '');
+  // Text is bytes like any other, and an empty file is one empty piece.
+  fs.writeFileSync(path.join(root, 'words.txt'), 'héllo\n');
+  fs.writeFileSync(path.join(root, 'empty'), '');
+  assert.equal(Buffer.from(readChunk(root, 'words.txt').data, 'base64').toString(), 'héllo\n');
+  assert.deepEqual([readChunk(root, 'empty').size, readChunk(root, 'empty').data], [0, '']);
+
+  for (const range of [{ offset: -1 }, { offset: 1.5 }, { offset: '0' }, { length: 0 }, { length: -3 }, { offset: bytes.length + 1 }]) {
+    assert.throws(() => readChunk(root, 'big.bin', range), error => error.code === 'bad_range', JSON.stringify(range));
+  }
+  assert.throws(() => readChunk(root, '../outside'), error => error.code === 'bad_path');
+  assert.throws(() => readChunk(root, 'gone.bin'), error => error.code === 'no_file');
+  assert.throws(() => readChunk(root, '.'), error => error.code === 'no_file');
 });

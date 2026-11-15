@@ -2176,6 +2176,20 @@ T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissio
   assert.deepEqual([read.name, read.size, read.text, read.data], ['e2e-look.txt', 23, 'first line\nsecond line\n', undefined]);
   const picture = await r.client.request('fileRead', { sessionId, path: text.path.replace('e2e-look.txt', 'e2e-look.png') });
   assert.deepEqual([picture.mediaType, picture.text, Buffer.from(picture.data, 'base64').length], ['image/png', undefined, 8]);
+  // A file of any size comes whole, a piece at a time: here one a little over two pieces long.
+  const big = Buffer.alloc(2 * 1024 * 1024 + 3);
+  for (let index = 0; index < big.length; index++) big[index] = (index * 31 + 7) % 256;
+  fs.writeFileSync(path.join(WS, 'e2e-big.bin'), big);
+  const pieces = [];
+  for (let offset = 0; offset < big.length;) {
+    const piece = await r.client.request('fileChunk', { sessionId, path: 'e2e-big.bin', offset });
+    assert.deepEqual([piece.size, piece.offset, typeof piece.modifiedAt], [big.length, offset, 'number']);
+    pieces.push(Buffer.from(piece.data, 'base64'));
+    offset += pieces.at(-1).length;
+  }
+  assert.deepEqual([pieces.map(piece => piece.length), Buffer.concat(pieces).equals(big)], [[1024 * 1024, 1024 * 1024, 3], true]);
+  await assert.rejects(r.client.request('fileChunk', { sessionId, path: 'e2e-big.bin', offset: big.length + 1 }), { code: 'bad_range' });
+  await assert.rejects(r.client.request('fileChunk', { sessionId, path: '/etc/hosts' }), { code: 'bad_path' });
   await assert.rejects(r.client.request('files', { sessionId, path: '..' }), { code: 'bad_path' });
   await assert.rejects(r.client.request('fileRead', { sessionId, path: '/etc/hosts' }), { code: 'bad_path' });
   await assert.rejects(r.client.request('fileRead', { sessionId, path: 'e2e-not-there.txt' }), { code: 'no_file' });

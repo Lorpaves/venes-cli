@@ -12,6 +12,9 @@ export const FILE_ENTRIES = 2000;
 export const TEXT_BYTES = 512 * 1024;
 // A file that isn't text is sent whole up to this size, for the client to show as the picture or the document it is.
 export const BINARY_BYTES = 8 * 1024 * 1024;
+// A file of any size goes a piece at a time, each no longer than this, so that none of it has to be held
+// whole anywhere on the way.
+export const CHUNK_BYTES = 1024 * 1024;
 // How much of a file is looked at to tell whether it's text.
 const SNIFF_BYTES = 8 * 1024;
 // What a folder's own bookkeeping is, which no one browsing it is after.
@@ -137,4 +140,43 @@ export function readFile(root, named, { textLimit = TEXT_BYTES, binaryLimit = BI
     if (error instanceof HelperError) throw error;
     throw new HelperError('unreadable_file', `${about.name} can't be read.`);
   }
+}
+
+// A piece of one of the session's files: `length` bytes from `offset`, as they are, for a reader that takes
+// the file whole a piece at a time, whatever its size and whatever is in it. Each piece says the file's
+// size and when it last changed, so that a reader can tell a file that changed between two pieces. A
+// piece that starts at the file's end has nothing in it.
+export function readChunk(root, named, { offset = 0, length = CHUNK_BYTES } = {}) {
+  const file = insideFolder(root, named);
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1) throw new HelperError('bad_range', 'That isn\'t a part of a file.');
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    throw new HelperError('no_file', 'That file isn\'t there any more.');
+  }
+  if (!stat.isFile()) throw new HelperError('no_file', 'That isn\'t a file.');
+  if (offset > stat.size) throw new HelperError('bad_range', 'That\'s past the end of the file.');
+  const wanted = Math.min(length, CHUNK_BYTES, stat.size - offset);
+  const buffer = Buffer.alloc(wanted);
+  let read = 0;
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      // One read can come back short, so it's read until the piece is whole or the file ends.
+      while (read < wanted) {
+        const got = fs.readSync(fd, buffer, read, wanted - read, offset + read);
+        if (got === 0) break;
+        read += got;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    throw new HelperError('unreadable_file', `${path.basename(file)} can't be read.`);
+  }
+  return {
+    path: file, name: path.basename(file), size: stat.size, modifiedAt: Math.floor(stat.mtimeMs), mediaType: mediaTypeOf(file), offset,
+    data: buffer.subarray(0, read).toString('base64'),
+  };
 }

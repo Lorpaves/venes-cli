@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
-import { listFolder, readFile } from './files.mjs';
+import { listFolder, readChunk, readFile } from './files.mjs';
 import {
   branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
   status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
@@ -427,6 +427,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // What's in the session's folder, a level at a time, and what's in one of its files.
     files: async ({ sessionId, path: named }) => listFolder(await folderOf(sessionId), named),
     fileRead: async ({ sessionId, path: named }) => readFile(await folderOf(sessionId), named),
+    // A file of any size, a piece at a time.
+    fileChunk: async ({ sessionId, path: named, offset, length }) => readChunk(await folderOf(sessionId), named, { offset, length }),
     // What git says of a session's repository: null for a session with none. A session can have several,
     // as it moves about, so `repositories` lists them, the first being the one told of when none is named.
     git: async ({ sessionId, root }) => {

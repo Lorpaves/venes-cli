@@ -22,7 +22,7 @@ const SCREEN_READS = 16;
 const BLOB_READ_BYTES = 960 * 1024;
 const KEYS = {
   Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p', Tab: 'tab', BTab: 'shift+tab',
-  Space: 'space', BSpace: 'backspace',
+  Space: 'space', BSpace: 'backspace', 'C-k': 'ctrl+k', 'C-u': 'ctrl+u',
 };
 const PROGRAM_NAME = 'claude';
 // Sessions the helper starts share this one, a window each, because Rex keeps a session in its

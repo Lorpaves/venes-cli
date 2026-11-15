@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
-import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom } from '../../src/terminal.mjs';
+import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom, sendMessage } from '../../src/terminal.mjs';
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
 
@@ -251,7 +251,17 @@ const FAST = { limit: 60, check: 5, requestSettle: 5, pageSettle: 5 };
 test('a message to a session in Rex goes the same way as one in tmux: checked, pasted, then Enter', async t => {
   const calls = fakeRex(t, { format: plain });
   await sendText(SESSION, 'hello', () => undefined);
-  assert.deepEqual(calls().map(({ args }) => args.at(-1) === 'enter' ? 'enter' : args.includes('block.event') ? 'paste' : 'read'), ['read', 'paste', 'read', 'enter']);
+  // The second look is at what's in its box, which here is nothing.
+  assert.deepEqual(calls().map(({ args }) => args.at(-1) === 'enter' ? 'enter' : args.includes('block.event') ? 'paste' : 'read'), ['read', 'read', 'paste', 'read', 'enter']);
+});
+
+test('a box in Rex with something typed in it is emptied before the message, and one that won\'t empty stops it', async t => {
+  const edge = '─'.repeat(40);
+  const calls = fakeRex(t, { format: JSON.stringify({ content: `${edge}\n❯\u00a0left at the Mac\n${edge}\n  ⏸ manual mode on\n` }) });
+  await assert.rejects(sendMessage(SESSION, { text: 'hello' }, () => undefined, { boxSettle: 1 }), { code: 'box_not_empty' });
+  const keys = calls().filter(({ args }) => args.includes('send-key')).map(({ args }) => args.at(-1));
+  assert.deepEqual([[...new Set(keys)], keys.slice(0, 7), calls().some(({ args }) => args.includes('block.event')), keys.includes('enter')],
+    [['ctrl+k', 'ctrl+u'], ['ctrl+k', 'ctrl+k', 'ctrl+k', 'ctrl+k', 'ctrl+k', 'ctrl+k', 'ctrl+u'], false, false]);
 });
 
 test('a dialog on a Rex screen stops the message', async t => {

@@ -126,5 +126,22 @@ export function readReview(screen) {
   return found && REVIEW_KEYS.test(shown) ? { left: Number(found[1]) } : undefined;
 }
 
+// What's in the box a message is typed in: the lines between the last two rules, without the mark the
+// first begins with. Nothing at all when there's no box to read.
+const BOX_MARK = /^>(\s|$)/;
+export function boxOf(screen) {
+  const lines = linesOf(`${screen ?? ''}`);
+  const [top, bottom] = lines.flatMap((line, index) => (EDGE.test(line) ? [index] : [])).slice(-2);
+  if (bottom === undefined || bottom - top < 2 || !BOX_MARK.test(lines[top + 1])) return undefined;
+  return [lines[top + 1].slice(1), ...lines.slice(top + 2, bottom)].map(line => line.trim()).join('\n').trim();
+}
+
+// Whether something's typed there. An empty box can show a line of its own, about the mode it's in,
+// which reads like one that's typed: but the bar says how to see the shortcuts only while nothing is.
+export function hasTyped(screen) {
+  const bar = readBar(screen);
+  return Boolean(bar) && bar.hint === undefined && !readReview(screen) && Boolean(boxOf(screen));
+}
+
 export const asksTrust = screen => TRUST_QUESTION.test(screen);
 export const hasTrustPicked = screen => TRUST_PICKED.test(screen);

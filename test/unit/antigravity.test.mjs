@@ -259,6 +259,27 @@ test('a message is typed into the terminal, and known for the client\'s own when
   assert.equal(events.filter(event => event.kind === 'message.user').at(-1).clientId, undefined);
 });
 
+test('what\'s left in the terminal\'s box is taken out before a message is typed, so the message is all that\'s sent', async t => {
+  const { agent, terminal, hook } = setup(t, { timing: { boxSettle: 1 } });
+  await hook('SessionStart');
+  // A draft left at the Mac: the bar says nothing of shortcuts while something's typed.
+  terminal.screen = ['  ok', RULE, '> left at the mac', '  on two lines', RULE, bar('')].join('\n');
+  terminal.onKey = key => { if (key === 'C-u' && terminal.keys.filter(pressed => pressed === 'C-u').length === 6) terminal.screen = IDLE; };
+  const order = [];
+  const { paste, pressKey } = terminal;
+  terminal.paste = async (target, text) => { order.push('paste'); return paste(target, text); };
+  terminal.pressKey = async (target, key) => { order.push(key); return pressKey(target, key); };
+  await agent.send({ sessionId: ID, text: 'from the app', clientId: 'c1' });
+  assert.deepEqual([terminal.pasted, order.join(' ')], [['from the app'], `${'C-k '.repeat(6)}${'C-u '.repeat(6)}paste Enter`]);
+  // An empty box is typed into as it is.
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: 'from the app' });
+  await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
+  order.length = 0;
+  terminal.onKey = undefined;
+  await agent.send({ sessionId: ID, text: 'again', clientId: 'c2' });
+  assert.equal(order.join(' '), 'paste Enter');
+});
+
 test('nothing is typed while something is open in the terminal, or with no terminal to type into', async t => {
   const { agent, terminal, hook } = setup(t, { screen: PROMPT, timing: { watch: 100_000 } });
   await hook('SessionStart');

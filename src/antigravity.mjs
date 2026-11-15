@@ -25,13 +25,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import {
-  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog,
+  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog,
 } from './agyscreen.mjs';
 import { mediaTypeOf, moveToTrash } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
 import { checkedFolder } from './folders.mjs';
 import { HelperError } from './errors.mjs';
 import { choicesOf, chooseRow } from './prompt.mjs';
+import { emptyBox } from './terminal.mjs';
 import { VERSION } from './version.mjs';
 
 export { MODE_IDS };
@@ -70,6 +71,8 @@ const STEP_WAIT_MS = 1500;
 const STEP_CHECK_MS = 100;
 // More presses than there are modes to go round.
 const MOST_MODE_PRESSES = 6;
+// How long the box takes to show what a run of its keys did.
+const BOX_SETTLE_MS = 120;
 // A turn rarely leaves more than a document or two to look over.
 const MOST_REVIEW_PRESSES = 12;
 const KEY_LIMIT_MS = 2000;
@@ -579,7 +582,8 @@ export class Antigravity {
     this.#timing = {
       watch: WATCH_MS, rest: REST_CHECK_MS, startLimit: START_LIMIT_MS, startCheck: START_CHECK_MS, keySettle: KEY_SETTLE_MS,
       pasteSettle: PASTE_SETTLE_MS, stepWait: STEP_WAIT_MS, stepCheck: STEP_CHECK_MS, keyLimit: KEY_LIMIT_MS, keyCheck: KEY_CHECK_MS,
-      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, quitLimit: QUIT_LIMIT_MS, quitCheck: QUIT_CHECK_MS, ...timing,
+      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, quitLimit: QUIT_LIMIT_MS, quitCheck: QUIT_CHECK_MS,
+      boxSettle: BOX_SETTLE_MS, ...timing,
     };
     this.#timer = setInterval(() => this.#lookAtAll(), this.#timing.watch);
     this.#timer.unref();
@@ -1061,6 +1065,7 @@ export class Antigravity {
       return undefined;
     };
     if (showsDialog(await read())) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
+    await this.#emptyBox(known);
     await this.#terminal.paste(known, REVIEW_COMMAND);
     await pause(this.#timing.pasteSettle);
     await this.#terminal.pressKey(known, 'Enter');
@@ -1126,7 +1131,16 @@ export class Antigravity {
     // and the mode switched, as at the Mac.
     const pending = this.#store.pendingFor(known).find(request => request.id !== this.#session(known.id).review);
     if (pending) throw new HelperError('request_pending', 'Answer the open request first.', { requestId: pending.id });
-    if (showsDialog(await this.#terminal.readScreen(known))) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
+    const screen = await this.#terminal.readScreen(known);
+    if (showsDialog(screen) || readReview(screen)) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
+  }
+
+  // Empties the box of whatever's typed in it, as a draft left at the Mac, so that what's typed next is
+  // all that's sent and not added to it. The keys are the box's own, and do nothing to an empty one.
+  #emptyBox(known) {
+    return emptyBox(known, async () => hasTyped(await this.#terminal.readScreen(known).catch(() => '')), {
+      press: (target, key) => this.#terminal.pressKey(target, key), settle: this.#timing.boxSettle,
+    });
   }
 
   // Opens Antigravity's terminal on a conversation, and waits until it's ready for a message. It asks
@@ -1248,6 +1262,7 @@ export class Antigravity {
     const entry = { typed, text, clientId, attachments, at: Date.now() };
     session.typed.push(entry);
     try {
+      await this.#emptyBox(known);
       await this.#terminal.paste(known, typed);
       await pause(this.#timing.pasteSettle);
       await this.#refuseIfOpen(known);
@@ -1314,6 +1329,7 @@ export class Antigravity {
   async #run(known, command, said) {
     await this.#refuseIfOpen(known);
     if (this.#session(known.id).turn) throw new HelperError('session_busy', 'Wait for the turn to end first.');
+    await this.#emptyBox(known);
     await this.#terminal.paste(known, command);
     await pause(this.#timing.pasteSettle);
     await this.#terminal.pressKey(known, 'Enter');

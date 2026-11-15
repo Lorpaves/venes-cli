@@ -33,6 +33,16 @@ const IMAGE_SETTLE_CHECK_MS = 100;
 const IMAGE_MARK = /\[Image #\d+\]/g;
 // The edge a page opens under, across the pane from its first column.
 const PAGE_EDGE = /^─{20,}/;
+// Claude Code's input box is drawn between two such edges, its first line after this mark. Empty, it
+// shows a line of what could be asked, dimmed, which isn't something typed.
+const BOX_MARK = '❯';
+// What empties the box, as its own keys do (2.1.323): Ctrl+K takes what's after the cursor to the end
+// of its line, then the line's end with it, and Ctrl+U what's before it, a line at a time. Wherever the
+// cursor was left, a few of each, a few times over, take it all. Enough for a draft of dozens of lines.
+const BOX_KEYS = ['C-k', 'C-u'];
+const BOX_PRESSES = 6;
+const BOX_ROUNDS = 12;
+const BOX_SETTLE_MS = 120;
 // What a reader can press on a page from afar, by the names tmux and Rex both know them by here.
 export const PAGE_KEYS = ['Up', 'Down', 'Left', 'Right', 'Enter', 'Escape', 'Tab', 'BTab', 'Space', 'BSpace'];
 
@@ -64,6 +74,38 @@ export async function refuseIfBlocked(session, isBlocked) {
   if (await hasOpenDialog(session)) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
 }
 
+// What's typed in Claude Code's input box, from a screen with its colours: an empty string when there's
+// nothing, and nothing at all when the screen has no box to read, as with a dialog open over it.
+export function typedIn(styledScreen) {
+  const rows = screenCells(styledScreen);
+  const plain = rows.map(plainText);
+  const edges = plain.flatMap((line, index) => (PAGE_EDGE.test(line) ? [index] : []));
+  const [top, bottom] = edges.slice(-2);
+  if (bottom === undefined || bottom - top < 2 || !plain[top + 1].startsWith(BOX_MARK)) return undefined;
+  return rows.slice(top + 1, bottom).map((cells, index) => {
+    // Past the mark on the first line, and whatever's dimmed.
+    const typed = (index === 0 ? cells.slice(BOX_MARK.length) : cells).filter(cell => !cell.style.dim);
+    return typed.map(cell => cell.char).join('').replace(/\u00a0/g, ' ').trim();
+  }).join('\n').trim();
+}
+
+// Empties the input box of whatever's in it, so that what's typed next is all that's sent: a draft left
+// at the Mac, or a message Claude Code put back there when its turn was stopped. `read` gives what's
+// typed, or nothing when that can't be told, in which case the box is left alone.
+// Returns whether it's empty at the end.
+export async function emptyBox(session, read, { press = pressKey, settle = BOX_SETTLE_MS } = {}) {
+  for (let round = 0; round < BOX_ROUNDS; round++) {
+    if (!await read(session)) return true;
+    for (const key of BOX_KEYS) for (let presses = 0; presses < BOX_PRESSES; presses++) await press(session, key);
+    await pause(settle);
+  }
+  return !await read(session);
+}
+
+const BOX_NOT_EMPTY = 'The terminal\'s input box has something in it that couldn\'t be cleared.';
+
+const boxOf = async session => typedIn(await readStyledScreen(session));
+
 const marksIn = screen => bottomOf(screen).match(IMAGE_MARK)?.length ?? 0;
 
 async function pasteImage(session, file, { limit, check }) {
@@ -78,11 +120,14 @@ async function pasteImage(session, file, { limit, check }) {
 // Attachments in their order, then the text. A picture is pasted by itself, so Claude Code turns its
 // path into an image as it does one dragged into the terminal, and a file is a reference. isBlocked
 // is checked again just before Enter, because a request can open while the message is on its way
-// and Enter would then answer it.
+// and Enter would then answer it. The box is emptied first, so that the message is all that's sent
+// and not added to what was there: a message that couldn't be sent after all, and is still in the
+// box behind whatever opened, is taken out by the next one.
 export async function sendMessage(session, { text = '', attachments = [] }, isBlocked, {
-  imageLimit = IMAGE_SETTLE_LIMIT_MS, imageCheck = IMAGE_SETTLE_CHECK_MS,
+  imageLimit = IMAGE_SETTLE_LIMIT_MS, imageCheck = IMAGE_SETTLE_CHECK_MS, boxSettle = BOX_SETTLE_MS,
 } = {}) {
   await refuseIfBlocked(session, isBlocked);
+  if (!await emptyBox(session, boxOf, { settle: boxSettle })) throw new HelperError('box_not_empty', BOX_NOT_EMPTY);
   for (const upload of attachments) {
     if (upload.kind === 'image') await pasteImage(session, upload.path, { limit: imageLimit, check: imageCheck });
     else await backendOf(session).paste(session, `${referenceTo(upload)} `);

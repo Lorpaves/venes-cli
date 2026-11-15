@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog } from '../../src/agyscreen.mjs';
+import { asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog } from '../../src/agyscreen.mjs';
 import { choicesOf } from '../../src/prompt.mjs';
 
 // Screens as Antigravity's terminal drew them (1.5.8), 110 columns across.
@@ -82,4 +82,16 @@ test('a document that waits to be looked over is a line over the box, and is ans
   assert.deepEqual([readReview(panel(1)), readReview(panel(2)), readReview(hint(1)), readReview(IDLE), readReview(COMMAND), readReview(undefined)], [{ left: 1 }, { left: 2 }, undefined, undefined, undefined, undefined]);
   // The panel is Antigravity's own page: still up, not at rest, and no prompt with rows to press.
   assert.deepEqual([isUp(panel(1)), isIdle(panel(1)), readPrompt(panel(1))], [true, false, undefined]);
+});
+
+test('what\'s typed in its box is told from the line an empty box shows by the bar', () => {
+  // As the terminal drew them (1.5.8): a draft, one of two lines, an empty box after a turn, and a new session's.
+  const typed = (...box) => ['  ok', RULE, ...box, RULE, bar('', 'auto · Gemini 4 Hydrogen · medium')].join('\n');
+  const fresh = ['  ▄▀▀      ▀▀▄', RULE, '> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)', RULE, bar('? for shortcuts', 'auto · Gemini 4 Hydrogen · medium')].join('\n');
+  assert.deepEqual([boxOf(typed('> draft at the mac')), boxOf(typed('> agy line one', '  agy line two')), boxOf(IDLE), boxOf(fresh)],
+    ['draft at the mac', 'agy line one\nagy line two', '', 'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)']);
+  assert.deepEqual([hasTyped(typed('> draft at the mac')), hasTyped(typed('> agy line one', '  agy line two')), hasTyped(IDLE), hasTyped(IDLE_AUTO), hasTyped(fresh), hasTyped(WORKING)],
+    [true, true, false, false, false, false]);
+  // With the bar saying nothing and the box empty, as for a moment after a key, nothing's typed. Nor on a screen with no box.
+  assert.deepEqual([hasTyped(typed('>')), hasTyped(COMMAND), hasTyped(''), boxOf(COMMAND), boxOf('$ ls')], [false, false, false, undefined, undefined]);
 });

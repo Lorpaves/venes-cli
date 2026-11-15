@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { HelperError } from './errors.mjs';
@@ -29,6 +30,9 @@ const DEFAULT_COMMITS = 30;
 const MAX_COMMITS = 200;
 // An untracked file's lines are counted up to this size. A bigger one says nothing of its length.
 const COUNTED_BYTES = 1024 * 1024;
+// The repositories looked for right inside the folder a session started in, and those a session has in all.
+const NEARBY_REPOSITORIES = 20;
+const SESSION_REPOSITORIES = 24;
 const FIELD = '\x1f';
 const RECORD = '\x1e';
 const COMMIT = /^[0-9a-f]{4,40}$/;
@@ -170,6 +174,40 @@ export async function repositoryOf(cwd) {
   } catch {
     return undefined;
   }
+}
+
+// The repositories right inside a folder, by name: those a project made of several is kept in.
+export function repositoriesUnder(folder, limit = NEARBY_REPOSITORIES) {
+  let entries;
+  try {
+    entries = fs.readdirSync(folder, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter(entry => !entry.name.startsWith('.') && (entry.isDirectory() || entry.isSymbolicLink()))
+    .map(entry => path.join(folder, entry.name))
+    // A repository has a `.git` folder, or, as a worktree or a submodule, a `.git` file.
+    .filter(inner => fs.existsSync(path.join(inner, '.git')))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true, sensitivity: 'base' }))
+    .slice(0, limit);
+}
+
+// The repositories a session has to do with, the one to show first first: the one it's in now, those
+// it has been in, the latest first, the one it started in, and, when it started in no repository,
+// those right inside where it started. A session moves about as it works, and with only where it is
+// now it would have a repository at one moment and none at the next. Home has too much in it to look
+// through for a session that started there.
+export async function repositoriesOf({ now, recent = [], start, home = os.homedir() } = {}) {
+  const folders = [...new Set([now, ...recent, start].filter(folder => typeof folder === 'string' && folder))];
+  const found = await Promise.all(folders.map(folder => repositoryOf(folder)));
+  const roots = found.filter(Boolean);
+  const startRoot = start ? found[folders.indexOf(start)] : undefined;
+  if (start && !startRoot && path.resolve(start) !== path.resolve(home) && path.resolve(start) !== path.parse(start).root) {
+    // Each as git itself names it, which leaves out a folder that only looks like a repository.
+    roots.push(...(await Promise.all(repositoriesUnder(start).map(folder => repositoryOf(folder)))).filter(Boolean));
+  }
+  return [...new Set(roots)].slice(0, SESSION_REPOSITORIES);
 }
 
 async function rootOf(cwd) {

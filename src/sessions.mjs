@@ -135,10 +135,23 @@ function withoutImageData(response) {
   return response?.type === 'image' && response.file?.base64 ? { ...response, file: { ...response.file, base64: undefined } } : response;
 }
 
+// The folders remembered of where a session has worked.
+const RECENT_FOLDERS = 12;
+
 function blankSession(id) {
   return {
     id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0, modes: [],
   };
+}
+
+// Where a session started, and the folders it has worked in since, the latest first. A session moves
+// about as it works, so what's looked for by where it is, such as its repositories, is looked for in
+// all of these.
+function noteFolder(s, cwd) {
+  if (!cwd) return;
+  s.startFolder ??= cwd;
+  if (s.folders?.[0] === cwd) return;
+  s.folders = [cwd, ...(s.folders ?? []).filter(folder => folder !== cwd)].slice(0, RECENT_FOLDERS);
 }
 
 function taskView({ result, outputFile, ...task }) {
@@ -558,6 +571,7 @@ export class SessionStore extends EventEmitter {
     }
     s.lastEventAt = Date.now();
     s.cwd = ev.cwd ?? s.cwd;
+    noteFolder(s, s.cwd);
     s.transcriptPath = ev.transcript_path ?? s.transcriptPath;
     if (ev.permission_mode && ev.permission_mode !== s.permissionMode) {
       // The mode it planned from, which approving the plan goes back to.

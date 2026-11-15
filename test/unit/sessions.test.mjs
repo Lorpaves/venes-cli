@@ -1661,3 +1661,13 @@ test('one settled somewhere else closes with nothing to say back', async () => {
   store.settle(first.request.id, { decision: 'unknown', by: 'terminal' });
   store.settleAll('nobody', { decision: 'unknown', by: 'turn_end' });
 });
+
+test('a session keeps where it started and where it has worked, the latest first', () => {
+  const store = new SessionStore();
+  const at = cwd => store.handleHook({ session_id: 'm', cwd, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 't', tool_input: {} });
+  for (const cwd of ['/w', '/w', '/w/ios', '/w/helper', '/w/ios', undefined]) at(cwd);
+  const session = store.find('m');
+  assert.deepEqual([session.cwd, session.startFolder, session.folders], ['/w/ios', '/w', ['/w/ios', '/w/helper', '/w']]);
+  for (let number = 0; number < 20; number++) at(`/w/folder-${number}`);
+  assert.deepEqual([session.folders.length, session.folders[0], session.startFolder], [12, '/w/folder-19', '/w']);
+});

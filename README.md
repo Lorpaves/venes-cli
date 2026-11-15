@@ -151,7 +151,7 @@ The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every
 | `start` | `cwd`, `trust`, `agent` | Starts Claude Code in that folder and replies with its `sessionId` once the session has started. See [Starting a session](#starting-a-session). With `agent: "codex"` it starts a Codex session there. See [Codex sessions](#codex-sessions). |
 | `files` | `sessionId`, `path` (optional) | What's in the session's folder, or in a folder inside it: `entries`, each a `dir` or a `file`. See [Files and git](#files-and-git). |
 | `fileRead` | `sessionId`, `path` | One of its files: its `text`, or for anything else its bytes in `data`. See [Files and git](#files-and-git). |
-| `git` | `sessionId` | `git`: the branch and what has changed in the session's folder, or null outside a repository. See [Files and git](#files-and-git). |
+| `git` | `sessionId`, `root` | `git`: the branch and what has changed in the session's repository, or null with none, and its `repositories`. See [Files and git](#files-and-git). |
 | `gitDiff` | `sessionId`, `path`, `staged`, `commit` | `diff`: one file's change, from its first hunk on |
 | `gitLog` | `sessionId`, `limit`, `skip`, `all` | `commits`, newest first, each with its `parents` and `refs`, and `hasMore` |
 | `gitCommit` | `sessionId`, `commit` | `commit`, with all it says, and the `files` it changed |
@@ -313,7 +313,9 @@ A session's folder can be looked at from afar, for a Claude Code session and a C
 
 `fileRead` gives a file's `path`, `name` and `size`, and what's in it. A text file comes as `text`, up to 512 KB of it, cut at a line's end with `truncated` when it's longer. Anything else comes with its `mediaType`, by its name, and its bytes in base64 as `data`, for a client to show as the picture or document it is, or with `tooLarge` and no `data` past 8 MB.
 
-`git` is null for a folder that's in no repository. In one, it has the repository's `root`, the `branch`, or the start of the commit with `detached: true` when none is checked out, the `upstream` it follows with how many commits it's `ahead` and `behind`, and two lists of files: `staged`, what the next commit would take, and `changes`, what's only in the folder. Each file has its `path` from the repository's top, a `status` of `modified`, `added`, `deleted`, `renamed` (with `from`), `copied`, `untracked` or `conflicted`, and the lines it gained and lost as `added` and `removed`, or `binary`. A file can be in both lists. Each lists up to 500, with `truncated` past that. The helper asks git without taking the index's lock, so it never gets in the way of the session's own git.
+A session moves about as it works, so its repository isn't only the one it's in at the moment: the helper keeps where it started and the folders it has worked in, and a git command is for one of the `repositories` found from those. They're listed with `git`, each `{root, name}`: the one it's in now first, then those it has been in, the latest first, then the one it started in, and for a session that started in no repository, those right inside where it started, by name. Every git command takes a `root`, one of these, and with none named is for the first. Anything else is refused with `bad_repository`. A client that shows one repository over several commands names it each time, since the first can change as the session moves.
+
+`git` is null for a session with no repository. In one, it has the repository's `root`, the `branch`, or the start of the commit with `detached: true` when none is checked out, the `upstream` it follows with how many commits it's `ahead` and `behind`, and two lists of files: `staged`, what the next commit would take, and `changes`, what's only in the folder. Each file has its `path` from the repository's top, a `status` of `modified`, `added`, `deleted`, `renamed` (with `from`), `copied`, `untracked` or `conflicted`, and the lines it gained and lost as `added` and `removed`, or `binary`. A file can be in both lists. Each lists up to 500, with `truncated` past that. The helper asks git without taking the index's lock, so it never gets in the way of the session's own git.
 
 `gitDiff` gives one file's change as `diff`: what `git diff` prints from the first `@@` line on, without git's own header. With `staged` it's what's staged, with `commit` what that commit did to the file, and otherwise what's only in the folder, which for a file git doesn't follow yet is all of it. A file that isn't text has `binary` and an empty `diff`. Past 512 KB it's cut at a line's end, with `truncated`.
 
@@ -478,7 +480,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `bad_agent` | `start` was asked for something other than Claude Code or Codex |
 | `bad_path` | `files`, `fileRead`, `gitDiff`, `gitStage` or `gitUnstage` was given a path that leads out of the session's folder, or out of its repository, or no path at all |
 | `no_file`, `unreadable_file` | `fileRead` was asked for a file that has gone, or one that can't be read |
-| `no_repository` | A git command was sent for a session whose folder is in no repository |
+| `no_repository` | A git command was sent for a session that has no repository |
+| `bad_repository` | A git command named a `root` that isn't one of the session's repositories |
 | `bad_commit` | `gitCommit` or `gitDiff` was given something that isn't a commit of the repository |
 | `git_failed` | Git wouldn't stage, unstage, commit or switch. The message is what it said. |
 | `nothing_staged`, `bad_message` | `gitCommitStaged` was sent with nothing staged, or with no message |

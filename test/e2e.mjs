@@ -2206,6 +2206,36 @@ T('a_change_is_staged_committed_and_the_branch_switched', { mode: 'bypassPermiss
   }
 });
 
+T('a_session_has_the_repositories_inside_where_it_started', { mode: 'bypassPermissions' }, async r => {
+  const { id: sessionId } = await r.session();
+  if (fs.existsSync(path.join(WS, '.git'))) throw new Error(`${WS} is a repository of its own, so nothing inside it is looked for`);
+  const [one, two] = ['e2e-repo-one', 'e2e-repo-two'].map(name => path.join(fs.realpathSync(WS), name));
+  try {
+    for (const folder of [one, two]) {
+      fs.mkdirSync(folder);
+      execFileSync('git', ['init', '-q', '-b', path.basename(folder), folder]);
+    }
+    fs.writeFileSync(path.join(two, 'new.txt'), 'new\n');
+    // The session is in no repository, and has those right inside where it started, the first of them told of.
+    const first = await r.client.request('git', { sessionId });
+    assert.deepEqual(first.repositories, [{ root: one, name: 'e2e-repo-one' }, { root: two, name: 'e2e-repo-two' }]);
+    assert.deepEqual([first.git.root, first.git.branch, first.git.changes], [one, 'e2e-repo-one', []]);
+    const second = await r.client.request('git', { sessionId, root: two });
+    assert.deepEqual([second.git.root, second.git.branch, second.git.changes.map(file => file.path)], [two, 'e2e-repo-two', ['new.txt']]);
+    // Every git command goes to the repository it names.
+    await r.client.request('gitStage', { sessionId, root: two, all: true });
+    assert.deepEqual((await r.client.request('git', { sessionId, root: two })).git.staged.map(file => file.path), ['new.txt']);
+    assert.deepEqual((await r.client.request('git', { sessionId, root: one })).git.staged, []);
+    assert.equal((await r.client.request('gitDiff', { sessionId, root: two, path: 'new.txt', staged: true })).diff, '@@ -0,0 +1 @@\n+new\n');
+    const none = await r.client.request('gitLog', { sessionId, root: two });
+    assert.deepEqual([none.commits, none.hasMore], [[], false]);
+    await assert.rejects(r.client.request('git', { sessionId, root: fs.realpathSync(WS) }), { code: 'bad_repository' });
+    await assert.rejects(r.client.request('gitLog', { sessionId, root: '/' }), { code: 'bad_repository' });
+  } finally {
+    for (const folder of [one, two]) fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
 Run.prototype.waitForPane = async function waitForPane(re, ms) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (re.test(this.pane())) return; await delay(150); }

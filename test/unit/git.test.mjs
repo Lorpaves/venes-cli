@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   branches, changedPaths, commit, commitStaged, diff, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat, parseRefs, parseStatus,
-  repositoryOf, stage, status, switchBranch, unstage,
+  repositoriesOf, repositoriesUnder, repositoryOf, stage, status, switchBranch, unstage,
 } from '../../src/git.mjs';
 
 // A repository of the test's own, with nothing of this Mac's git settings in it.
@@ -363,4 +363,52 @@ test('nothing changes outside a repository', async t => {
   for (const act of [() => stage(outside, { all: true }), () => unstage(outside, { all: true }), () => commitStaged(outside, { message: 'x' }), () => switchBranch(outside, { branch: 'main' })]) {
     await assert.rejects(act(), error => error.code === 'no_repository');
   }
+});
+
+// A project kept as several repositories in one folder that isn't one itself, with a folder of none beside them.
+function project(t) {
+  const top = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-project-')));
+  t.after(() => fs.rmSync(top, { recursive: true, force: true }));
+  for (const name of ['ios', 'helper', 'Tap 2', 'Tap 10']) {
+    fs.mkdirSync(path.join(top, name, 'src'), { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', path.join(top, name)]);
+  }
+  fs.mkdirSync(path.join(top, 'notes', 'deep'), { recursive: true });
+  fs.mkdirSync(path.join(top, '.hidden'));
+  execFileSync('git', ['init', '-q', path.join(top, '.hidden')]);
+  // A worktree and a submodule have a `.git` file where a repository has a folder.
+  fs.mkdirSync(path.join(top, 'worktree'));
+  fs.writeFileSync(path.join(top, 'worktree', '.git'), 'gitdir: elsewhere\n');
+  fs.writeFileSync(path.join(top, 'a-file'), 'not a folder\n');
+  return top;
+}
+
+test('the repositories right inside a folder are found by name, and nothing deeper or hidden', t => {
+  const top = project(t);
+  assert.deepEqual(repositoriesUnder(top).map(root => path.basename(root)), ['helper', 'ios', 'Tap 2', 'Tap 10', 'worktree']);
+  assert.deepEqual(repositoriesUnder(top, 2).map(root => path.basename(root)), ['helper', 'ios']);
+  assert.deepEqual(repositoriesUnder(path.join(top, 'notes')), []);
+  assert.deepEqual(repositoriesUnder(path.join(top, 'no-such-folder')), []);
+});
+
+test('a session that moves about keeps its repositories: where it is, where it has been, and those inside where it started', async t => {
+  const top = project(t);
+  const [ios, helper, notes] = ['ios', 'helper', 'notes'].map(name => path.join(top, name));
+  const names = async about => (await repositoriesOf({ home: '/no/home', ...about })).map(root => path.relative(top, root));
+  // In a folder of no repository now, it still has the one it was last in, first, then the rest.
+  assert.deepEqual(await names({ now: notes, recent: [notes, path.join(helper, 'src'), ios], start: top }), ['helper', 'ios', 'Tap 2', 'Tap 10']);
+  // Back in one, that one is first.
+  assert.deepEqual(await names({ now: path.join(ios, 'src'), recent: [path.join(ios, 'src'), notes, helper], start: top }), ['ios', 'helper', 'Tap 2', 'Tap 10']);
+  // One that has been nowhere but where it started has those inside it.
+  assert.deepEqual(await names({ now: top, recent: [top], start: top }), ['helper', 'ios', 'Tap 2', 'Tap 10']);
+  assert.deepEqual(await names({ now: top }), []);
+  // One that started in a repository has that, and its neighbours aren't looked for.
+  assert.deepEqual(await names({ now: notes, recent: [notes], start: helper }), ['helper']);
+  assert.deepEqual(await names({ now: helper, start: helper }), ['helper']);
+  // A folder that has gone, or was never one, is no one's repository.
+  assert.deepEqual(await names({ now: path.join(top, 'gone'), recent: [undefined, 7, '', path.join(top, 'gone')], start: notes }), []);
+  assert.deepEqual(await repositoriesOf(), []);
+  // Home has too much in it to look through.
+  assert.deepEqual(await repositoriesOf({ now: top, start: top, home: top }), []);
+  assert.deepEqual((await repositoriesOf({ now: ios, start: top, home: top })).map(root => path.basename(root)), ['ios']);
 });

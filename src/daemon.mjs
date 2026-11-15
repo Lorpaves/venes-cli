@@ -12,7 +12,7 @@ import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
 import { listFolder, readFile } from './files.mjs';
 import {
-  branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, stage as gitStage,
+  branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
   status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
 } from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
@@ -308,6 +308,25 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return checkedFolder(cwd);
   };
 
+  // The repositories a session has to do with: see `repositoriesOf`. A session the helper doesn't
+  // follow has only where it ran to go by.
+  const repositoriesFor = async sessionId => {
+    const now = await folderOf(sessionId);
+    const session = store.find(sessionId);
+    return repositoriesOf({ now, recent: session?.folders, start: session?.startFolder ?? now });
+  };
+  // The repository a git command is for: the one it names, which has to be one of the session's, or
+  // with none named the first of them.
+  const repositoryFor = async (sessionId, root, known) => {
+    const roots = known ?? (await repositoriesFor(sessionId));
+    if (root === undefined || root === null) {
+      if (!roots.length) throw new HelperError('no_repository', 'This session has no git repository.');
+      return roots[0];
+    }
+    if (!roots.includes(root)) throw new HelperError('bad_repository', 'That isn\'t one of this session\'s repositories.');
+    return root;
+  };
+
   // Codex's stored threads come with the first page, which is where what's running comes too.
   const listLibrary = async ({ limit, offset }, socket) => {
     const [page, threads] = await Promise.all([
@@ -395,17 +414,22 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // What's in the session's folder, a level at a time, and what's in one of its files.
     files: async ({ sessionId, path: named }) => listFolder(await folderOf(sessionId), named),
     fileRead: async ({ sessionId, path: named }) => readFile(await folderOf(sessionId), named),
-    // What git says of the session's folder, all of it read and none of it changed: null outside a repository.
-    git: async ({ sessionId }) => ({ git: (await gitStatus(await folderOf(sessionId))) ?? null }),
-    gitDiff: async ({ sessionId, path: file, staged, commit }) => gitDiff(await folderOf(sessionId), { path: file, staged: staged === true, commit }),
-    gitLog: async ({ sessionId, limit, skip, all }) => gitLog(await folderOf(sessionId), { limit, skip, all }),
-    gitCommit: async ({ sessionId, commit }) => gitCommit(await folderOf(sessionId), { commit }),
-    gitBranches: async ({ sessionId }) => gitBranches(await folderOf(sessionId)),
+    // What git says of a session's repository: null for a session with none. A session can have several,
+    // as it moves about, so `repositories` lists them, the first being the one told of when none is named.
+    git: async ({ sessionId, root }) => {
+      const roots = await repositoriesFor(sessionId);
+      const chosen = roots.length || root != null ? await repositoryFor(sessionId, root, roots) : undefined;
+      return { git: (chosen && (await gitStatus(chosen))) ?? null, repositories: roots.map(folder => ({ root: folder, name: path.basename(folder) })) };
+    },
+    gitDiff: async ({ sessionId, root, path: file, staged, commit }) => gitDiff(await repositoryFor(sessionId, root), { path: file, staged: staged === true, commit }),
+    gitLog: async ({ sessionId, root, limit, skip, all }) => gitLog(await repositoryFor(sessionId, root), { limit, skip, all }),
+    gitCommit: async ({ sessionId, root, commit }) => gitCommit(await repositoryFor(sessionId, root), { commit }),
+    gitBranches: async ({ sessionId, root }) => gitBranches(await repositoryFor(sessionId, root)),
     // The few things that change the repository: what the next commit takes, the commit itself, and the branch.
-    gitStage: async ({ sessionId, paths, all }) => gitStage(await folderOf(sessionId), { paths, all }),
-    gitUnstage: async ({ sessionId, paths, all }) => gitUnstage(await folderOf(sessionId), { paths, all }),
-    gitCommitStaged: async ({ sessionId, message }) => gitCommitStaged(await folderOf(sessionId), { message }),
-    gitSwitch: async ({ sessionId, branch }) => gitSwitch(await folderOf(sessionId), { branch }),
+    gitStage: async ({ sessionId, root, paths, all }) => gitStage(await repositoryFor(sessionId, root), { paths, all }),
+    gitUnstage: async ({ sessionId, root, paths, all }) => gitUnstage(await repositoryFor(sessionId, root), { paths, all }),
+    gitCommitStaged: async ({ sessionId, root, message }) => gitCommitStaged(await repositoryFor(sessionId, root), { message }),
+    gitSwitch: async ({ sessionId, root, branch }) => gitSwitch(await repositoryFor(sessionId, root), { branch }),
     capabilities: forCodex('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
       return library.capabilities(cwd);

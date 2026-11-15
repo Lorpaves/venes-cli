@@ -1,10 +1,13 @@
 // A session's folder, for someone following the work from afar: what's in it, a level at a time, and
-// what's in a file. Everything is inside the folder the session works in. Nothing here changes what's
-// there: the one thing it does besides reading is make something new, an empty file or folder, under a
-// name that isn't taken.
+// what's in a file. Everything is inside the folder the session works in. Besides reading, it makes
+// something new, an empty file or folder, under a name that isn't taken; it moves a file or a folder to
+// the Trash, where it can be put back from; and it writes a text file's new text, unless the file has
+// changed since whoever edited it read it.
 
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { HelperError } from './errors.mjs';
 import { changedPaths } from './git.mjs';
 
@@ -17,10 +20,16 @@ export const BINARY_BYTES = 8 * 1024 * 1024;
 // A file of any size goes a piece at a time, each no longer than this, so that none of it has to be held
 // whole anywhere on the way.
 export const CHUNK_BYTES = 1024 * 1024;
+// As much as a file edited from afar can be: twice what's read of one to show it whole.
+export const WRITE_BYTES = 1024 * 1024;
 // How much of a file is looked at to tell whether it's text.
 const SNIFF_BYTES = 8 * 1024;
 // What a folder's own bookkeeping is, which no one browsing it is after.
 const HIDDEN = new Set(['.git', '.DS_Store']);
+// macOS's own command for what Finder's Move to Trash does, there from macOS 15.
+const TRASH_COMMAND = '/usr/bin/trash';
+
+const exec = promisify(execFile);
 
 const MEDIA_TYPES = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif',
@@ -87,6 +96,67 @@ export function createEntry(root, named, { name, folder } = {}) {
     throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   }
   return makeIn(parent, name, { folder: folder === true });
+}
+
+// Moves what's at `target` to the Trash, as Finder's Move to Trash does, so that it can be put back. A
+// link goes and what it leads to stays. A test run names a folder of its own in VENES_TRASH, which takes
+// what's moved in the Trash's place.
+export async function moveToTrash(target, { command = TRASH_COMMAND, instead = process.env.VENES_TRASH } = {}) {
+  if (instead) {
+    fs.renameSync(target, path.join(instead, `${Date.now()}-${path.basename(target)}`));
+    return;
+  }
+  if (!fs.existsSync(command)) throw new HelperError('no_trash', 'Moving things to the Trash from afar needs macOS 15 or later on this Mac.');
+  // With -s it fails when the move does, and says nothing otherwise.
+  await exec(command, ['-s', target]);
+}
+
+// Whether a path goes, inside the session's folder, by something a list of it leaves out: git's own
+// folder above all, which isn't to be changed from here. A disk that tells no capitals apart doesn't
+// get round it.
+function isKept(root, target) {
+  const kept = [...HIDDEN].map(name => name.toLowerCase());
+  return path.relative(path.resolve(root), target).split(path.sep).some(part => kept.includes(part.toLowerCase()));
+}
+
+const isThere = file => {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// A file or a folder of the session's goes to the Trash: something inside its folder, really inside it,
+// and neither the folder itself nor what a list of it leaves out, on a disk that tells no capitals apart
+// either.
+export async function trashEntry(root, named, { trash = moveToTrash } = {}) {
+  if (typeof named !== 'string' || named === '') throw new HelperError('bad_path', 'That isn\'t a path.');
+  const target = insideFolder(root, named);
+  if (target === path.resolve(root)) throw new HelperError('bad_path', 'The session\'s own folder stays where it is.');
+  const name = path.basename(target);
+  if (isKept(root, target)) throw new HelperError('bad_path', `${name} stays where it is.`);
+  let real;
+  try {
+    real = { root: fs.realpathSync(root), parent: fs.realpathSync(path.dirname(target)) };
+  } catch {
+    throw new HelperError('no_file', `${name} isn't there any more.`);
+  }
+  if (real.parent !== real.root && !real.parent.startsWith(`${real.root}${path.sep}`)) {
+    throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
+  }
+  // By where it really is, so that it's the thing named that goes and no link on the way to it.
+  const really = path.join(real.parent, name);
+  if (!isThere(really)) throw new HelperError('no_file', `${name} isn't there any more.`);
+  try {
+    await trash(really);
+  } catch (error) {
+    if (error instanceof HelperError) throw error;
+    throw new HelperError('trash_failed', `${name} couldn't be moved to the Trash.`);
+  }
+  if (isThere(really)) throw new HelperError('trash_failed', `${name} couldn't be moved to the Trash.`);
+  return { name, path: target };
 }
 
 // Folders first, then files, each by name as Finder sorts them.
@@ -171,7 +241,8 @@ export function readFile(root, named, { textLimit = TEXT_BYTES, binaryLimit = BI
     throw new HelperError('no_file', 'That file isn\'t there any more.');
   }
   if (!stat.isFile()) throw new HelperError('no_file', 'That isn\'t a file.');
-  const about = { path: file, name: path.basename(file), size: stat.size };
+  // When it last changed goes with it, for a client that edits it to say which file it read.
+  const about = { path: file, name: path.basename(file), size: stat.size, modifiedAt: Math.floor(stat.mtimeMs) };
   try {
     if (isText(readStart(file, Math.min(stat.size, SNIFF_BYTES)))) {
       const bytes = readStart(file, Math.min(stat.size, textLimit));
@@ -187,6 +258,42 @@ export function readFile(root, named, { textLimit = TEXT_BYTES, binaryLimit = BI
     if (error instanceof HelperError) throw error;
     throw new HelperError('unreadable_file', `${about.name} can't be read.`);
   }
+}
+
+// New text for one of the session's files: one that's there, is text, and is really inside the session's
+// folder, wherever a link leads. `was` is the size and the time it had when it was read: a file that has
+// changed since is left as it is, unless `overwrite` says to write all the same. It's written where it
+// is, so that it stays the file it was, with its mode, its links and what Finder knows of it.
+export function writeFile(root, named, { text, was, overwrite = false, limit = WRITE_BYTES } = {}) {
+  if (typeof named !== 'string' || named === '') throw new HelperError('bad_path', 'That isn\'t a path.');
+  const file = insideFolder(root, named);
+  const name = path.basename(file);
+  if (isKept(root, file)) throw new HelperError('bad_path', `${name} stays as it is.`);
+  if (typeof text !== 'string') throw new HelperError('bad_text', 'That isn\'t text.');
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length > limit) throw new HelperError('too_big', `A file edited from here can be up to ${limit / 1024 / 1024} MB.`);
+  let real;
+  let stat;
+  try {
+    real = { root: fs.realpathSync(root), file: fs.realpathSync(file) };
+    stat = fs.statSync(real.file);
+  } catch {
+    throw new HelperError('no_file', 'That file isn\'t there any more.');
+  }
+  if (!real.file.startsWith(`${real.root}${path.sep}`)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
+  if (!stat.isFile()) throw new HelperError('no_file', 'That isn\'t a file.');
+  const isAsRead = Number.isSafeInteger(was?.size) && Number.isSafeInteger(was?.modifiedAt)
+    && was.size === stat.size && was.modifiedAt === Math.floor(stat.mtimeMs);
+  if (!overwrite && !isAsRead) throw new HelperError('file_changed', `${name} has changed since it was read.`);
+  try {
+    if (!isText(readStart(real.file, Math.min(stat.size, SNIFF_BYTES)))) throw new HelperError('not_text', `${name} isn't a text file.`);
+    fs.writeFileSync(real.file, bytes);
+  } catch (error) {
+    if (error instanceof HelperError) throw error;
+    throw new HelperError('unwritable_file', `${name} can't be written.`);
+  }
+  const now = fs.statSync(real.file);
+  return { path: file, name, size: now.size, modifiedAt: Math.floor(now.mtimeMs) };
 }
 
 // A piece of one of the session's files: `length` bytes from `offset`, as they are, for a reader that takes

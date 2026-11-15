@@ -11,7 +11,7 @@ import net from 'node:net';
 import readline from 'node:readline';
 import { AGENT as CODEX, Codex } from './codex.mjs';
 import { checkedToolUse, readArtifact } from './artifact.mjs';
-import { createEntry, listFolder, readChunk, readFile } from './files.mjs';
+import { createEntry, listFolder, readChunk, readFile, trashEntry, writeFile } from './files.mjs';
 import {
   branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
   countChanges, status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
@@ -24,7 +24,7 @@ import { removeSession } from './remove.mjs';
 import { resumeSession } from './resume.mjs';
 import { startNewSession } from './start.mjs';
 import { PushDevices, notify, titleFor } from './push.mjs';
-import { RECENT_SESSIONS, checkedFolder, createFolder, homeFolder, recentFolders, runningIn, subfolders } from './folders.mjs';
+import { RECENT_SESSIONS, checkedFolder, createFile, createFolder, homeFolder, recentFolders, runningIn, subfolders } from './folders.mjs';
 import { isTrusted, readClaudeConfig } from './trust.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
@@ -449,6 +449,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const made = createFolder(folder, name);
       return { ...made, trusted: isTrusted(made.path, { config: readClaudeConfig(), home: homeFolder() }) };
     },
+    // And an empty file there, for the session that starts in that folder to find.
+    folderFileCreate: async ({ path: folder, name }) => createFile(folder, name),
     start: msg => {
       if (msg.agent === undefined || msg.agent === 'claude') return startNewSession({ store, terminal: resumeTerminal() }, msg);
       if (msg.agent !== CODEX || !codex) throw new HelperError('bad_agent', `Nothing here starts ${msg.agent}.`);
@@ -474,7 +476,25 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         recount(sessionId);
       }
     },
+    // A file or a folder of the session's goes to the Trash, which changes what git counts there.
+    fileDelete: async ({ sessionId, path: named }) => {
+      const root = await folderOf(sessionId);
+      try {
+        return await trashEntry(root, named);
+      } finally {
+        recount(sessionId);
+      }
+    },
     fileRead: async ({ sessionId, path: named }) => readFile(await folderOf(sessionId), named),
+    // New text for one of its files, as someone edited it from afar. It's one more thing changed there.
+    fileWrite: async ({ sessionId, path: named, text, was, overwrite }) => {
+      const root = await folderOf(sessionId);
+      try {
+        return writeFile(root, named, { text, was, overwrite: overwrite === true });
+      } finally {
+        recount(sessionId);
+      }
+    },
     // A file of any size, a piece at a time.
     fileChunk: async ({ sessionId, path: named, offset, length }) => readChunk(await folderOf(sessionId), named, { offset, length }),
     // What git says of a session's repository: null for a session with none. A session can have several,

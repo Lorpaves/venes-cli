@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, listFolder, mediaTypeOf, readChunk, readFile } from '../../src/files.mjs';
-import { createFolder } from '../../src/folders.mjs';
+import { CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, listFolder, mediaTypeOf, moveToTrash, readChunk, readFile, trashEntry, writeFile } from '../../src/files.mjs';
+import { createFile, createFolder } from '../../src/folders.mjs';
 
 function folder(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-files-')));
@@ -104,9 +104,12 @@ test('a file\'s kind goes by its name', () => {
 test('a text file is read as its text, and a long one up to a line\'s end', t => {
   const { root, write } = folder(t);
   write('src/app.js', 'const 名 = 1;\n');
-  assert.deepEqual(readFile(root, 'src/app.js'), { path: path.join(root, 'src/app.js'), name: 'app.js', size: 15, text: 'const 名 = 1;\n' });
+  const changed = file => Math.floor(fs.statSync(path.join(root, file)).mtimeMs);
+  assert.deepEqual(readFile(root, 'src/app.js'),
+    { path: path.join(root, 'src/app.js'), name: 'app.js', size: 15, modifiedAt: changed('src/app.js'), text: 'const 名 = 1;\n' });
   write('long.txt', 'one\ntwo\nthree\nfour\n');
-  assert.deepEqual(readFile(root, 'long.txt', { textLimit: 10 }), { path: path.join(root, 'long.txt'), name: 'long.txt', size: 19, text: 'one\ntwo\n', truncated: true });
+  assert.deepEqual(readFile(root, 'long.txt', { textLimit: 10 }),
+    { path: path.join(root, 'long.txt'), name: 'long.txt', size: 19, modifiedAt: changed('long.txt'), text: 'one\ntwo\n', truncated: true });
   write('empty.txt', '');
   assert.equal(readFile(root, 'empty.txt').text, '');
 });
@@ -115,8 +118,11 @@ test('anything else comes as its bytes, for what shows it, unless it\'s too big'
   const { root, write } = folder(t);
   const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]);
   write('logo.png', bytes);
-  assert.deepEqual(readFile(root, 'logo.png'), { path: path.join(root, 'logo.png'), name: 'logo.png', size: 8, mediaType: 'image/png', data: bytes.toString('base64') });
-  assert.deepEqual(readFile(root, 'logo.png', { binaryLimit: 4 }), { path: path.join(root, 'logo.png'), name: 'logo.png', size: 8, mediaType: 'image/png', tooLarge: true });
+  const modifiedAt = Math.floor(fs.statSync(path.join(root, 'logo.png')).mtimeMs);
+  assert.deepEqual(readFile(root, 'logo.png'),
+    { path: path.join(root, 'logo.png'), name: 'logo.png', size: 8, modifiedAt, mediaType: 'image/png', data: bytes.toString('base64') });
+  assert.deepEqual(readFile(root, 'logo.png', { binaryLimit: 4 }),
+    { path: path.join(root, 'logo.png'), name: 'logo.png', size: 8, modifiedAt, mediaType: 'image/png', tooLarge: true });
 });
 
 test('a file that isn\'t there, a folder, or one outside is refused', t => {
@@ -216,3 +222,150 @@ test('a new folder for a session to start in is made in the folder the reader is
   assert.throws(() => createFolder(path.join(root, 'gone'), 'x'), { code: 'no_folder' });
   assert.throws(() => createFolder('relative', 'x'), { code: 'bad_folder' });
 });
+
+test('an empty file is made in the folder the reader is looking at, for a session that starts there', t => {
+  const { root } = folder(t);
+  assert.deepEqual(createFile(root, ' notes.md '), { name: 'notes.md', path: path.join(root, 'notes.md'), kind: 'file', size: 0 });
+  assert.equal(fs.readFileSync(path.join(root, 'notes.md'), 'utf8'), '');
+  assert.throws(() => createFile(root, 'notes.md'), { code: 'name_taken' });
+  assert.throws(() => createFile(root, 'a/b'), { code: 'bad_name' });
+  assert.throws(() => createFile(path.join(root, 'gone'), 'x'), { code: 'no_folder' });
+  assert.throws(() => createFile('relative', 'x'), { code: 'bad_folder' });
+});
+
+// What stands in for the Trash: it takes what it's given away, and keeps where it was.
+function bin() {
+  const taken = [];
+  return { taken, trash: async target => { taken.push(target); fs.rmSync(target, { recursive: true }); } };
+}
+
+test('a file or a folder of the session\'s goes to the Trash, by where it really is', async t => {
+  const { root, write } = folder(t);
+  write('a.txt', 'a');
+  write('src/deep/b.js', 'b');
+  const { taken, trash } = bin();
+  assert.deepEqual(await trashEntry(root, 'a.txt', { trash }), { name: 'a.txt', path: path.join(root, 'a.txt') });
+  assert.deepEqual(await trashEntry(root, path.join(root, 'src/deep'), { trash }), { name: 'deep', path: path.join(root, 'src/deep') });
+  assert.deepEqual(taken, [path.join(root, 'a.txt'), path.join(root, 'src/deep')]);
+  assert.deepEqual(fs.readdirSync(root), ['src']);
+  await assert.rejects(trashEntry(root, 'a.txt', { trash }), { code: 'no_file' });
+  await assert.rejects(trashEntry(root, 'gone/x', { trash }), { code: 'no_file' });
+  assert.equal(taken.length, 2);
+});
+
+test('a link goes to the Trash as the link it is, and what it leads to stays', async t => {
+  const { root, write } = folder(t);
+  write('kept/target.txt', 'kept');
+  fs.symlinkSync(path.join(root, 'kept'), path.join(root, 'way'));
+  fs.symlinkSync(path.join(root, 'nowhere'), path.join(root, 'dangling'));
+  const { taken, trash } = bin();
+  await trashEntry(root, 'way', { trash });
+  await trashEntry(root, 'dangling', { trash });
+  assert.deepEqual(taken, [path.join(root, 'way'), path.join(root, 'dangling')]);
+  assert.equal(fs.readFileSync(path.join(root, 'kept/target.txt'), 'utf8'), 'kept');
+});
+
+test('the session\'s own folder, what a list leaves out, and anything outside stay where they are', async t => {
+  const { root, write } = folder(t);
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-outside-')));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outside, 'theirs.txt'), 'theirs');
+  write('.git/HEAD', 'ref');
+  write('src/.git/HEAD', 'ref');
+  write('.DS_Store', '');
+  fs.symlinkSync(outside, path.join(root, 'out'));
+  const { taken, trash } = bin();
+  for (const named of [undefined, '', 7, '.', root, `${root}/`, 'src/..', '..', '../other', outside, path.join(outside, 'theirs.txt'), 'out/theirs.txt',
+    '.git', '.GIT', 'src/.git', '.DS_Store']) {
+    await assert.rejects(trashEntry(root, named, { trash }), { code: 'bad_path' }, String(named));
+  }
+  assert.deepEqual(taken, []);
+  assert.equal(fs.readFileSync(path.join(outside, 'theirs.txt'), 'utf8'), 'theirs');
+  // The link itself is the session's, and goes without what it leads to.
+  await trashEntry(root, 'out', { trash });
+  assert.deepEqual([taken, fs.existsSync(path.join(outside, 'theirs.txt'))], [[path.join(root, 'out')], true]);
+});
+
+test('something the Trash wouldn\'t take is said, and stays', async t => {
+  const { root, write } = folder(t);
+  write('a.txt', 'a');
+  await assert.rejects(trashEntry(root, 'a.txt', { trash: async () => { throw new Error('exit 5'); } }), { code: 'trash_failed' });
+  await assert.rejects(trashEntry(root, 'a.txt', { trash: async () => {} }), { code: 'trash_failed' });
+  assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), 'a');
+});
+
+test('a test run\'s own folder takes what\'s moved in the Trash\'s place, and a Mac with no trash command says so', async t => {
+  const { root, write } = folder(t);
+  const instead = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-trash-')));
+  t.after(() => fs.rmSync(instead, { recursive: true, force: true }));
+  write('a.txt', 'a');
+  write('dir/b.txt', 'b');
+  await moveToTrash(path.join(root, 'a.txt'), { instead });
+  await moveToTrash(path.join(root, 'dir'), { instead });
+  assert.deepEqual(fs.readdirSync(root), []);
+  assert.deepEqual(fs.readdirSync(instead).map(name => name.replace(/^\d+-/, '')).sort(), ['a.txt', 'dir']);
+  write('c.txt', 'c');
+  await assert.rejects(moveToTrash(path.join(root, 'c.txt'), { command: path.join(root, 'no-such-command'), instead: undefined }), { code: 'no_trash' });
+  assert.equal(fs.existsSync(path.join(root, 'c.txt')), true);
+});
+
+test('a text file takes the text it was edited to, when it\'s still the file that was read', t => {
+  const { root, write } = folder(t);
+  write('notes.md', 'one\n');
+  fs.chmodSync(path.join(root, 'notes.md'), 0o640);
+  const read = readFile(root, 'notes.md');
+  const was = { size: read.size, modifiedAt: read.modifiedAt };
+  const written = writeFile(root, 'notes.md', { text: 'one\n二\r\n', was });
+  assert.deepEqual(written, { path: path.join(root, 'notes.md'), name: 'notes.md', size: 9, modifiedAt: Math.floor(fs.statSync(path.join(root, 'notes.md')).mtimeMs) });
+  assert.equal(fs.readFileSync(path.join(root, 'notes.md'), 'utf8'), 'one\n二\r\n');
+  assert.equal(fs.statSync(path.join(root, 'notes.md')).mode & 0o777, 0o640, 'it stays the file it was');
+  // What it says of the file now is what the next write goes by, and an empty file can be given text.
+  writeFile(root, 'notes.md', { text: '', was: { size: written.size, modifiedAt: written.modifiedAt } });
+  assert.equal(fs.readFileSync(path.join(root, 'notes.md'), 'utf8'), '');
+});
+
+test('a file that has changed since it was read is left as it is, unless it\'s to be written over', t => {
+  const { root, write } = folder(t);
+  write('a.txt', 'read\n');
+  const read = readFile(root, 'a.txt');
+  const was = { size: read.size, modifiedAt: read.modifiedAt };
+  write('a.txt', 'theirs, and longer\n');
+  for (const stale of [was, undefined, {}, { size: 19 }, { size: '19', modifiedAt: 'now' }]) {
+    assert.throws(() => writeFile(root, 'a.txt', { text: 'mine\n', was: stale }), { code: 'file_changed' });
+  }
+  // The same size at another time is another file too.
+  write('b.txt', 'aaaa\n');
+  const before = readFile(root, 'b.txt');
+  fs.utimesSync(path.join(root, 'b.txt'), new Date(), new Date(before.modifiedAt + 5000));
+  assert.throws(() => writeFile(root, 'b.txt', { text: 'mine\n', was: { size: before.size, modifiedAt: before.modifiedAt } }), { code: 'file_changed' });
+  assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), 'theirs, and longer\n');
+  writeFile(root, 'a.txt', { text: 'mine\n', was, overwrite: true });
+  assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), 'mine\n');
+});
+
+test('only a text file that\'s there, inside the session\'s folder, is written, and no more than fits', t => {
+  const { root, write } = folder(t);
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-outside-')));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outside, 'theirs.txt'), 'theirs');
+  write('a.txt', 'a');
+  write('logo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
+  write('.git/config', '[core]');
+  write('src/x.js', 'x');
+  fs.symlinkSync(path.join(outside, 'theirs.txt'), path.join(root, 'out.txt'));
+  fs.symlinkSync(path.join(root, 'a.txt'), path.join(root, 'same.txt'));
+  const anyway = { text: 'mine', overwrite: true };
+  for (const named of [undefined, '', '..', '../x', path.join(outside, 'theirs.txt'), 'out.txt', '.git/config', '.GIT/config']) {
+    assert.throws(() => writeFile(root, named, anyway), { code: 'bad_path' }, String(named));
+  }
+  for (const named of ['gone.txt', 'src', 'src/gone/x.js']) assert.throws(() => writeFile(root, named, anyway), { code: 'no_file' }, named);
+  assert.throws(() => writeFile(root, 'logo.png', anyway), { code: 'not_text' });
+  assert.throws(() => writeFile(root, 'a.txt', { text: 7, overwrite: true }), { code: 'bad_text' });
+  assert.throws(() => writeFile(root, 'a.txt', { text: 'abcdef', overwrite: true, limit: 5 }), { code: 'too_big' });
+  assert.deepEqual([fs.readFileSync(path.join(outside, 'theirs.txt'), 'utf8'), fs.readFileSync(path.join(root, '.git/config'), 'utf8'), fs.readFileSync(path.join(root, 'a.txt'), 'utf8')],
+    ['theirs', '[core]', 'a']);
+  // A link to a file of the session's own is that file.
+  writeFile(root, 'same.txt', anyway);
+  assert.deepEqual([fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), fs.lstatSync(path.join(root, 'same.txt')).isSymbolicLink()], ['mine', true]);
+});
+

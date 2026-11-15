@@ -35,6 +35,11 @@ export function createFolder(folder, name) {
   return { name: made.name, path: made.path };
 }
 
+// An empty file in the folder the reader is looking at, for the session that starts there to find.
+export function createFile(folder, name) {
+  return makeIn(checkedFolder(folder), name);
+}
+
 // The folders in one, as Claude Code's @ lists a folder: no hidden ones unless asked for, by name as
 // Finder sorts them.
 export function subfolders(folder, limit = FOLDER_ENTRIES, { hidden = false } = {}) {

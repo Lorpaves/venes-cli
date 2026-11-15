@@ -46,6 +46,8 @@ const paths = helperPaths(HOME);
 // Where uploads go, and the keys a phone is let in with: this run's own, never this Mac's.
 const DOWNLOADS = `${HOME}-downloads`;
 const AUTHORIZED_KEYS = `${HOME}-authorized_keys`;
+// Where what a case deletes goes: this run's own, and never this Mac's Trash.
+const TRASH = `${HOME}-trash`;
 // The Claude Code settings the helper stands in for the status line in: this run's own. Every
 // session and helper here takes it from the environment, and none ever touches this Mac's.
 const CLAUDE_SETTINGS = `${HOME}-claude-settings.json`;
@@ -105,6 +107,8 @@ const rex = (...a) => execFileSync(REX_COMMAND, [...ONLY_THIS_RUNS, ...a], { enc
 // server and a session in it.
 for (const key of Object.keys(process.env)) if (key.startsWith('REX_')) delete process.env[key];
 process.env.VENES_REX_SERVER = REX_SERVER;
+// And every helper here moves what's deleted to this run's folder, in the Trash's place.
+process.env.VENES_TRASH = TRASH;
 const REX_KEYS = { Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right' };
 // The session a case is running in Rex, if it is.
 let inRex;
@@ -295,7 +299,7 @@ function launch({ mode = 'default', sources = 'project', model = MODEL, settings
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, `VENES_TRASH=${TRASH}`, 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -306,7 +310,7 @@ function launchInRex({ mode = 'default', sources = 'project', model = MODEL, set
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, 'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, `VENES_TRASH=${TRASH}`, 'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -1346,6 +1350,13 @@ T('a_new_session_starts_in_a_folder_from_the_list_and_can_be_typed_into', {}, as
     await assert.rejects(r.client.request('folderCreate', { path: workspace, name: 'e2e-fresh' }), { code: 'name_taken' });
     await assert.rejects(r.client.request('folderCreate', { path: workspace, name: '../e2e-up' }), { code: 'bad_name' });
     await assert.rejects(r.client.request('folderCreate', { path: path.join(workspace, 'e2e-none'), name: 'x' }), { code: 'no_folder' });
+    // And an empty file in it, for the session that starts there to find.
+    const file = await r.client.request('folderFileCreate', { path: fresh, name: 'notes.md' });
+    assert.deepEqual([file.name, file.path, file.kind, file.size, fs.readFileSync(path.join(fresh, 'notes.md'), 'utf8')],
+      ['notes.md', path.join(fresh, 'notes.md'), 'file', 0, '']);
+    await assert.rejects(r.client.request('folderFileCreate', { path: fresh, name: 'notes.md' }), { code: 'name_taken' });
+    await assert.rejects(r.client.request('folderFileCreate', { path: fresh, name: 'a/b' }), { code: 'bad_name' });
+    await assert.rejects(r.client.request('folderFileCreate', { path: 'e2e-fresh', name: 'x' }), { code: 'bad_folder' });
   } finally {
     fs.rmSync(fresh, { recursive: true, force: true });
   }
@@ -2268,6 +2279,43 @@ T('the_sessions_folder_and_its_files_can_be_looked_at', { mode: 'bypassPermissio
     await assert.rejects(r.client.request('fileCreate', { sessionId, name: 'a/b' }), { code: 'bad_name' });
     await assert.rejects(r.client.request('fileCreate', { sessionId, path: '..', name: 'e2e-out.txt' }), { code: 'bad_path' });
     assert.equal(fs.readFileSync(path.join(WS, 'e2e-look.txt'), 'utf8'), 'first line\nsecond line\n');
+
+    // The new file takes text, as someone edited it from afar, while it's still the file that was read.
+    const blank = await r.client.request('fileRead', { sessionId, path: 'e2e-new.txt' });
+    assert.deepEqual([blank.text, blank.size, Number.isSafeInteger(blank.modifiedAt)], ['', 0, true]);
+    const wrote = await r.client.request('fileWrite', { sessionId, path: 'e2e-new.txt', text: 'edited\n二\n', was: { size: blank.size, modifiedAt: blank.modifiedAt } });
+    assert.deepEqual([wrote.name, wrote.size, fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8')], ['e2e-new.txt', 11, 'edited\n二\n']);
+    assert.equal((await r.client.request('fileRead', { sessionId, path: 'e2e-new.txt' })).modifiedAt, wrote.modifiedAt);
+    // What was read before that write is an older file now, and isn't written over unless that's asked for.
+    await assert.rejects(r.client.request('fileWrite', { sessionId, path: 'e2e-new.txt', text: 'late\n', was: { size: blank.size, modifiedAt: blank.modifiedAt } }),
+      { code: 'file_changed' });
+    await assert.rejects(r.client.request('fileWrite', { sessionId, path: 'e2e-new.txt', text: 'late\n' }), { code: 'file_changed' });
+    assert.equal(fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8'), 'edited\n二\n');
+    await r.client.request('fileWrite', { sessionId, path: 'e2e-new.txt', text: 'over\n', overwrite: true });
+    assert.equal(fs.readFileSync(path.join(WS, 'e2e-new.txt'), 'utf8'), 'over\n');
+    // A picture isn't text to write, and nothing outside, or not there, is written.
+    await assert.rejects(r.client.request('fileWrite', { sessionId, path: 'e2e-look.png', text: 'x', overwrite: true }), { code: 'not_text' });
+    await assert.rejects(r.client.request('fileWrite', { sessionId, path: '../e2e-out.txt', text: 'x', overwrite: true }), { code: 'bad_path' });
+    await assert.rejects(r.client.request('fileWrite', { sessionId, path: 'e2e-none.txt', text: 'x', overwrite: true }), { code: 'no_file' });
+    assert.equal(fs.existsSync(path.join(WS, 'e2e-none.txt')), false);
+
+    // And out of it again: a file, then a folder with what's in it, each to the Trash, which here is this
+    // run's own folder. Neither is in the list after.
+    const trashed = () => fs.readdirSync(TRASH).map(name => name.replace(/^\d+-/, '')).sort();
+    const gone = await r.client.request('fileDelete', { sessionId, path: 'e2e-new.txt' });
+    assert.deepEqual([gone.name, gone.path, fs.existsSync(path.join(WS, 'e2e-new.txt'))], ['e2e-new.txt', path.join(WS, 'e2e-new.txt'), false]);
+    await r.client.request('fileDelete', { sessionId, path: made });
+    assert.equal(fs.existsSync(made), false);
+    assert.deepEqual(trashed(), ['e2e-made', 'e2e-new.txt']);
+    assert.equal(fs.existsSync(path.join(TRASH, fs.readdirSync(TRASH).find(name => name.endsWith('e2e-made')), 'inside.md')), true, 'a folder goes with what\'s in it');
+    const after = await r.client.request('files', { sessionId });
+    assert.equal(after.entries.some(entry => entry.name === 'e2e-new.txt' || entry.name === 'e2e-made'), false);
+    // What isn't there, what's outside, and the folder itself stay as they are.
+    await assert.rejects(r.client.request('fileDelete', { sessionId, path: 'e2e-new.txt' }), { code: 'no_file' });
+    await assert.rejects(r.client.request('fileDelete', { sessionId, path: '..' }), { code: 'bad_path' });
+    await assert.rejects(r.client.request('fileDelete', { sessionId, path: WS }), { code: 'bad_path' });
+    await assert.rejects(r.client.request('fileDelete', { sessionId }), { code: 'bad_path' });
+    assert.equal(fs.existsSync(path.join(WS, 'e2e-look.txt')), true);
   } finally {
     fs.rmSync(made, { recursive: true, force: true });
   }
@@ -2525,7 +2573,8 @@ process.on('exit', () => {
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { stopped = true; process.exit(1); });
 stopStrayHelper();
 fs.rmSync(HOME, { recursive: true, force: true });
-for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS]) fs.rmSync(own, { recursive: true, force: true });
+for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS, TRASH]) fs.rmSync(own, { recursive: true, force: true });
+fs.mkdirSync(TRASH, { recursive: true });
 fs.rmSync(path.join(WS, '.claude'), { recursive: true, force: true });
 try { tmux('kill-server'); } catch { /* not running */ }
 tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'keep', 'sleep', '86400');
@@ -2538,7 +2587,7 @@ let failed = 0;
 for (const name of names) if (!(await runCase(name))) failed++;
 try { tmux('kill-server'); } catch { /* already gone */ }
 fs.rmSync(HOME, { recursive: true, force: true });
-for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS]) fs.rmSync(own, { recursive: true, force: true });
+for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS, TRASH]) fs.rmSync(own, { recursive: true, force: true });
 forgetSessionsSince(sessionsBefore);
 pushServer.close();
 console.log(failed ? `${failed} FAILED` : 'all passed');

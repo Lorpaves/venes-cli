@@ -338,6 +338,8 @@ A plan written in Plan mode is a `tool.start` and a `tool.end` named `ExitPlanMo
 
 A plan's request stays open while the session rests, which is `waiting` meanwhile. A client that joins then has the request in `requests`, and the turn that wrote the plan in `items`, whole, once it's history. It closes with `by: "terminal"` when a turn starts some other way, as from Codex's terminal, or when the planning is stopped. The terminal's other way on, a new thread with the plan, isn't offered.
 
+Codex's own terminal at the Mac, which the helper opens on a session, is another client of the thread and asks about the plan by itself, and it goes on asking whatever another client does with the plan. So an answer from a client is acted on only after that question is put away there: the helper presses the question's own row for leaving things as they are, "No, stay in Plan mode", in the terminal it opened on the thread (`venes-codex-` and the start of the id). It does that only when the question is what the terminal shows, read off its screen, since a key pressed on anything else would be typed into it. With no such terminal, or with the question answered there already, nothing is pressed.
+
 **What it doesn't do yet.** A plan carried out in a new thread, a plan's text as it's written, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
 
 ### Antigravity sessions

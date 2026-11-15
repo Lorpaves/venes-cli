@@ -11,6 +11,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { CodexLink } from './codexlink.mjs';
+import { readPlanQuestion } from './codexscreen.mjs';
 import { checkedFolder } from './folders.mjs';
 import { HelperError } from './errors.mjs';
 import { mediaTypeOf } from './files.mjs';
@@ -609,6 +610,12 @@ export function mergedLimits(before, now) {
 // What a terminal opened on a thread is called at the Mac, and what it's given of the helper's own surroundings.
 const TERMINAL_PREFIX = 'venes-codex-';
 const TERMINAL_ID_LENGTH = 8;
+// The terminal the helper opens on a thread, by the name it's found again by.
+const terminalName = threadId => `${TERMINAL_PREFIX}${threadId.slice(0, TERMINAL_ID_LENGTH)}`;
+// How long a key pressed in it is given to show.
+const KEY_LIMIT_MS = 2000;
+const KEY_CHECK_MS = 50;
+const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 const TERMINAL_ENV = ['PATH', 'LANG', 'LC_ALL', 'CODEX_HOME', 'VENES_TMUX_SOCKET'];
 
 function blankThread() {
@@ -646,6 +653,7 @@ export class Codex {
   #limits;
   #retry;
   #retryMs;
+  #keyLimitMs;
   #trusts;
   #installed;
   #terminal;
@@ -660,8 +668,9 @@ export class Codex {
     // Told where to look, as a test run is, there's a Codex only if something listens there.
     installed = () => !process.env.VENES_CODEX_SOCKET && isInstalled(),
     // What opens a terminal at the Mac, as for a Claude Code session that's resumed: none, and no session gets one.
-    terminal = undefined, env = process.env,
+    terminal = undefined, env = process.env, keyLimitMs = KEY_LIMIT_MS,
   }) {
+    this.#keyLimitMs = keyLimitMs;
     this.#terminal = terminal;
     this.#env = env;
     this.#installed = installed;
@@ -841,15 +850,41 @@ export class Codex {
     if (!thread.wantsTerminal || thread.hasTerminal || !this.#terminal) return;
     thread.hasTerminal = true;
     const session = this.#store.find(threadId);
-    const variables = Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
     try {
       await this.#terminal.startSession({
-        name: `${TERMINAL_PREFIX}${threadId.slice(0, TERMINAL_ID_LENGTH)}`, cwd: session?.cwd ?? os.homedir(),
-        command: terminalCommand(this.#socketPath, threadId), env: variables,
+        name: terminalName(threadId), cwd: session?.cwd ?? os.homedir(),
+        command: terminalCommand(this.#socketPath, threadId), env: this.#terminalEnv(),
       });
     } catch (error) {
       // The session goes on without one, as it did before there were any.
       console.error(`codex: no terminal for ${threadId}: ${error.message}`);
+    }
+  }
+
+  #terminalEnv() {
+    return Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
+  }
+
+  // Codex's own terminal at the Mac asks about a plan too, "Implement this plan?", and goes on asking
+  // whatever another client does with the plan: answered from here, the plan would be carried out, or
+  // planned again, with the question still standing there. So before an answer from here is acted on,
+  // the question is put away in the terminal the helper opened on the thread, with its own row for
+  // leaving things as they are. Only when that question is what the terminal shows: a key pressed on
+  // anything else would be typed into it. With no such terminal, or no question, there's nothing to do.
+  async #putAwayPlanQuestion(threadId) {
+    if (!this.#terminal?.findSession) return;
+    try {
+      const target = await this.#terminal.findSession(terminalName(threadId), this.#terminalEnv());
+      if (!target) return;
+      const asked = readPlanQuestion(await this.#terminal.readScreen(target));
+      if (!asked?.stay) return;
+      await this.#terminal.pressKey(target, String(asked.stay));
+      // Gone, or left to whoever's at the Mac.
+      for (const end = Date.now() + this.#keyLimitMs; Date.now() < end; await pause(KEY_CHECK_MS)) {
+        if (!readPlanQuestion(await this.#terminal.readScreen(target))) return;
+      }
+    } catch (error) {
+      console.error(`codex: the plan's question at the Mac is still open: ${error.message}`);
     }
   }
 
@@ -1146,6 +1181,8 @@ export class Codex {
       const text = answer?.implements ? IMPLEMENT_PROMPT : answer?.followUp;
       let isSent = false;
       try {
+        // Answered from here, whatever the answer, the terminal at the Mac has nothing left to ask.
+        if (answer) await this.#putAwayPlanQuestion(threadId);
         if (answer?.implements) await this.#leavePlanning(threadId);
         if (text) {
           await this.deliver(session, { text });

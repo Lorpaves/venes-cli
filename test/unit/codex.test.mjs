@@ -119,7 +119,7 @@ function setup({ threads = [], loaded = [], isRunning = true, trusts = () => tru
   store.on('event', event => events.push(event));
   const codex = new Codex({
     store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, retryMs: 5, trusts, installed: () => isRunning, terminal,
-    env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on' },
+    env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on' }, keyLimitMs: 40,
   });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
@@ -1031,6 +1031,60 @@ test('a client that joins while a plan waits is told the plan\'s turn, then as h
   const later = await codex.join({ sessionId });
   assert.deepEqual([later.items.map(item => item.role), later.items[1].name, later.items[1].input, later.turn.map(event => event.kind), later.requests.length],
     [['user', 'tool', 'turn_end'], 'ExitPlanMode', { plan: '1. Look\n2. Fix\n' }, ['session.status', 'request.opened'], 1]);
+});
+
+// Codex's own terminal at the Mac, with its question about a plan showing until one of its rows is pressed.
+function askingTerminal() {
+  const question = ['  Implement this plan?', '', '› 1. Yes, implement this plan          Switch to Default and start coding',
+    '  2. Yes, clear context and implement  Start a fresh thread (current context: 5% used)', '  3. No, stay in Plan mode             Continue planning with the model', '', '  enter select · esc back'].join('\n');
+  const terminal = {
+    ...fakeTerminal(), screen: question, keys: [], found: [],
+    findSession: async (name, env) => { terminal.found.push([name, Object.keys(env)]); return terminal.isGone ? undefined : { pane: '%1' }; },
+    readScreen: async () => terminal.screen,
+    pressKey: async (_, key) => { terminal.keys.push(key); if (!terminal.isStuck) terminal.screen = '› Ask Codex to do anything'; },
+  };
+  return terminal;
+}
+
+test('a plan answered from a client is put away in Codex\'s terminal at the Mac first, with the row that changes nothing', async () => {
+  const terminal = askingTerminal();
+  const { store, server, sessionId, say } = await planned({ terminal });
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  const before = server.calls.length;
+  terminal.pressKey = (press => async (target, key) => { terminal.at = server.calls.length - before; return press(target, key); })(terminal.pressKey);
+  store.respond(store.requests()[0].id, { decision: 'allow', option: 'implement' });
+  await settle();
+  await settle();
+  await settle();
+  // Its own third row, before Codex is told anything, and then the plan is carried out as before.
+  assert.deepEqual([terminal.keys, terminal.at, terminal.found.at(-1)], [['3'], 0, [`venes-codex-${sessionId.slice(0, 8)}`, ['PATH', 'LANG', 'CODEX_HOME']]]);
+  assert.deepEqual([server.called('thread/settings/update').at(-1).collaborationMode.mode, server.called('turn/start').at(-1).input[0].text], ['default', IMPLEMENT_PROMPT]);
+});
+
+test('with no question in Codex\'s terminal, or no terminal, nothing is pressed and the answer still goes', async () => {
+  // Something else on its screen, as once the question was answered there.
+  const waiting = askingTerminal();
+  waiting.screen = '› Ask Codex to do anything\n\n  ? for shortcuts';
+  // No terminal of the helper's on the thread any more.
+  const gone = askingTerminal();
+  gone.isGone = true;
+  // A question that stays whatever's pressed is left to whoever's at the Mac.
+  const stuck = askingTerminal();
+  stuck.isStuck = true;
+  for (const [terminal, keys] of [[waiting, []], [gone, []], [stuck, ['3']]]) {
+    const { store, server, say } = await planned({ terminal });
+    say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+    store.respond(store.requests()[0].id, { decision: 'deny', message: 'Shorter.' });
+    await new Promise(resolve => { setTimeout(resolve, 90); });
+    assert.deepEqual([terminal.keys, server.called('turn/start').at(-1).input[0].text], [keys, 'Shorter.']);
+  }
+  // A plan left alone from here, as one answered at the Mac, has nothing put away.
+  const left = askingTerminal();
+  const { server, sessionId, say } = await planned({ terminal: left });
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-2' } });
+  await settle();
+  assert.deepEqual(left.keys, []);
 });
 
 test('a plan sent back with what to change goes on being planned', async () => {

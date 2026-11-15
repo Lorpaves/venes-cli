@@ -564,6 +564,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     avatar: async () => (await avatar()) ?? {},
     // `imageId`, because `id` is the request's own.
     image: async msg => {
+      if (await isCodex(msg.sessionId)) return codex.image(msg);
       const file = store.find(msg.sessionId)?.transcriptPath;
       const image = file ? readImage(file, msg.imageId) : await library.image(msg.sessionId, msg.imageId);
       if (!image?.data) throw new HelperError('unknown_image', 'This image is no longer in the transcript.');

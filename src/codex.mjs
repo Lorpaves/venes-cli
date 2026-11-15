@@ -13,6 +13,8 @@ import { promisify } from 'node:util';
 import { CodexLink } from './codexlink.mjs';
 import { checkedFolder } from './folders.mjs';
 import { HelperError } from './errors.mjs';
+import { mediaTypeOf } from './files.mjs';
+import { imageSize } from './imagesize.mjs';
 import { isImage } from './uploads.mjs';
 import { VERSION } from './version.mjs';
 
@@ -24,6 +26,12 @@ const DAEMON_START_MS = 30_000;
 // The models on offer change with a Codex release, not by the minute.
 const MODELS_LIFETIME_MS = 5 * 60_000;
 const DEFAULT_HISTORY_LIMIT = 50;
+// As big a picture as is read for a page. A bigger one isn't shown.
+const PICTURE_BYTES = 20 * 1024 * 1024;
+// The pictures kept track of for a session, and the sessions they're kept for, so that a client can ask
+// for one by the id a page gave it.
+const KEPT_PICTURES = 200;
+const KEPT_PICTURE_THREADS = 50;
 // Turns asked for at a time, while a page of history fills. A turn can be hundreds of items long, so
 // it's a few, and a page is whole turns either way.
 const TURNS_PER_READ = 5;
@@ -133,6 +141,77 @@ export function unwrapped(command) {
   return words.length === 3 && words[1] === '-lc' && /(^|\/)(zsh|bash|sh)$/.test(words[0]) ? words[2] : command;
 }
 
+// A `data:` address as a picture, its kind and its bytes in base64. Anything else is undefined: an
+// address on the web isn't fetched from here.
+function dataPicture(url) {
+  const [, mediaType, data] = /^data:(image\/[\w.+-]+);base64,(.+)$/s.exec(typeof url === 'string' ? url : '') ?? [];
+  return data ? { mediaType, data } : undefined;
+}
+
+// The pictures an item has, each as where it is on this Mac or as what it is: those a message came
+// with, the one Codex looked at, the one it made, and those a tool gave back.
+export function pictureSourcesOf(item) {
+  const fromData = url => { const found = dataPicture(url); return found ? [found] : []; };
+  switch (item?.type) {
+    case 'userMessage':
+      return (item.content ?? []).flatMap(part => {
+        if (part?.type === 'localImage') return typeof part.path === 'string' ? [{ path: part.path }] : [];
+        return part?.type === 'image' ? fromData(part.url) : [];
+      });
+    case 'imageView':
+      return typeof item.path === 'string' ? [{ path: item.path }] : [];
+    case 'imageGeneration':
+      if (typeof item.savedPath === 'string') return [{ path: item.savedPath }];
+      return typeof item.result === 'string' && item.result ? [{ mediaType: 'image/png', data: item.result }] : [];
+    case 'mcpToolCall':
+      return (Array.isArray(item.result?.content) ? item.result.content : [])
+        .flatMap(part => (part?.type === 'image' && typeof part.data === 'string' && part.data ? [{ mediaType: part.mimeType ?? 'image/png', data: part.data }] : []));
+    case 'dynamicToolCall':
+      return (item.contentItems ?? []).flatMap(part => (part?.type === 'inputImage' ? fromData(part.imageUrl) : []));
+    default:
+      return [];
+  }
+}
+
+// A picture from its source: its kind and its bytes. A file is read where it is, when its name is a
+// picture's and it's no bigger than is shown. Undefined for one that has gone.
+export function readPicture(source, { limit = PICTURE_BYTES } = {}) {
+  if (source.data) return { mediaType: source.mediaType, data: source.data };
+  const mediaType = mediaTypeOf(source.path);
+  if (!mediaType.startsWith('image/')) return undefined;
+  try {
+    if (fs.statSync(source.path).size > limit) return undefined;
+    return { mediaType, data: fs.readFileSync(source.path).toString('base64') };
+  } catch {
+    return undefined; // gone, or out of reach
+  }
+}
+
+// What a page is told of an item's pictures, as of a Claude Code session's: each by the id to ask for
+// it by, its kind, how big it is, and its size in pixels where that can be told. `keep` hears each
+// one's source by that id.
+export function picturesOf(item, keep = undefined) {
+  return pictureSourcesOf(item).flatMap((source, index) => {
+    const picture = readPicture(source);
+    if (!picture) return [];
+    const id = `${item.id}:${index}`;
+    keep?.(id, source);
+    return [{ id, mediaType: picture.mediaType, bytes: Math.floor(picture.data.length * 3 / 4), ...imageSize(picture.data) }];
+  });
+}
+
+// An item as a page is given it: without the bytes of its pictures, which are asked for one at a time.
+export function withoutPictures(item) {
+  if (item?.type === 'mcpToolCall' && Array.isArray(item.result?.content)) {
+    return { ...item, result: { ...item.result, content: item.result.content.map(part => (part?.type === 'image' ? { ...part, data: undefined } : part)) } };
+  }
+  if (item?.type === 'dynamicToolCall' && Array.isArray(item.contentItems)) {
+    return { ...item, contentItems: item.contentItems.map(part => (part?.type === 'inputImage' ? { ...part, imageUrl: undefined } : part)) };
+  }
+  if (item?.type === 'imageGeneration' && item.result) return { ...item, result: undefined };
+  return item;
+}
+
 // What a message says, without what came with it.
 export function textOf(content = []) {
   return content.filter(part => part.type === 'text').map(part => part.text).join('\n');
@@ -184,8 +263,8 @@ export function skillsNamed(text, skills = []) {
 
 const shownUpload = ({ uploadId, name, mediaType, size }) => ({ uploadId, name, mediaType, size });
 
-// A stored turn, as history has it.
-export function historyOf(turn) {
+// A stored turn, as history has it. `keep` hears where each of its pictures is, by the id an item has for it.
+export function historyOf(turn, keep = undefined) {
   const at = turn.startedAt ? new Date(turn.startedAt * 1000).toISOString() : undefined;
   const items = [];
   // A turn that's nothing but lines run with `!` has no reply to wait for, and no end of its own to tell.
@@ -194,14 +273,20 @@ export function historyOf(turn) {
     if (isShellLine(item)) {
       items.push({ role: 'user', at, text: `!${unwrapped(item.command)}`, shell: true });
       items.push({ role: 'output', at, stdout: item.aggregatedOutput ?? '', stderr: '', replies: !isShellTurn });
-    } else if (item.type === 'userMessage') items.push({ role: 'user', at, text: textOf(item.content), ...(item.clientId && { clientId: item.clientId }) });
-    else if (item.type === 'agentMessage') {
+    } else if (item.type === 'userMessage') {
+      const images = picturesOf(item, keep);
+      items.push({ role: 'user', at, text: textOf(item.content), ...(item.clientId && { clientId: item.clientId }), ...(images.length && { images }) });
+    } else if (item.type === 'agentMessage') {
       if (item.text) items.push({ role: 'assistant', at, text: item.text, ...(item.phase && { phase: item.phase }) });
     } else if (item.type === 'reasoning') {
       const text = thinkingOf(item);
       if (text) items.push({ role: 'thinking', at, text });
     } else if (item.type === 'contextCompaction') items.push({ role: 'compact', at, trigger: 'auto' });
-    else if (isTool(item)) items.push({ role: 'tool', at, toolUseId: item.id, name: item.type, input: item, result: item, isError: isFailed(item) });
+    else if (isTool(item)) {
+      const images = picturesOf(item, keep);
+      const shown = withoutPictures(item);
+      items.push({ role: 'tool', at, toolUseId: item.id, name: item.type, input: shown, result: shown, isError: isFailed(item), ...(images.length && { images }) });
+    }
   }
   if (turn.status === 'interrupted') items.push({ role: 'system', at, kind: 'interrupted' });
   else if (!isShellTurn && (turn.status === 'completed' || turn.status === 'failed')) items.push({ role: 'turn_end', at, durationMs: turn.durationMs ?? undefined });
@@ -453,6 +538,8 @@ export class Codex {
   #link;
   #opening;
   #threads = new Map();
+  // Where each session's pictures are, by the ids its pages were given for them.
+  #pictures = new Map();
   // Whether an id is a thread of Codex's, for the sessions the helper hasn't heard from.
   #owned = new Map();
   #cursors = new Map();
@@ -796,6 +883,31 @@ export class Codex {
     this.#store.report(threadId, 'message.user', {
       text, clientId, ...(sent?.attachments.length ? { attachments: sent.attachments } : {}),
     }, { lastPrompt: text });
+    // The pictures it came with, as a Claude Code session tells of a message's.
+    const images = picturesOf(item, this.#keeping(threadId));
+    if (images.length) this.#store.report(threadId, 'message.images', { images });
+  }
+
+  // What keeps where a session's pictures are, the latest of them, for `image` to find one by its id.
+  #keeping(threadId) {
+    return (id, source) => {
+      const kept = this.#pictures.get(threadId) ?? new Map();
+      // Told of again, a session's pictures are the newest kept, and so is the session.
+      this.#pictures.delete(threadId);
+      this.#pictures.set(threadId, kept);
+      kept.delete(id);
+      kept.set(id, source);
+      while (kept.size > KEPT_PICTURES) kept.delete(kept.keys().next().value);
+      while (this.#pictures.size > KEPT_PICTURE_THREADS) this.#pictures.delete(this.#pictures.keys().next().value);
+    };
+  }
+
+  // A picture of a session's, by the id a page was given for it.
+  image({ sessionId, imageId }) {
+    const source = this.#pictures.get(sessionId)?.get(String(imageId));
+    const picture = source && readPicture(source);
+    if (!picture) throw new HelperError('unknown_image', 'This image is no longer there.');
+    return picture;
   }
 
   #onItemStarted(threadId, thread, { item }) {
@@ -812,7 +924,7 @@ export class Codex {
 
   #startTool(threadId, thread, item) {
     thread.tools.set(item.id, { name: item.type, item, at: Date.now() });
-    this.#store.report(threadId, 'tool.start', { toolUseId: item.id, name: item.type, input: item });
+    this.#store.report(threadId, 'tool.start', { toolUseId: item.id, name: item.type, input: withoutPictures(item) });
   }
 
   #onItemCompleted(threadId, thread, { item, turnId }) {
@@ -842,7 +954,10 @@ export class Codex {
       if (!thread.tools.has(item.id)) this.#startTool(threadId, thread, item);
       const { at } = thread.tools.get(item.id);
       thread.tools.delete(item.id);
-      report('tool.end', { toolUseId: item.id, name: item.type, response: item, durationMs: item.durationMs ?? Date.now() - at, isError: isFailed(item) });
+      report('tool.end', { toolUseId: item.id, name: item.type, response: withoutPictures(item), durationMs: item.durationMs ?? Date.now() - at, isError: isFailed(item) });
+      // What it showed, or looked at, as a Claude Code session tells of a tool's pictures.
+      const images = picturesOf(item, this.#keeping(threadId));
+      if (images.length) report('tool.images', { toolUseId: item.id, images });
     }
   }
 
@@ -897,6 +1012,7 @@ export class Codex {
 
   #forget(threadId) {
     this.#threads.delete(threadId);
+    this.#pictures.delete(threadId);
     this.#chosen.delete(threadId);
     this.#owned.set(threadId, false);
     if (this.#store.find(threadId)) this.#store.forget(threadId);
@@ -1030,7 +1146,7 @@ export class Codex {
         });
       for (const turn of read.data ?? []) {
         if (skip.has(turn.id)) continue;
-        const items = historyOf(turn);
+        const items = historyOf(turn, this.#keeping(threadId));
         turns.unshift(items);
         count += items.length;
       }

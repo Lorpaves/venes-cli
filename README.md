@@ -387,6 +387,8 @@ Images stay out of pages and events, because a page can have dozens of them. `hi
 
 During a turn, `tool.images` and `message.images` say the same. They come from the transcript, so they can arrive after what they belong to. `tool.end.response` doesn't carry the image itself: its base64 is left out, and the rest stays.
 
+A Codex session's pictures are told the same way: those a message came with, the one Codex looked at (`imageView`) or made (`imageGeneration`), and those an MCP or a dynamic tool gave back. One that's a file on this Mac is read where it is when it's asked for, so it's left out once the file has gone, as is one bigger than 20 MB, and a picture named by an address on the web isn't fetched. The helper keeps where the latest 200 pictures of a session are, from the pages and events that told of them, and `image` answers `unknown_image` for any other.
+
 ### Published pages
 
 A page a session publishes with Claude Code's Artifact tool is private on claude.ai to the account that published it, so a client that isn't signed in there has only a link. The page is made from a file on this Mac, and `artifact` gives that file: `{sessionId, toolUseId}`, the id of the Artifact call, answers `{text}`, the file's text. The helper finds the file from the call in the session's transcript, the path Claude Code kept with the call's result or else the one the call was given, and takes no path from the client, so a client can have only what a session published. A call of any other tool, or an id the transcript doesn't have, is `unknown_artifact`. A file that's gone is `artifact_gone`, one that isn't UTF-8 text `artifact_not_text`, and one over 16 MB, which is the most claude.ai takes for a page, `artifact_too_big`.

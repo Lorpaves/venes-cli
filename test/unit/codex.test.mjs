@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  approvalRequest, Codex, commandOf, COMMANDS, historyOf, inputOf, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
+  approvalRequest, Codex, commandOf, COMMANDS, historyOf, inputOf, picturesOf, pictureSourcesOf, readPicture, withoutPictures, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
   modeOf, permissionsRequest, questionRequest, shellWords, skillsNamed, skillsOf, statusLineOf, terminalCommand, textOf, thinkingOf, trustedFolders,
   turnsOf, unwrapped,
 } from '../../src/codex.mjs';
@@ -1147,3 +1149,98 @@ test('a line with a file attached is a message, since a shell takes none', async
   assert.equal(server.called('thread/shellCommand').length, 0);
   assert.equal(server.called('turn/start').length, 1);
 });
+
+// A PNG two pixels wide and three high, and where one is kept for a test. Its size is told from its
+// base64 as a Claude Code session's is, which counts the padding at its end: 75 for its 74 bytes.
+const DOT = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAAEklEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=';
+function pictures(t) {
+  const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-codex-pictures-')));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const file = (name, contents = Buffer.from(DOT, 'base64')) => {
+    fs.writeFileSync(path.join(folder, name), contents);
+    return path.join(folder, name);
+  };
+  return { folder, file };
+}
+
+test('an item\'s pictures are those a message came with, the one Codex looked at or made, and those a tool gave back', () => {
+  const data = `data:image/jpeg;base64,${DOT}`;
+  assert.deepEqual(pictureSourcesOf({ type: 'userMessage', content: [
+    { type: 'text', text: 'look' }, { type: 'localImage', path: '/d/a.png' }, { type: 'image', url: data }, { type: 'image', url: 'https://example.com/a.png' },
+    { type: 'localImage' },
+  ] }), [{ path: '/d/a.png' }, { mediaType: 'image/jpeg', data: DOT }]);
+  assert.deepEqual(pictureSourcesOf({ type: 'imageView', id: 'v', path: '/d/shot.png' }), [{ path: '/d/shot.png' }]);
+  assert.deepEqual(pictureSourcesOf({ type: 'imageGeneration', id: 'g', result: DOT, savedPath: '/d/made.png' }), [{ path: '/d/made.png' }]);
+  assert.deepEqual(pictureSourcesOf({ type: 'imageGeneration', id: 'g', result: DOT, savedPath: null }), [{ mediaType: 'image/png', data: DOT }]);
+  assert.deepEqual(pictureSourcesOf({ type: 'mcpToolCall', id: 'm', result: { content: [{ type: 'text', text: 'x' }, { type: 'image', data: DOT, mimeType: 'image/webp' }] } }),
+    [{ mediaType: 'image/webp', data: DOT }]);
+  assert.deepEqual(pictureSourcesOf({ type: 'dynamicToolCall', id: 'd', contentItems: [{ type: 'inputText', text: 'x' }, { type: 'inputImage', imageUrl: data }] }),
+    [{ mediaType: 'image/jpeg', data: DOT }]);
+  for (const item of [{ type: 'commandExecution', id: 'c' }, { type: 'mcpToolCall', id: 'm', result: null }, { type: 'imageView', id: 'v' }, { type: 'agentMessage', text: 'hi' }, undefined]) {
+    assert.deepEqual(pictureSourcesOf(item), []);
+  }
+});
+
+test('a picture is read where it is, when it\'s one by its name, there, and no bigger than is shown', t => {
+  const { folder, file } = pictures(t);
+  const shot = file('shot.png');
+  assert.deepEqual(readPicture({ path: shot }), { mediaType: 'image/png', data: DOT });
+  assert.deepEqual(readPicture({ mediaType: 'image/webp', data: DOT }), { mediaType: 'image/webp', data: DOT });
+  assert.equal(readPicture({ path: path.join(folder, 'gone.png') }), undefined);
+  assert.equal(readPicture({ path: file('notes.txt', 'words') }), undefined);
+  assert.equal(readPicture({ path: shot }, { limit: 10 }), undefined);
+});
+
+test('a page is told of a picture by an id, its kind and its size, and never given its bytes', t => {
+  const { folder, file } = pictures(t);
+  const kept = new Map();
+  const keep = (id, source) => kept.set(id, source);
+  const shot = file('shot.png');
+  const message = { type: 'userMessage', id: 'u1', content: [{ type: 'localImage', path: path.join(folder, 'gone.png') }, { type: 'localImage', path: shot }, { type: 'text', text: 'look' }] };
+  // One that has gone isn't told of, and the next keeps its own place's id.
+  assert.deepEqual(picturesOf(message, keep), [{ id: 'u1:1', mediaType: 'image/png', bytes: 75, width: 2, height: 3 }]);
+  assert.deepEqual([...kept], [['u1:1', { path: shot }]]);
+  const tool = { type: 'mcpToolCall', id: 'm1', status: 'completed', result: { content: [{ type: 'image', data: DOT, mimeType: 'image/png' }, { type: 'text', text: 'done' }] } };
+  const made = { type: 'imageGeneration', id: 'g1', status: 'completed', result: DOT, savedPath: null };
+  const turn = { id: 't', status: 'completed', startedAt: 1_700_000_000, items: [message, { type: 'imageView', id: 'v1', path: shot }, tool, made] };
+  const items = historyOf(turn, keep);
+  assert.deepEqual(items.map(item => [item.role, item.name, item.images?.map(image => image.id)]),
+    [['user', undefined, ['u1:1']], ['tool', 'imageView', ['v1:0']], ['tool', 'mcpToolCall', ['m1:0']], ['tool', 'imageGeneration', ['g1:0']], ['turn_end', undefined, undefined]]);
+  assert.equal(JSON.stringify(items).includes(DOT), false, 'no picture\'s bytes are on the page');
+  assert.deepEqual(items[2].result.result.content, [{ type: 'image', data: undefined, mimeType: 'image/png' }, { type: 'text', text: 'done' }]);
+  assert.deepEqual([...kept.keys()], ['u1:1', 'v1:0', 'm1:0', 'g1:0']);
+  // Without anything to keep them, the page is the same.
+  assert.deepEqual(historyOf(turn), items);
+  assert.deepEqual(withoutPictures({ type: 'dynamicToolCall', id: 'd', contentItems: [{ type: 'inputImage', imageUrl: 'data:image/png;base64,AAAA' }] }).contentItems,
+    [{ type: 'inputImage', imageUrl: undefined }]);
+  assert.deepEqual(withoutPictures(command()), command());
+});
+
+test('a turn\'s pictures are told as they come, and each is had by its id', async t => {
+  const { file } = pictures(t);
+  const shot = file('shot.png');
+  const { say, events, codex, sessionId, last } = await running();
+  say('item/completed', { item: { type: 'userMessage', id: 'u2', content: [{ type: 'text', text: 'see this' }, { type: 'localImage', path: shot }] } });
+  assert.deepEqual(last('message.images').images, [{ id: 'u2:0', mediaType: 'image/png', bytes: 75, width: 2, height: 3 }]);
+  say('item/started', { item: { type: 'imageView', id: 'v1', path: shot } });
+  say('item/completed', { item: { type: 'imageView', id: 'v1', path: shot } });
+  const shown = last('tool.images');
+  assert.deepEqual([shown.toolUseId, shown.images], ['v1', [{ id: 'v1:0', mediaType: 'image/png', bytes: 75, width: 2, height: 3 }]]);
+  // After the tool's end, as a Claude Code session's are.
+  const kinds = events.map(event => event.kind);
+  assert.ok(kinds.lastIndexOf('tool.images') > kinds.lastIndexOf('tool.end'));
+  say('item/completed', { item: { type: 'mcpToolCall', id: 'm1', server: 's', tool: 'shoot', status: 'completed', result: { content: [{ type: 'image', data: DOT, mimeType: 'image/png' }] } } });
+  assert.equal(JSON.stringify(events).includes(DOT), false, 'no event carries a picture\'s bytes');
+  assert.deepEqual(codex.image({ sessionId, imageId: 'v1:0' }), { mediaType: 'image/png', data: DOT });
+  assert.deepEqual(codex.image({ sessionId, imageId: 'm1:0' }), { mediaType: 'image/png', data: DOT });
+  assert.throws(() => codex.image({ sessionId, imageId: 'v1:9' }), { code: 'unknown_image' });
+  assert.throws(() => codex.image({ sessionId: 'another', imageId: 'v1:0' }), { code: 'unknown_image' });
+  // A picture that has gone from the Mac since isn't there to give.
+  fs.rmSync(shot);
+  assert.throws(() => codex.image({ sessionId, imageId: 'v1:0' }), { code: 'unknown_image' });
+  // A message with no picture says nothing of pictures.
+  const before = events.filter(event => event.kind === 'message.images').length;
+  say('item/completed', { item: { type: 'userMessage', id: 'u3', content: [{ type: 'text', text: 'plain' }] } });
+  assert.equal(events.filter(event => event.kind === 'message.images').length, before);
+});
+

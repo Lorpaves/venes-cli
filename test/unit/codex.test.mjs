@@ -7,7 +7,7 @@ import path from 'node:path';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
   approvalRequest, Codex, commandOf, COMMANDS, historyOf, inputOf, picturesOf, pictureSourcesOf, readPicture, withoutPictures, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
-  modeOf, permissionsRequest, questionRequest, shellWords, skillsNamed, skillsOf, statusLineOf, terminalCommand, textOf, thinkingOf, trustedFolders,
+  creditsOf, limitResetsOf, mergedLimits, modeOf, otherLimitsOf, permissionsRequest, questionRequest, shellWords, skillsNamed, skillsOf, statusLineOf, terminalCommand, textOf, thinkingOf, trustedFolders,
   turnsOf, unwrapped,
 } from '../../src/codex.mjs';
 
@@ -1040,6 +1040,42 @@ test('a status is what Codex says of the session and the account, as Claude Code
   });
 });
 
+test('a status has what an account has past its plan\'s limits: the limits metered apart, the credits left, and the resets to hand', () => {
+  const session = { model: 'gpt-6', effort: 'high', cwd: '/Users/me/app' };
+  const plan = {
+    limitId: 'codex', limitName: null, primary: { usedPercent: 29, windowDurationMins: 300, resetsAt: 1_794_747_670 },
+    secondary: { usedPercent: 43, windowDurationMins: 10080, resetsAt: 1_795_230_430 }, credits: { hasCredits: true, unlimited: false, balance: '36521.0736720000' },
+  };
+  const spark = { limitId: 'codex_spark', limitName: 'GPT-6-Codex-Spark', primary: { usedPercent: 4, windowDurationMins: 300, resetsAt: 1_794_747_000 }, secondary: { usedPercent: 9, windowDurationMins: 10080 } };
+  const resets = { availableCount: 2, credits: [
+    { id: 'a', resetType: 'codexRateLimits', status: 'available', grantedAt: 1_794_516_945, expiresAt: 1_797_108_945, title: 'Full reset (Weekly + 5 hr)', description: 'Thanks.' },
+    { id: 'b', resetType: 'codexRateLimits', status: 'redeemed', grantedAt: 1, expiresAt: null, title: 'Used' },
+    { id: 'c', resetType: 'codexRateLimits', status: 'available', grantedAt: 1, expiresAt: null, title: null },
+  ] };
+  const status = statusLineOf({ session, limits: plan, others: { codex: plan, codex_spark: spark }, resets, at: 1000 });
+  assert.deepEqual([status.fiveHour, status.sevenDay], [{ percent: 29, resetsAt: 1_794_747_670 }, { percent: 43, resetsAt: 1_795_230_430 }]);
+  assert.deepEqual(status.limits, [
+    { name: 'GPT-6-Codex-Spark', window: 'fiveHour', percent: 4, resetsAt: 1_794_747_000 }, { name: 'GPT-6-Codex-Spark', window: 'sevenDay', percent: 9 },
+  ]);
+  assert.deepEqual(status.credits, { unlimited: false, balance: 36521.073672 });
+  assert.deepEqual(status.limitResets, [{ title: 'Full reset (Weekly + 5 hr)', expiresAt: 1_797_108_945 }, {}]);
+
+  assert.deepEqual([creditsOf({ hasCredits: true, unlimited: true, balance: null }), creditsOf({ hasCredits: false, unlimited: false, balance: '0' }), creditsOf(null), creditsOf({ hasCredits: true, balance: 'lots' })],
+    [{ unlimited: true }, undefined, undefined, { unlimited: false }]);
+  // One with no name of its own goes by its id, and the plan's own isn't one of them.
+  assert.deepEqual(otherLimitsOf({ codex: plan, other: { limitId: 'other', limitName: null, primary: { usedPercent: 1, windowDurationMins: 300 } } }), [{ name: 'other', window: 'fiveHour', percent: 1 }]);
+  assert.deepEqual([otherLimitsOf(null), otherLimitsOf({ codex: plan })], [[], []]);
+  // Told only how many resets there are, that many with nothing said of them.
+  assert.deepEqual([limitResetsOf({ availableCount: 2, credits: null }), limitResetsOf({ availableCount: 0, credits: [] }), limitResetsOf(null)], [[{}, {}], [], []]);
+  // An account with none of these has none of them in its status.
+  const bare = statusLineOf({ session, limits: { ...plan, credits: { hasCredits: false, unlimited: false, balance: null } }, others: { codex: plan }, resets: { availableCount: 0, credits: [] }, at: 1000 });
+  assert.deepEqual(['limits', 'credits', 'limitResets'].filter(key => key in bare), []);
+  // A notice of a change keeps the credits and the plan it leaves out, and its windows are as it says.
+  assert.deepEqual(mergedLimits({ ...plan, planType: 'plus' }, { limitId: 'codex', primary: { usedPercent: 31, windowDurationMins: 300 }, secondary: null, credits: null }),
+    { limitId: 'codex', primary: { usedPercent: 31, windowDurationMins: 300 }, secondary: null, credits: plan.credits, planType: 'plus' });
+  assert.deepEqual([mergedLimits(plan, undefined), mergedLimits(undefined, spark)], [plan, { ...spark, credits: null, planType: null }]);
+});
+
 test('a session\'s status has its context after a reply, and the limits asked for once in a while', async () => {
   const { codex, say, sessionId, server } = await running();
   assert.deepEqual(await codex.status({ sessionId: 'nobody' }), { status: null });
@@ -1050,6 +1086,10 @@ test('a session\'s status has its context after a reply, and the limits asked fo
   const after = (await codex.status({ sessionId })).status;
   assert.deepEqual([after.context, after.fiveHour, after.sevenDay], [{ percent: 10, used: 1000, size: 10_000 }, { percent: 13 }, undefined]);
   assert.equal(server.called('account/rateLimits/read').length, 1);
+  // A notice about a limit metered apart leaves the plan's own as it was, and is told by its name.
+  server.say('account/rateLimits/updated', { rateLimits: { limitId: 'codex_spark', limitName: 'Spark', primary: { usedPercent: 2, windowDurationMins: 300 }, secondary: null } });
+  const apart = (await codex.status({ sessionId })).status;
+  assert.deepEqual([apart.fiveHour, apart.limits], [{ percent: 13 }, [{ name: 'Spark', window: 'fiveHour', percent: 2 }]]);
 });
 
 const shellLine = (fields = {}) => command({ id: 'line-1', command: "/bin/zsh -lc 'ls -la'", source: 'userShell', ...fields });

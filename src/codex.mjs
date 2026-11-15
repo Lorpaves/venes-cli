@@ -498,21 +498,64 @@ const LIMITS_LIFETIME_MS = 60_000;
 const FIVE_HOURS_MINS = 5 * 60;
 const SEVEN_DAYS_MINS = 7 * 24 * 60;
 
+const WINDOWS = [['fiveHour', FIVE_HOURS_MINS], ['sevenDay', SEVEN_DAYS_MINS]];
+const windowOf = (limits, minutes) => [limits?.primary, limits?.secondary].find(found => found?.windowDurationMins === minutes);
+const limitOf = found => found && { percent: found.usedPercent, ...(found.resetsAt && { resetsAt: found.resetsAt }) };
+
+// The credits an account has past its plan's limits: how many are left, or that there's no end of them.
+// An account with none has nothing to show.
+export function creditsOf(credits) {
+  if (!credits?.hasCredits) return undefined;
+  const balance = Number(credits.balance);
+  return { unlimited: Boolean(credits.unlimited), ...(credits.balance != null && Number.isFinite(balance) && { balance }) };
+}
+
+// The limits Codex meters apart from the plan's own, as a model of its own can have: each by the name
+// Codex gives it, for each of the two windows it has.
+export function otherLimitsOf(byId = {}, main = 'codex') {
+  return Object.values(byId ?? {}).filter(found => found && found.limitId !== main && (found.limitName || found.limitId)).flatMap(found => (
+    WINDOWS.flatMap(([window, minutes]) => {
+      const limit = limitOf(windowOf(found, minutes));
+      return limit ? [{ name: found.limitName || found.limitId, window, ...limit }] : [];
+    })
+  ));
+}
+
+// The resets of its limits an account has been given and hasn't used: each by Codex's own title for it,
+// and when it's good until. Where Codex says only how many there are, that many with nothing said of them.
+export function limitResetsOf(summary) {
+  if (!summary) return [];
+  if (!Array.isArray(summary.credits)) return Array.from({ length: Math.max(0, summary.availableCount ?? 0) }, () => ({}));
+  return summary.credits.filter(credit => credit?.status === 'available')
+    .map(credit => ({ ...(credit.title && { title: credit.title }), ...(credit.expiresAt && { expiresAt: credit.expiresAt }) }));
+}
+
 // What a status sheet shows of a Codex session, in the shape Claude Code's status line is kept in: what
 // it runs on, where, how full its context is after its last reply, and how much of the account's two
-// limits is used. Codex has no status line, and says all of this itself.
-export function statusLineOf({ session, usage, limits, branch, at = Date.now() }) {
-  const windowOf = minutes => [limits?.primary, limits?.secondary].find(found => found?.windowDurationMins === minutes);
-  const limit = found => found && { percent: found.usedPercent, ...(found.resetsAt && { resetsAt: found.resetsAt }) };
+// limits is used. Then what Codex has past those: the limits it meters apart, the credits left, and the
+// resets to hand. Codex has no status line, and says all of this itself.
+export function statusLineOf({ session, usage, limits, others, resets, branch, at = Date.now() }) {
   const used = usage?.last?.totalTokens;
   const size = usage?.modelContextWindow;
-  const [fiveHour, sevenDay] = [limit(windowOf(FIVE_HOURS_MINS)), limit(windowOf(SEVEN_DAYS_MINS))];
+  const [fiveHour, sevenDay] = WINDOWS.map(([, minutes]) => limitOf(windowOf(limits, minutes)));
+  const apart = otherLimitsOf(others, limits?.limitId ?? 'codex');
+  const credits = creditsOf(limits?.credits);
+  const limitResets = limitResetsOf(resets);
   return {
     model: session.model, effort: session.effort, project: session.cwd ? path.basename(session.cwd) : undefined, branch: branch ?? undefined,
     ...(used !== undefined && size ? { context: { percent: Math.round((used / size) * 1000) / 10, used, size } } : {}),
     ...(fiveHour && { fiveHour }), ...(sevenDay && { sevenDay }),
+    ...(apart.length && { limits: apart }), ...(credits && { credits }), ...(limitResets.length && { limitResets }),
     updatedAt: Math.floor(at / 1000),
   };
+}
+
+// What Codex says of a limit now, after what it said before. A notice of a change comes with a turn's
+// reply, which says how much of each window is used and not always what credits the account has or
+// what plan it's on: those stay as they were. A window it doesn't name is one the limit hasn't got.
+export function mergedLimits(before, now) {
+  if (!now) return before;
+  return { ...now, credits: now.credits ?? before?.credits ?? null, planType: now.planType ?? before?.planType ?? null };
 }
 
 // What a terminal opened on a thread is called at the Mac, and what it's given of the helper's own surroundings.
@@ -753,7 +796,16 @@ export class Codex {
   #onNotification({ method, params = {} }) {
     // The account's, and so every session's.
     if (method === 'account/rateLimits/updated') {
-      this.#limits = { at: Date.now(), snapshot: params.rateLimits };
+      // It's about one of the limits Codex meters: the plan's own, or another by its id.
+      const told = params.rateLimits;
+      const main = this.#limits?.snapshot?.limitId ?? 'codex';
+      const id = told?.limitId ?? main;
+      const kept = this.#limits ?? { others: {}, resets: undefined };
+      this.#limits = {
+        ...kept, at: Date.now(),
+        snapshot: id === main ? mergedLimits(kept.snapshot, told) : kept.snapshot,
+        others: { ...kept.others, [id]: mergedLimits(kept.others?.[id], told) },
+      };
       return;
     }
     const threadId = params.threadId ?? params.thread?.id;
@@ -1215,10 +1267,11 @@ export class Codex {
     if (!this.#limits || Date.now() - this.#limits.at > LIMITS_LIFETIME_MS) {
       const link = await this.#open({ start: false }).catch(() => undefined);
       const read = await link?.request('account/rateLimits/read', {}).catch(() => undefined);
-      if (read?.rateLimits) this.#limits = { at: Date.now(), snapshot: read.rateLimits };
+      if (read?.rateLimits) this.#limits = { at: Date.now(), snapshot: read.rateLimits, others: read.rateLimitsByLimitId ?? {}, resets: read.rateLimitResetCredits ?? undefined };
     }
     const thread = this.#threads.get(sessionId);
-    return { status: statusLineOf({ session, usage: thread?.usage, limits: this.#limits?.snapshot, branch: thread?.branch }) };
+    const { snapshot, others, resets } = this.#limits ?? {};
+    return { status: statusLineOf({ session, usage: thread?.usage, limits: snapshot, others, resets, branch: thread?.branch }) };
   }
 
   // The skills on in a folder, asked for once in a while, since a new one soon wants to show up.

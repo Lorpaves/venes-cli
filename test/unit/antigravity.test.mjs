@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  AGENT, Antigravity, historyOf, isTrusted, levelFor, libraryItem, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, stepsIn, toolOf, transcriptOf, typedText,
+  AGENT, Antigravity, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, stepsIn, toolOf, transcriptOf, typedText,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -99,9 +99,41 @@ test('a stored conversation is listed by its summary, and a message is typed wit
   assert.deepEqual(MODE_IDS, ['default', 'acceptEdits', 'auto', 'plan']);
 });
 
+// What `agy -p /usage --output-format json` printed (1.5.8), less its words about each limit.
+const USAGE = {
+  conversation_id: '', status: 'SUCCESS', num_turns: 0,
+  command: { name: 'usage', data: { description: 'Within each group, models share a weekly limit and a 5-hour limit.', groups: [
+    { name: 'Gemini Models', description: 'Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash', buckets: [
+      { id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 0.9481035470962524, reset_time: '2026-11-21T03:32:17Z' },
+      { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 0.9864928722381592, reset_time: '2026-11-15T15:32:22Z' },
+    ] },
+    { name: 'Claude and GPT models', buckets: [
+      { id: '3p-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 1, reset_time: '2026-11-22T12:01:08Z' },
+      { id: '3p-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 1, reset_time: '2026-11-15T17:01:08Z' },
+    ] },
+    { name: 'Gemini 4 Argon', buckets: [{ id: 'gemini-argon-wtu-weekly', name: 'Gemini 4 Argon Weekly Limit', window: 'weekly', remaining_fraction: 0.9699529409408569, reset_time: '2026-11-21T03:27:31Z' }] },
+  ] } },
+};
+const LIMITS = [
+  { name: 'Gemini Models', window: 'sevenDay', percent: 5.2, resetsAt: 1795231937 }, { name: 'Gemini Models', window: 'fiveHour', percent: 1.4, resetsAt: 1794756742 },
+  { name: 'Claude and GPT models', window: 'sevenDay', percent: 0, resetsAt: 1795348868 }, { name: 'Claude and GPT models', window: 'fiveHour', percent: 0, resetsAt: 1794762068 },
+  { name: 'Gemini 4 Argon', window: 'sevenDay', percent: 3, resetsAt: 1795231651 },
+];
+
+test('the account\'s limits are every one Antigravity lists, by its group, with how much is used', () => {
+  assert.deepEqual(limitsFrom(USAGE), LIMITS);
+  const odd = { command: { data: { groups: [
+    { name: 'Some', buckets: [{ window: 'monthly', remaining_fraction: 1.4, reset_time: 'soon' }, { window: '5h', remaining_fraction: -0.2 }, { window: '5h', remaining_fraction: '0.5' }, null] },
+    { name: '', buckets: [{ window: '5h', remaining_fraction: 0.5 }] }, { name: 'None' }, 'a group',
+  ] } } };
+  // A window that's neither of the two is told with none, and what isn't a share of anything isn't told.
+  assert.deepEqual(limitsFrom(odd), [{ name: 'Some', percent: 0 }, { name: 'Some', window: 'fiveHour', percent: 100 }]);
+  assert.deepEqual([limitsFrom({}), limitsFrom(undefined), limitsFrom({ command: { data: { groups: 'none' } } })], [[], [], []]);
+});
+
 // An Antigravity with a folder of its own for what it stores, a terminal that shows what a test says
 // it shows, and nothing real started.
-function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {} } = {}) {
+function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE } = {}) {
   const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
   t.after(() => fs.rmSync(data, { recursive: true, force: true }));
   fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ trustedWorkspaces: trusted }));
@@ -123,8 +155,9 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {} } = {}) 
     store, terminal, data, installed: () => true, rows: async () => rows,
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
+    usage,
     env: { PATH: '/bin', VENES_HOME: '/h', SECRET: 'x' },
-    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, modelsWait: 200, ...timing },
+    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, modelsWait: 200, usageWait: 200, ...timing },
   });
   t.after(() => agent.stop());
   const file = transcriptOf(data, ID);
@@ -457,6 +490,34 @@ test('its mode is changed with Shift+Tab, and what it runs on with its own comma
   const can = await agent.capabilities({ sessionId: ID });
   assert.deepEqual([can.commands, can.skills, can.models.map(model => model.value)], [[], [], ['gemini-4-hydrogen', 'gemini-3.8-flash']]);
   assert.deepEqual((await agent.status({ sessionId: ID })).status.project, 'w');
+});
+
+test('a status has what the session runs on and the account\'s limits, asked for once in a while', async t => {
+  let asked = 0;
+  let answer = async () => USAGE;
+  const { agent, hook } = setup(t, { timing: { watch: 100_000 }, usage: () => { asked += 1; return answer(); } });
+  assert.deepEqual(await agent.status({ sessionId: ID }), { status: null });
+  assert.equal(asked, 0, 'nothing asked for a session that isn\'t followed');
+  await hook('SessionStart');
+  const { status } = await agent.status({ sessionId: ID });
+  assert.deepEqual([status.model, status.effort, status.project, status.limits], ['gemini-4-hydrogen', 'xhigh', 'w', LIMITS]);
+  await agent.status({ sessionId: ID });
+  assert.equal(asked, 1, 'and kept for the next');
+
+  // Slow to say, a status goes without them, and they come with a later one.
+  let release;
+  const slow = setup(t, { timing: { watch: 100_000, usageWait: 20 }, usage: () => new Promise(resolve => { release = () => resolve(USAGE); }) });
+  await slow.hook('SessionStart');
+  assert.equal('limits' in (await slow.agent.status({ sessionId: ID })).status, false);
+  release();
+  await new Promise(resolve => { setTimeout(resolve, 10); });
+  assert.deepEqual((await slow.agent.status({ sessionId: ID })).status.limits, LIMITS);
+
+  // And when it won't say at all, there are none.
+  answer = async () => { throw new Error('agy: not signed in'); };
+  const none = setup(t, { timing: { watch: 100_000 }, usage: () => answer() });
+  await none.hook('SessionStart');
+  assert.equal('limits' in (await none.agent.status({ sessionId: ID })).status, false);
 });
 
 test('a model picked for a session with nothing said in it keeps how hard its bar says it thinks', async t => {

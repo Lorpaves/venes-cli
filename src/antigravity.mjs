@@ -77,6 +77,14 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_SUFFIX = new RegExp(`-(${EFFORTS.join('|')})$`);
 // How long a session just opened waits for the models Antigravity lists, to name the one its bar shows.
 const MODELS_WAIT_MS = 5000;
+// How long what Antigravity says of the account's limits is kept, how soon it's asked again after it
+// wouldn't say, how long it's given to, and how long a status waits for it: it takes several seconds.
+const USAGE_LIFETIME_MS = 3 * 60_000;
+const USAGE_RETRY_MS = 30_000;
+const USAGE_LIMIT_MS = 40_000;
+const USAGE_WAIT_MS = 2500;
+// The windows Antigravity's limits are for, by the names a status has for them.
+const USAGE_WINDOWS = { '5h': 'fiveHour', weekly: 'sevenDay' };
 
 const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
@@ -133,6 +141,23 @@ export function levelFor(levels, wanted) {
   const order = level => EFFORTS.indexOf(level);
   const below = levels.filter(level => order(level) < at).sort((a, b) => order(b) - order(a));
   return below[0] ?? [...levels].sort((a, b) => order(a) - order(b))[0];
+}
+
+// The account's limits, from what Antigravity's own `/usage` reports: the models share limits in
+// groups, each with a limit for the week and one for five hours, or one of them. Each is told by its
+// group's name, with how much of it is used, where Antigravity says how much is left, and when it starts again.
+export function limitsFrom(report) {
+  const groups = report?.command?.data?.groups;
+  if (!Array.isArray(groups)) return [];
+  return groups.flatMap(group => (Array.isArray(group?.buckets) ? group.buckets : []).flatMap(bucket => {
+    const left = bucket?.remaining_fraction;
+    if (typeof group.name !== 'string' || !group.name || typeof left !== 'number' || !Number.isFinite(left)) return [];
+    const at = Date.parse(bucket.reset_time);
+    return [{
+      name: group.name, ...(USAGE_WINDOWS[bucket.window] && { window: USAGE_WINDOWS[bucket.window] }),
+      percent: Math.round((1 - Math.min(Math.max(left, 0), 1)) * 1000) / 10, ...(Number.isNaN(at) ? {} : { resetsAt: Math.floor(at / 1000) }),
+    }];
+  }));
 }
 
 // The steps of a conversation, as its transcript has them: a line each. One half written is left for later.
@@ -295,6 +320,14 @@ async function mintWith(folder) {
   }
 }
 
+// What `/usage` reports, asked of the command line itself with nothing said to a model: it prints it
+// and quits, in the home folder, which it needn't trust for this.
+async function usageReport() {
+  const asked = exec(COMMAND, ['-p', '/usage', '--output-format', 'json'], { cwd: os.homedir(), timeout: USAGE_LIMIT_MS, maxBuffer: 1024 * 1024 });
+  asked.child.stdin?.end();
+  return JSON.parse((await asked).stdout);
+}
+
 async function listedModels() {
   const { stdout } = await exec(COMMAND, ['models'], { timeout: MODELS_LIMIT_MS, maxBuffer: 1024 * 1024 });
   return modelsFrom(stdout);
@@ -328,6 +361,8 @@ export class Antigravity {
   #mint;
   #rows;
   #models;
+  #readUsage;
+  #usage = { at: 0, limits: [], reading: undefined };
   #data;
   #env;
   #timing;
@@ -349,6 +384,7 @@ export class Antigravity {
     data = dataFolder(),
     rows = () => storedRows(data),
     models = listedModels,
+    usage = usageReport,
     env = process.env,
     timing = {},
   }) {
@@ -358,12 +394,13 @@ export class Antigravity {
     this.#mint = mint;
     this.#rows = rows;
     this.#models = models;
+    this.#readUsage = usage;
     this.#data = data;
     this.#env = env;
     this.#timing = {
       watch: WATCH_MS, rest: REST_CHECK_MS, startLimit: START_LIMIT_MS, startCheck: START_CHECK_MS, keySettle: KEY_SETTLE_MS,
       pasteSettle: PASTE_SETTLE_MS, stepWait: STEP_WAIT_MS, stepCheck: STEP_CHECK_MS, keyLimit: KEY_LIMIT_MS, keyCheck: KEY_CHECK_MS,
-      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, ...timing,
+      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, ...timing,
     };
     this.#timer = setInterval(() => this.#lookAtAll(), this.#timing.watch);
     this.#timer.unref();
@@ -1032,11 +1069,32 @@ export class Antigravity {
     return { commands: [], models: this.#installed() ? await this.#knownModels() : [], skills: [] };
   }
 
-  // What a status sheet shows of a session the helper follows, and nothing for one it doesn't.
+  // The account's limits, as Antigravity last reported them. It's asked again once that's a few minutes
+  // old, and a status waits only a moment for it: the first can come with a later one.
+  async #limits() {
+    const kept = this.#usage;
+    if (Date.now() - kept.at > USAGE_LIFETIME_MS) {
+      kept.reading ??= Promise.resolve().then(() => this.#readUsage()).then(
+        report => { Object.assign(kept, { at: Date.now(), limits: limitsFrom(report) }); },
+        () => { kept.at = Date.now() - USAGE_LIFETIME_MS + USAGE_RETRY_MS; },
+      ).finally(() => { kept.reading = undefined; });
+      await Promise.race([kept.reading, pause(this.#timing.usageWait)]);
+    }
+    return kept.limits;
+  }
+
+  // What a status sheet shows of a session the helper follows, and nothing for one it doesn't: what it
+  // runs on, where, and every limit the account has, as Antigravity's own `/usage` lists them.
   async status({ sessionId }) {
     const known = this.#store.find(sessionId);
     if (!known) return { status: null };
-    return { status: { model: known.model, effort: known.effort, project: known.cwd ? path.basename(known.cwd) : undefined, updatedAt: Math.floor(Date.now() / 1000) } };
+    const limits = this.#installed() ? await this.#limits() : [];
+    return {
+      status: {
+        model: known.model, effort: known.effort, project: known.cwd ? path.basename(known.cwd) : undefined,
+        ...(limits.length && { limits }), updatedAt: Math.floor(Date.now() / 1000),
+      },
+    };
   }
 
   // What was said before the turn going on: the steps before the message that started it.

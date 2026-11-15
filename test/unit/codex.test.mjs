@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  approvalRequest, Codex, commandOf, COMMANDS, historyOf, inputOf, picturesOf, pictureSourcesOf, readPicture, withoutPictures, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
+  accessOf, approvalRequest, Codex, collaborationOf, commandOf, COMMANDS, historyOf, IMPLEMENT_PROMPT, planRequest, inputOf, picturesOf, pictureSourcesOf, readPicture, withoutPictures, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
   creditsOf, limitResetsOf, mergedLimits, modeOf, otherLimitsOf, permissionsRequest, questionRequest, shellWords, skillsNamed, skillsOf, statusLineOf, terminalCommand, textOf, thinkingOf, trustedFolders,
   turnsOf, unwrapped,
 } from '../../src/codex.mjs';
@@ -25,7 +25,7 @@ const stored = (id, fields = {}) => ({
 function fakeCodex() {
   const server = {
     threads: new Map(), loaded: new Set(), turns: new Map(), calls: [], answers: [], links: [], fails: {},
-    isRunning: true, starts: 0, next: 1,
+    isRunning: true, starts: 0, next: 1, quiet: false, joined: {}, settings: { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } },
     skills: [
       { name: 'rex', description: 'Use the rex CLI to manage Rex sessions.\nMore about it.', path: '/skills/rex/SKILL.md', scope: 'user', enabled: true },
       { name: 'pdf:pdf', description: 'Long words about PDFs', interface: { shortDescription: 'Read, create, render, and verify PDF files' }, path: '/skills/pdf/SKILL.md', scope: 'user', enabled: true },
@@ -54,7 +54,7 @@ function fakeCodex() {
       if (thread.elsewhere) throw rpcError(`thread ${threadId} already has an active writer`);
       if (thread.isNew) throw rpcError(`no rollout found for thread id ${threadId}`);
       server.loaded.add(threadId);
-      return { thread, model: thread.model, reasoningEffort: thread.reasoningEffort };
+      return { thread, model: thread.model, reasoningEffort: thread.reasoningEffort, ...server.joined };
     },
     'thread/start': ({ cwd }) => {
       const thread = stored(`new-${server.next++}`, { cwd, source: 'vscode', preview: '', isNew: true });
@@ -72,6 +72,11 @@ function fakeCodex() {
       return { data, nextCursor: from + limit < newestFirst.length ? String(from + limit) : null };
     },
     'turn/start': () => ({ turn: { id: 'turn', status: 'inProgress', items: [] } }),
+    // Codex says what a thread's settings are once they've changed.
+    'thread/settings/update': ({ threadId, collaborationMode }) => {
+      if (!server.quiet) server.say('thread/settings/updated', { threadId, threadSettings: { ...server.settings, model: collaborationMode.settings.model, collaborationMode } });
+      return {};
+    },
     'turn/steer': () => ({}),
     'thread/shellCommand': () => ({}),
     'thread/compact/start': () => { if (server.fails.compact) throw rpcError('nothing to compact'); return {}; },
@@ -657,6 +662,10 @@ test('the turns some events are of are the one the first is in, and every one af
   // Events from before any turn the helper heard start, which leaves every turn it did hear to them.
   assert.deepEqual([...turnsOf([{ seq: 5 }], starts)], ['a', 'b', 'c']);
   assert.deepEqual([...turnsOf([{ seq: 5 }])], []);
+  // What's said once a turn is over is of no turn: that turn is history's, and the ones after aren't.
+  const over = [{ id: 'a', after: 10, ended: 18 }, { id: 'b', after: 20, ended: 28 }, { id: 'c', after: 40 }];
+  assert.deepEqual([[...turnsOf([{ seq: 29 }, { seq: 30 }], over)], [...turnsOf([{ seq: 28 }], over)], [...turnsOf([{ seq: 19 }], over)]], [['c'], ['b', 'c'], ['b', 'c']]);
+  assert.deepEqual([...turnsOf([{ seq: 29 }], over.slice(0, 2))], []);
 });
 
 test('a turn that just ended and the one after it are both told as events, and neither twice', async () => {
@@ -907,7 +916,184 @@ test('a thread\'s settings are one of the three choices Codex gives, or the read
     { approvalPolicy: 'never', sandbox: { type: 'externalSandbox' } },
   ]) assert.equal(modeOf(own), 'custom', JSON.stringify(own));
   for (const untold of [undefined, {}, { approvalPolicy: 'never' }, { sandbox: { type: 'readOnly' } }, { approvalPolicy: 'never', sandbox: {} }]) assert.equal(modeOf(untold), undefined);
-  assert.deepEqual(MODE_IDS, ['readOnly', 'workspace', 'fullAccess']);
+  assert.deepEqual(MODE_IDS, ['readOnly', 'workspace', 'fullAccess', 'plan']);
+  // A thread that's planning is in plan mode, whichever of the three it has meanwhile.
+  const planning = { approvalPolicy: 'never', sandbox: { type: 'dangerFullAccess' }, collaborationMode: { mode: 'plan', settings: { model: 'gpt-6' } } };
+  assert.deepEqual([modeOf(planning), accessOf(planning)], ['plan', 'fullAccess']);
+  assert.deepEqual([modeOf({ ...planning, collaborationMode: { mode: 'default', settings: { model: 'gpt-6' } } }), modeOf({ collaborationMode: planning.collaborationMode })], ['fullAccess', 'plan']);
+  // Codex is told to plan, or to stop, with the model and effort it's on, and its own instructions for the mode.
+  assert.deepEqual(collaborationOf({ plans: true, model: 'gpt-6', effort: 'high' }), { mode: 'plan', settings: { model: 'gpt-6', reasoning_effort: 'high', developer_instructions: null } });
+  assert.deepEqual(collaborationOf({ plans: false, model: 'gpt-6' }), { mode: 'default', settings: { model: 'gpt-6', reasoning_effort: null, developer_instructions: null } });
+});
+
+test('a session starts and stops planning at once, and goes back to what it could do before', async () => {
+  const { codex, store, server, last, events } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { model: 'gpt-6', approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' }, collaborationMode: { mode: 'default', settings: { model: 'gpt-6' } } } });
+  server.settings = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } };
+  assert.equal(store.get(sessionId).permissionMode, 'fullAccess');
+
+  assert.deepEqual(await codex.setMode({ sessionId, mode: 'plan' }), {});
+  assert.deepEqual(server.called('thread/settings/update'), [{ threadId: sessionId, collaborationMode: { mode: 'plan', settings: { model: 'gpt-6', reasoning_effort: 'high', developer_instructions: null } } }]);
+  assert.deepEqual([store.get(sessionId).permissionMode, last('session.mode').permissionMode, last('session.mode').permissionModes], ['plan', 'plan', MODE_IDS]);
+  // Said once, whether Codex's word of it or the helper's own came first.
+  assert.equal(events.filter(event => event.kind === 'session.mode' && event.permissionMode === 'plan').length, 1);
+  // Picked again, there's nothing to tell Codex.
+  await codex.setMode({ sessionId, mode: 'plan' });
+  assert.equal(server.called('thread/settings/update').length, 1);
+  // A turn in it is started as any is: Codex has the mode already.
+  await codex.send({ sessionId, text: 'plan it' });
+  assert.deepEqual([server.called('turn/start')[0].collaborationMode, server.called('turn/start')[0].approvalPolicy], [undefined, undefined]);
+
+  // Stopped from Codex's terminal, it's back in the one of the three it had.
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { ...server.settings, model: 'gpt-6', collaborationMode: { mode: 'default', settings: { model: 'gpt-6' } } } });
+  assert.deepEqual([store.get(sessionId).permissionMode, last('session.mode').permissionMode], ['fullAccess', 'fullAccess']);
+
+  // Another of the three picked while it plans stops the planning at once, and is taken with the next turn.
+  await codex.setMode({ sessionId, mode: 'plan' });
+  await codex.configure({ sessionId, model: 'gpt-5', effort: 'low' });
+  await codex.setMode({ sessionId, mode: 'readOnly' });
+  assert.deepEqual(server.called('thread/settings/update').at(-1).collaborationMode, { mode: 'default', settings: { model: 'gpt-5', reasoning_effort: 'low', developer_instructions: null } });
+  assert.deepEqual([store.get(sessionId).permissionMode, events.at(-1).kind === 'session.mode' && events.at(-1).permissionMode], ['readOnly', 'readOnly']);
+  await codex.send({ sessionId, text: 'look' });
+  assert.deepEqual([server.called('turn/start').at(-1).approvalPolicy, server.called('turn/start').at(-1).sandboxPolicy], ['on-request', { type: 'readOnly' }]);
+
+  // A Codex that won't take it leaves the session as it was.
+  server.fails['thread/settings/update'] = 'unknown method';
+  await assert.rejects(codex.setMode({ sessionId, mode: 'plan' }), error => error.code === 'mode_unavailable');
+  assert.equal(store.get(sessionId).permissionMode, 'readOnly');
+});
+
+test('a thread that\'s planning when it\'s loaded is in plan mode', async () => {
+  const thread = stored('planning');
+  const { codex, store, server } = setup({ threads: [thread] });
+  server.joined = { approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }, collaborationMode: { mode: 'plan', settings: { model: 'gpt-6' } } };
+  await codex.send({ sessionId: 'planning', text: 'go on' });
+  assert.equal(store.get('planning').permissionMode, 'plan');
+  // Out of it, it has what it had under the planning.
+  server.say('thread/settings/updated', { threadId: 'planning', threadSettings: { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' }, collaborationMode: { mode: 'default', settings: { model: 'gpt-6' } } } });
+  assert.equal(store.get('planning').permissionMode, 'workspace');
+});
+
+// A session that's planning, with a turn that has written a plan.
+async function planned(options) {
+  const made = await running(options);
+  const { server, sessionId, say, codex } = made;
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { model: 'gpt-6', approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' }, collaborationMode: { mode: 'default', settings: { model: 'gpt-6' } } } });
+  await codex.setMode({ sessionId, mode: 'plan' });
+  say('item/started', { item: { type: 'plan', id: 'turn-1-plan', text: '' } });
+  say('item/plan/delta', { itemId: 'turn-1-plan', delta: '1. Look' });
+  say('item/completed', { item: { type: 'plan', id: 'turn-1-plan', text: '1. Look\n2. Fix\n' } });
+  return made;
+}
+
+test('a plan Codex writes is told as a proposed plan, and asked about once its turn is over', async () => {
+  const { store, server, sessionId, say, last, events } = await planned();
+  // Whole, as a call a client shows as a proposed plan.
+  assert.deepEqual([last('tool.start').name, last('tool.start').toolUseId, last('tool.start').input], ['ExitPlanMode', 'turn-1-plan', { plan: '1. Look\n2. Fix\n' }]);
+  assert.deepEqual([last('tool.end').name, last('tool.end').toolUseId, last('tool.end').isError], ['ExitPlanMode', 'turn-1-plan', false]);
+  assert.equal(events.filter(event => event.kind === 'tool.start').length, 1);
+  assert.equal(store.requests().length, 0);
+
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  const [request] = store.requests();
+  assert.deepEqual([request.kind, request.toolName, request.toolUseId, request.input, request.options], ['plan', 'ExitPlanMode', 'turn-1-plan', { plan: '1. Look\n2. Fix\n' }, [{ id: 'implement', label: 'Yes, implement this plan' }]]);
+  // After the turn's end, which is when Codex's terminal asks.
+  assert.deepEqual([store.get(sessionId).status, events.at(-1).kind, events.findLastIndex(event => event.kind === 'turn.end') < events.length - 1], ['waiting', 'request.opened', true]);
+
+  // Yes ends the planning, and says so to Codex in its terminal's words.
+  await assert.rejects(async () => store.respond(request.id, { decision: 'allow', option: 'other' }), error => error.code === 'bad_option');
+  store.respond(request.id, { decision: 'allow', option: 'implement' });
+  await settle();
+  await settle();
+  assert.deepEqual(server.called('thread/settings/update').at(-1).collaborationMode.mode, 'default');
+  assert.deepEqual(server.called('turn/start').at(-1).input, [{ type: 'text', text: IMPLEMENT_PROMPT, text_elements: [] }]);
+  assert.deepEqual([store.get(sessionId).permissionMode, store.get(sessionId).status, last('request.closed').decision, last('request.closed').by], ['workspace', 'running', 'allow', 'client']);
+  assert.ok(server.calls.findLastIndex(call => call.method === 'thread/settings/update') < server.calls.findLastIndex(call => call.method === 'turn/start'));
+  // What a page of its history has of it is the same call.
+  const [, call] = historyOf({ id: 'turn-1', status: 'completed', items: [{ type: 'userMessage', id: 'u1', content: [{ type: 'text', text: 'plan it' }] }, { type: 'plan', id: 'turn-1-plan', text: '1. Look' }] });
+  assert.deepEqual([call.role, call.toolUseId, call.name, call.input, call.result, call.isError], ['tool', 'turn-1-plan', 'ExitPlanMode', { plan: '1. Look' }, { plan: '1. Look' }, false]);
+});
+
+test('a client that joins while a plan waits is told the plan\'s turn, then as history', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const { server, sessionId, say, codex } = await planned();
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  server.turns.set(sessionId, [{
+    id: 'turn-1', status: 'completed',
+    items: [{ type: 'userMessage', id: 'u1', clientId: 'c1', content: [{ type: 'text', text: 'do it' }] }, { type: 'plan', id: 'turn-1-plan', text: '1. Look\n2. Fix\n' }],
+  }]);
+  // At once, the turn is still what's going on, and the request is the last of it.
+  const atOnce = await codex.join({ sessionId });
+  assert.deepEqual([atOnce.items.length, atOnce.turn.some(event => event.kind === 'tool.start'), atOnce.turn.at(-1).kind, atOnce.requests.length], [0, true, 'request.opened', 1]);
+  // Later the turn is history, all of it, and what's going on is that the plan waits.
+  t.mock.timers.tick(3000);
+  const later = await codex.join({ sessionId });
+  assert.deepEqual([later.items.map(item => item.role), later.items[1].name, later.items[1].input, later.turn.map(event => event.kind), later.requests.length],
+    [['user', 'tool', 'turn_end'], 'ExitPlanMode', { plan: '1. Look\n2. Fix\n' }, ['session.status', 'request.opened'], 1]);
+});
+
+test('a plan sent back with what to change goes on being planned', async () => {
+  const { store, server, sessionId, say } = await planned();
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  const [request] = store.requests();
+  store.respond(request.id, { decision: 'deny', message: '  Skip the second step.  ' });
+  await settle();
+  await settle();
+  assert.deepEqual(server.called('turn/start').at(-1).input, [{ type: 'text', text: 'Skip the second step.', text_elements: [] }]);
+  assert.deepEqual([store.get(sessionId).permissionMode, store.get(sessionId).status, server.called('thread/settings/update').length], ['plan', 'running', 1]);
+
+  // The next plan is asked about in its turn, and a bare no leaves the session at rest, still planning.
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-2' } });
+  server.say('item/completed', { threadId: sessionId, turnId: 'turn-2', item: { type: 'plan', id: 'turn-2-plan', text: '1. Look\n' } });
+  server.say('turn/completed', { threadId: sessionId, turn: { id: 'turn-2', status: 'completed' } });
+  const [second] = store.requests();
+  assert.deepEqual(second.input, { plan: '1. Look\n' });
+  const turns = server.called('turn/start').length;
+  store.respond(second.id, { decision: 'deny' });
+  await settle();
+  assert.deepEqual([store.get(sessionId).status, store.get(sessionId).permissionMode, server.called('turn/start').length, store.requests().length], ['idle', 'plan', turns, 0]);
+});
+
+test('a plan answered from Codex\'s terminal, or left behind, stops being asked about', async () => {
+  const { store, server, sessionId, say, last } = await planned();
+  say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  // A turn started from somewhere else.
+  server.say('turn/started', { threadId: sessionId, turn: { id: 'turn-2' } });
+  await settle();
+  assert.deepEqual([store.requests().length, last('request.closed').by, store.get(sessionId).status], [0, 'terminal', 'running']);
+  // The planning stopped from somewhere else, with no turn.
+  server.say('item/completed', { threadId: sessionId, turnId: 'turn-2', item: { type: 'plan', id: 'turn-2-plan', text: 'Again' } });
+  server.say('turn/completed', { threadId: sessionId, turn: { id: 'turn-2', status: 'completed' } });
+  assert.equal(store.requests().length, 1);
+  server.say('thread/settings/updated', { threadId: sessionId, threadSettings: { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' }, collaborationMode: { mode: 'default', settings: { model: 'gpt-6' } } } });
+  await settle();
+  assert.deepEqual([store.requests().length, last('request.closed').by, store.get(sessionId).status, store.get(sessionId).permissionMode], [0, 'terminal', 'idle', 'workspace']);
+});
+
+test('a plan isn\'t asked about after a turn that was stopped, or one that wasn\'t planning', async () => {
+  const stopped = await planned();
+  stopped.say('turn/completed', { turn: { id: 'turn-1', status: 'interrupted' } });
+  assert.equal(stopped.store.requests().length, 0);
+  // The plan a turn before wrote isn't the next turn's.
+  stopped.server.say('turn/started', { threadId: stopped.sessionId, turn: { id: 'turn-2' } });
+  stopped.server.say('turn/completed', { threadId: stopped.sessionId, turn: { id: 'turn-2', status: 'completed' } });
+  assert.equal(stopped.store.requests().length, 0);
+
+  const left = await planned();
+  await left.codex.setMode({ sessionId: left.sessionId, mode: 'workspace' });
+  left.say('turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  assert.equal(left.store.requests().length, 0);
+});
+
+test('a plan\'s answers are to carry it out, or to go on planning', () => {
+  const { fields, decide } = planRequest({ type: 'plan', id: 'p1', text: 'Do it' });
+  assert.deepEqual(fields, { kind: 'plan', agent: 'codex', toolName: 'ExitPlanMode', toolUseId: 'p1', input: { plan: 'Do it' }, options: [{ id: 'implement', label: 'Yes, implement this plan' }] });
+  assert.deepEqual([decide({ decision: 'allow' }), decide({ decision: 'allow', option: 'implement' })], [{ implements: true }, { implements: true }]);
+  assert.deepEqual([decide({ decision: 'deny' }), decide({ decision: 'deny', message: ' Less. ' }), decide({ decision: 'deny', message: '  ' })], [{ implements: false }, { implements: false, followUp: 'Less.' }, { implements: false }]);
+  assert.throws(() => decide({ decision: 'allow', option: 'session' }), error => error.code === 'bad_option');
+  assert.throws(() => decide({ decision: 'maybe' }), error => error.code === 'bad_decision');
+  assert.equal(planRequest({ type: 'plan', id: 'p2' }).fields.input.plan, '');
 });
 
 test('a session may do what the reader chose from its next turn, and says so at once', async () => {

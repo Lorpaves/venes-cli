@@ -2101,8 +2101,9 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   const { sessionId, model } = await startCodex(r);
   const listed = (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
   assert.deepEqual([listed.agent, listed.status, listed.model, listed.pane], ['codex', 'idle', model, null]);
-  // What it may do without asking is one of Codex's three choices, here the one this run starts its threads with.
-  assert.deepEqual([listed.permissionMode, listed.permissionModes], ['readOnly', ['readOnly', 'workspace', 'fullAccess']]);
+  // What it may do without asking is one of Codex's three choices, here the one this run starts its threads with,
+  // and it can be switched to planning.
+  assert.deepEqual([listed.permissionMode, listed.permissionModes], ['readOnly', ['readOnly', 'workspace', 'fullAccess', 'plan']]);
   await assert.rejects(r.client.request('setMode', { sessionId, mode: 'bypassPermissions' }), { code: 'bad_mode' });
   // Chosen again, it goes to Codex with the turn below, which Codex has to take as it's put.
   await r.client.request('setMode', { sessionId, mode: 'readOnly' });
@@ -2243,6 +2244,56 @@ T('codex_asks_before_it_runs_a_command_and_can_be_stopped', { codex: { sandbox: 
   await r.kind('turn.interrupted', 30000);
   assert.equal((await r.client.request('sessions')).sessions.find(session => session.id === sessionId).status, 'idle');
   await assert.rejects(r.client.request('interrupt', { sessionId }), { code: 'not_running' });
+  await r.client.request('delete', { sessionId });
+});
+
+// Codex's Plan mode: a turn in it writes a plan and changes nothing, the plan is asked about once the turn is
+// over, as Codex's terminal asks, and a yes ends the planning and tells Codex to carry it out.
+T('codex_plans_and_a_yes_to_its_plan_carries_it_out', { codex: { sandbox: 'read-only', approvalPolicy: 'on-request' } }, async r => {
+  const { sessionId } = await startCodex(r);
+  const view = async () => (await r.client.request('sessions')).sessions.find(session => session.id === sessionId);
+
+  // It starts at once, with no turn, and Codex says so itself.
+  r.mark();
+  await r.client.request('setMode', { sessionId, mode: 'plan' });
+  assert.equal((await r.kind('session.mode', 10000)).permissionMode, 'plan');
+  await delay(500);
+  assert.deepEqual([(await view()).permissionMode, r.events.filter(event => event.kind === 'session.mode').length], ['plan', 1]);
+
+  r.mark();
+  const ask = 'Without asking me anything and without running anything, give your proposed plan, two short steps, for adding a file named e2e-codex-plan.txt.';
+  await r.client.request('send', { sessionId, text: ask, clientId: 'c1' });
+  const call = await r.wait(event => event.kind === 'tool.start' && event.name === 'ExitPlanMode', 150000, 'the plan');
+  assert.ok(call.input.plan.trim().length > 0, 'the plan, whole');
+  await r.turnEnd(60000);
+  const request = await r.request('plan', 15000);
+  assert.deepEqual([request.agent, request.toolName, request.toolUseId, request.input.plan, request.options],
+    ['codex', 'ExitPlanMode', call.toolUseId, call.input.plan, [{ id: 'implement', label: 'Yes, implement this plan' }]]);
+  assert.ok(r.events.findIndex(event => event.kind === 'turn.end') < r.events.findIndex(event => event.kind === 'request.opened'), 'asked once the turn is over');
+  assert.deepEqual([(await view()).status, (await view()).permissionMode], ['waiting', 'plan']);
+  assert.ok(!exists('e2e-codex-plan.txt'), 'planning changed nothing');
+
+  // What Codex stored of the turn has the plan as the same call, and the request is there for a client that joins.
+  await delay(2200);
+  const joined = await r.client.request('join', { sessionId });
+  const kept = joined.items.find(item => item.role === 'tool');
+  assert.deepEqual([kept?.name, kept?.toolUseId, kept?.input, kept?.isError], ['ExitPlanMode', call.toolUseId, { plan: call.input.plan }, false]);
+  assert.deepEqual(joined.requests.map(open => [open.id, open.kind]), [[request.id, 'plan']]);
+
+  // Yes ends the planning first, then tells Codex in its terminal's words. The turn is stopped as it starts.
+  r.mark();
+  await assert.rejects(r.client.request('respond', { requestId: request.id, decision: 'allow', option: 'session' }), { code: 'bad_option' });
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', option: 'implement' });
+  assert.deepEqual([(await r.closed(request.id)).decision, (await r.closed(request.id)).by], ['allow', 'client']);
+  const told = await r.wait(event => event.kind === 'message.user' && event.text === 'Implement the plan.', 30000, 'the word to carry it out');
+  assert.equal(told.clientId, undefined);
+  assert.deepEqual([(await r.kind('session.mode', 10000)).permissionMode, (await view()).permissionMode], ['readOnly', 'readOnly']);
+  assert.ok(r.events.findIndex(event => event.kind === 'session.mode') < r.events.indexOf(told), 'out of planning before it\'s told');
+  await r.client.request('interrupt', { sessionId }).catch(() => {});
+  await r.wait(event => event.kind === 'turn.interrupted' || event.kind === 'turn.end', 90000, 'the turn\'s end');
+  await delay(300);
+  // Out of planning, a turn's end has no plan to ask about.
+  assert.deepEqual([(await view()).status, r.events.filter(event => event.kind === 'request.opened' && event.request.kind === 'plan').length], ['idle', 0]);
   await r.client.request('delete', { sessionId });
 });
 

@@ -282,7 +282,10 @@ export function historyOf(turn, keep = undefined) {
       const text = thinkingOf(item);
       if (text) items.push({ role: 'thinking', at, text });
     } else if (item.type === 'contextCompaction') items.push({ role: 'compact', at, trigger: 'auto' });
-    else if (isTool(item)) {
+    else if (isPlan(item)) {
+      const plan = { plan: item.text ?? '' };
+      items.push({ role: 'tool', at, toolUseId: item.id, name: PLAN_TOOL, input: plan, result: plan, isError: false });
+    } else if (isTool(item)) {
       const images = picturesOf(item, keep);
       const shown = withoutPictures(item);
       items.push({ role: 'tool', at, toolUseId: item.id, name: item.type, input: shown, result: shown, isError: isFailed(item), ...(images.length && { images }) });
@@ -368,7 +371,11 @@ const MODES = {
   workspace: { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } },
   fullAccess: { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } },
 };
-export const MODE_IDS = Object.keys(MODES);
+// Planning, which Codex's terminal goes in and out of with Shift+Tab: Codex looks, asks, and writes a
+// plan, and changes nothing. Codex keeps it apart from the three, one of which a thread that's
+// planning still has, and goes back to showing once it stops.
+export const PLAN_MODE = 'plan';
+export const MODE_IDS = [...Object.keys(MODES), PLAN_MODE];
 // Settings that are none of the three, as from a config of the reader's own.
 export const CUSTOM_MODE = 'custom';
 
@@ -378,14 +385,31 @@ export const CUSTOM_MODE = 'custom';
 // resuming a remote task", 0.169.0).
 export const terminalCommand = (socketPath, threadId) => ['codex', '--remote', `unix://${socketPath}`, 'resume', threadId];
 
-// Which of the choices a thread's settings are, or nothing when they aren't told.
-export function modeOf({ approvalPolicy, sandbox } = {}) {
+// Which of the three choices a thread's settings are, or nothing when they aren't told.
+export function accessOf({ approvalPolicy, sandbox } = {}) {
   if (typeof approvalPolicy !== 'string' && typeof approvalPolicy !== 'object') return undefined;
   if (!sandbox?.type) return undefined;
-  const found = MODE_IDS.find(id => MODES[id].approvalPolicy === approvalPolicy && MODES[id].sandboxPolicy.type === sandbox.type);
+  const found = Object.keys(MODES).find(id => MODES[id].approvalPolicy === approvalPolicy && MODES[id].sandboxPolicy.type === sandbox.type);
   // Read Only and Default leave the network off, which a thread with it on isn't.
   return found && !(found !== 'fullAccess' && sandbox.networkAccess === true) ? found : CUSTOM_MODE;
 }
+
+// The mode a thread is in: planning, whichever of the three it has meanwhile, or else that one.
+export const modeOf = (settings = {}) => (settings.collaborationMode?.mode === PLAN_MODE ? PLAN_MODE : accessOf(settings));
+
+// How Codex is told to plan, or to stop: with its own instructions for the mode, and the model and
+// effort the thread runs on, which it takes from this when it's given.
+export const collaborationOf = ({ plans, model, effort }) => ({
+  mode: plans ? PLAN_MODE : 'default', settings: { model, reasoning_effort: effort ?? null, developer_instructions: null },
+});
+
+// A plan Codex wrote is told as Claude Code's own call that ends its planning, which a client
+// already shows as a proposed plan.
+export const PLAN_TOOL = 'ExitPlanMode';
+export const isPlan = item => item.type === 'plan';
+// What Codex's terminal sends for "Yes, implement this plan", in its words.
+export const IMPLEMENT_PROMPT = 'Implement the plan.';
+const IMPLEMENT_OPTION = 'implement';
 
 export function modelsOf(models = []) {
   return models.filter(model => !model.hidden).map(model => ({
@@ -474,6 +498,28 @@ export function questionRequest(params) {
   };
 }
 
+// A plan Codex wrote, once the turn that wrote it is over, asked about as its terminal asks, "Implement
+// this plan?": its first way on, "Switch to Default and start coding", and its way back, to go on
+// planning, with what to change said or not. The terminal's other way on, a new thread with the plan,
+// isn't offered.
+export function planRequest(item) {
+  return {
+    fields: {
+      kind: 'plan', agent: AGENT, toolName: PLAN_TOOL, toolUseId: item.id, input: { plan: item.text ?? '' },
+      options: [{ id: IMPLEMENT_OPTION, label: 'Yes, implement this plan' }],
+    },
+    decide({ decision, option, message }) {
+      if (decision === 'deny') {
+        const said = typeof message === 'string' ? message.trim() : '';
+        return { implements: false, ...(said && { followUp: said }) };
+      }
+      if (decision !== 'allow') throw badDecision(decision);
+      if (option != null && option !== IMPLEMENT_OPTION) throw badOption();
+      return { implements: true };
+    },
+  };
+}
+
 const REQUESTS = {
   'item/commandExecution/requestApproval': (params, item) => approvalRequest('commandExecution', params, item),
   'item/fileChange/requestApproval': (params, item) => approvalRequest('fileChange', params, item),
@@ -483,12 +529,14 @@ const REQUESTS = {
 
 // The turns some of a session's events are of, so that history doesn't tell them again: the one the
 // first of them is in, and every one after. A turn that just ended still counts as going on to a
-// client that joins, and the next can have started by then.
+// client that joins, and the next can have started by then. What's said once a turn is over, as a
+// plan it ended on is asked about then, is of no turn, and all of that turn is history's to tell.
 export function turnsOf(events, turnStarts = []) {
   if (!events.length) return new Set();
   const [{ seq: first }] = events;
   const within = turnStarts.findLastIndex(turn => turn.after < first);
-  return new Set(turnStarts.slice(Math.max(within, 0)).map(turn => turn.id));
+  const isOver = within >= 0 && turnStarts[within].ended < first;
+  return new Set(turnStarts.slice(isOver ? within + 1 : Math.max(within, 0)).map(turn => turn.id));
 }
 
 const statusOf = status => (status?.type === 'active' ? (status.activeFlags?.length ? 'waiting' : 'running') : 'idle');
@@ -570,6 +618,8 @@ function blankThread() {
     shells: [], lines: new Map(),
     // The latest turns, each with the last event before it began, to tell which turns some events are of.
     turnStarts: [],
+    // The plan the turn has written, and the request that asks about the last one.
+    proposed: undefined, planRequest: undefined,
   };
 }
 
@@ -590,6 +640,8 @@ export class Codex {
   #models;
   // What a reader chose a session to run on, until the turn that takes it.
   #chosen = new Map();
+  // Which of the three choices each thread has, which is its mode again once it stops planning.
+  #access = new Map();
   // The account's limits as Codex last gave them, and when.
   #limits;
   #retry;
@@ -756,18 +808,30 @@ export class Codex {
     thread.isSubscribed = true;
     // Joined part way through a turn, what's heard of that turn from here on isn't all of it.
     thread.isPartial = joined.thread?.status?.type === 'active' && !thread.turnId;
-    this.#noteSettings(threadId, { model: joined.model, effort: joined.reasoningEffort, approvalPolicy: joined.approvalPolicy, sandbox: joined.sandbox });
+    this.#noteSettings(threadId, {
+      model: joined.model, effort: joined.reasoningEffort, approvalPolicy: joined.approvalPolicy, sandbox: joined.sandbox, collaborationMode: joined.collaborationMode,
+    });
   }
 
-  #noteSettings(threadId, { model, effort, approvalPolicy, sandbox }) {
+  #noteSettings(threadId, { model, effort, approvalPolicy, sandbox, collaborationMode }) {
     const session = this.#store.find(threadId);
     if (!session) return;
 
     if (model) this.#store.report(threadId, 'session.model', { model });
     if (effort && effort !== session.effort) this.#store.report(threadId, 'session.effort', { effort }, { effort });
-    // A mode picked from here and not taken yet, which Codex does with the next turn, is the one to show.
-    const mode = this.#chosen.get(threadId)?.approvalPolicy ? undefined : modeOf({ approvalPolicy, sandbox });
+    // One of the three picked from here and not taken yet, which Codex does with the next turn, is the one to show.
+    if (!this.#chosen.get(threadId)?.approvalPolicy) this.#noteAccess(threadId, { approvalPolicy, sandbox });
+    // Whether it's planning is as Codex last said, where it says.
+    const plans = collaborationMode ? collaborationMode.mode === PLAN_MODE : session.permissionMode === PLAN_MODE;
+    const mode = plans ? PLAN_MODE : this.#access.get(threadId);
     if (mode && mode !== session.permissionMode) this.#noteMode(threadId, mode);
+  }
+
+  // A thread's mode as its settings give it. Which of the three it has is kept, for when it stops planning.
+  #noteAccess(threadId, settings) {
+    const access = accessOf(settings);
+    if (access) this.#access.set(threadId, access);
+    return modeOf(settings);
   }
 
   // A session the helper started or loaded has no terminal, where every Claude Code session is in one:
@@ -791,6 +855,14 @@ export class Codex {
 
   #noteMode(threadId, permissionMode) {
     this.#store.report(threadId, 'session.mode', { permissionMode, permissionModes: MODE_IDS }, { permissionMode });
+    // A thread that has stopped planning has no plan left to ask about.
+    if (permissionMode !== PLAN_MODE) this.#closePlanRequest(threadId);
+  }
+
+  // The plan's been answered somewhere else, as by a message from Codex's own terminal.
+  #closePlanRequest(threadId) {
+    const requestId = this.#threads.get(threadId)?.planRequest;
+    if (requestId) this.#store.settle(requestId, { decision: 'unknown', by: 'terminal' });
   }
 
   #onNotification({ method, params = {} }) {
@@ -844,7 +916,7 @@ export class Codex {
       case 'thread/settings/updated':
         this.#noteSettings(threadId, {
           model: params.threadSettings?.model, effort: params.threadSettings?.effort, approvalPolicy: params.threadSettings?.approvalPolicy,
-          sandbox: params.threadSettings?.sandboxPolicy,
+          sandbox: params.threadSettings?.sandboxPolicy, collaborationMode: params.threadSettings?.collaborationMode,
         });
         break;
       case 'thread/tokenUsage/updated':
@@ -853,6 +925,9 @@ export class Codex {
       case 'turn/started':
         this.#showAtMac(threadId, thread);
         thread.turnId = params.turn?.id;
+        thread.proposed = undefined;
+        // Whatever started it, the plan before it is no longer what's waited on.
+        this.#closePlanRequest(threadId);
         thread.turnStarts.push({ id: thread.turnId, after: this.#store.seq });
         if (thread.turnStarts.length > TURNS_TRACKED) thread.turnStarts.shift();
         thread.isPartial = false;
@@ -975,6 +1050,7 @@ export class Codex {
     if (item.type === 'userMessage') this.#onUserMessage(threadId, thread, item);
     else if (item.type === 'agentMessage') this.#messageOf(thread, item.id, item.phase);
     else if (item.type === 'contextCompaction') this.#store.report(threadId, 'compact.start', { trigger: thread.compactsByHand ? 'manual' : 'auto' });
+    // A plan isn't one: it's told once it's whole, which is the one Codex stands by.
     else if (isTool(item)) this.#startTool(threadId, thread, item);
   }
 
@@ -1005,6 +1081,12 @@ export class Codex {
     } else if (item.type === 'contextCompaction') {
       report('compact.end', { trigger: thread.compactsByHand ? 'manual' : 'auto' });
       thread.compactsByHand = false;
+    } else if (isPlan(item)) {
+      const plan = { plan: item.text ?? '' };
+      report('tool.start', { toolUseId: item.id, name: PLAN_TOOL, input: plan });
+      report('tool.end', { toolUseId: item.id, name: PLAN_TOOL, response: plan, durationMs: 0, isError: false });
+      // The last a turn writes is the one it ends on.
+      thread.proposed = item;
     } else if (isTool(item)) {
       // Some kinds are only said once they're done.
       if (!thread.tools.has(item.id)) this.#startTool(threadId, thread, item);
@@ -1034,13 +1116,65 @@ export class Codex {
     for (const [toolUseId, { name }] of thread.tools) report('tool.end', { toolUseId, name, isError: true, interrupted: true });
     thread.tools.clear();
     report('session.status', { status: 'idle' });
+    if (!isShellTurn) {
+      if (isInterrupted) report('turn.interrupted', {});
+      else if (turn.status === 'failed') report('turn.error', { error: turn.error?.message, details: turn.error?.additionalDetails ?? turn.error?.codexErrorInfo ?? undefined });
+      else report('turn.end', { lastMessage: session?.lastMessage, backgroundTasks: 0, tasks: [] });
+    }
+    // Whatever's said from here on is said once the turn is over.
+    const started = thread.turnStarts.findLast(other => other.id === turn.id);
+    if (started) started.ended = this.#store.seq;
     if (isShellTurn) return;
-    if (isInterrupted) report('turn.interrupted', {});
-    else if (turn.status === 'failed') report('turn.error', { error: turn.error?.message, details: turn.error?.additionalDetails ?? turn.error?.codexErrorInfo ?? undefined });
-    else report('turn.end', { lastMessage: session?.lastMessage, backgroundTasks: 0, tasks: [] });
-    const { followUp } = thread;
+    const { followUp, proposed } = thread;
     thread.followUp = undefined;
+    thread.proposed = undefined;
     if (followUp && session) this.deliver(session, { text: followUp }).catch(error => console.error(`codex follow-up: ${error.message}`));
+    else if (proposed && session && turn.status === 'completed' && session.permissionMode === PLAN_MODE) this.#askAboutPlan(threadId, thread, proposed);
+  }
+
+  // A turn that ended on a plan leaves it to the reader, as Codex's terminal does: to carry it out,
+  // which ends the planning, or to go on planning, with what to change. Either is the next message
+  // Codex hears. Left alone, the plan waits until something else starts a turn or ends the planning.
+  #askAboutPlan(threadId, thread, item) {
+    const { fields, decide } = planRequest(item);
+    const { request, decision } = this.#store.ask(threadId, fields, decide);
+    thread.planRequest = request.id;
+    decision.then(async answer => {
+      if (thread.planRequest === request.id) thread.planRequest = undefined;
+      const session = this.#store.find(threadId);
+      if (!session || session.status === 'ended') return;
+      const text = answer?.implements ? IMPLEMENT_PROMPT : answer?.followUp;
+      let isSent = false;
+      try {
+        if (answer?.implements) await this.#leavePlanning(threadId);
+        if (text) {
+          await this.deliver(session, { text });
+          isSent = true;
+        }
+      } catch (error) {
+        console.error(`codex plan: ${error.message}`);
+      }
+      // With nothing sent and no turn going, the session is at rest, where the turn left it.
+      if (!isSent && !thread.turnId) this.#store.report(threadId, 'session.status', { status: 'idle' });
+    });
+  }
+
+  // Codex is told at once to plan, or to stop, which holds for every client of the thread from then.
+  async #setPlanning(sessionId, plans) {
+    const { link, session } = await this.#live(sessionId);
+    const { model = session.model, effort = session.effort } = this.#chosen.get(sessionId) ?? {};
+    try {
+      await link.request('thread/settings/update', { threadId: sessionId, collaborationMode: collaborationOf({ plans, model, effort }) });
+    } catch (error) {
+      throw new HelperError('mode_unavailable', `Codex didn't take the mode: ${error.message}`);
+    }
+  }
+
+  // Out of planning, the thread's mode is which of the three it has, where that's known.
+  async #leavePlanning(threadId) {
+    await this.#setPlanning(threadId, false);
+    const access = this.#access.get(threadId);
+    if (access && this.#store.find(threadId)?.permissionMode !== access) this.#noteMode(threadId, access);
   }
 
   // Codex asks every client of a thread, and takes the first answer. The others are told it's settled.
@@ -1070,6 +1204,7 @@ export class Codex {
     this.#threads.delete(threadId);
     this.#pictures.delete(threadId);
     this.#chosen.delete(threadId);
+    this.#access.delete(threadId);
     this.#owned.set(threadId, false);
     if (this.#store.find(threadId)) this.#store.forget(threadId);
   }
@@ -1084,7 +1219,7 @@ export class Codex {
     // A test run starts its threads sandboxed, whatever this Mac's own Codex settings are.
     const started = await link.request('thread/start', { cwd: folder, ...JSON.parse(process.env.VENES_CODEX_START_ARGS ?? '{}') });
     // Whoever starts a thread hears all of it from then on.
-    const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined, permissionMode: modeOf(started) });
+    const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined, permissionMode: this.#noteAccess(started.thread.id, started) });
     thread.isSubscribed = true;
     thread.wantsTerminal = true;
     return { sessionId: started.thread.id };
@@ -1095,7 +1230,7 @@ export class Codex {
   async #load(link, threadId) {
     try {
       const joined = await link.request('thread/resume', { threadId, excludeTurns: true });
-      const thread = this.#adopt(joined.thread, { model: joined.model, effort: joined.reasoningEffort ?? undefined, permissionMode: modeOf(joined) });
+      const thread = this.#adopt(joined.thread, { model: joined.model, effort: joined.reasoningEffort ?? undefined, permissionMode: this.#noteAccess(threadId, joined) });
       thread.isSubscribed = true;
       thread.wantsTerminal = true;
       this.#store.report(threadId, 'session.started', { source: 'resume', model: joined.model, cwd: joined.thread.cwd });
@@ -1329,12 +1464,20 @@ export class Codex {
   }
 
   // What the session may do without asking, from its next turn, which is when Codex takes it, and for
-  // the turns after.
+  // the turns after. Planning starts and stops at once, for whoever is at the thread, as it does in
+  // Codex's terminal.
   async setMode({ sessionId, mode }) {
-    if (!Object.hasOwn(MODES, mode)) throw new HelperError('bad_mode', `Not a mode a Codex session can be switched to: ${mode}`);
-    if (!this.#store.find(sessionId)) throw new HelperError('unknown_session', `No session ${sessionId}`);
-    this.#chosen.set(sessionId, { ...this.#chosen.get(sessionId), ...MODES[mode] });
-    this.#noteMode(sessionId, mode);
+    if (!MODE_IDS.includes(mode)) throw new HelperError('bad_mode', `Not a mode a Codex session can be switched to: ${mode}`);
+    const session = this.#store.find(sessionId);
+    if (!session) throw new HelperError('unknown_session', `No session ${sessionId}`);
+    const plans = mode === PLAN_MODE;
+    if (!plans) {
+      this.#chosen.set(sessionId, { ...this.#chosen.get(sessionId), ...MODES[mode] });
+      this.#access.set(sessionId, mode);
+    }
+    if (plans !== (session.permissionMode === PLAN_MODE)) await this.#setPlanning(sessionId, plans);
+    // Codex can have said so already.
+    if (this.#store.find(sessionId)?.permissionMode !== mode) this.#noteMode(sessionId, mode);
     return {};
   }
 

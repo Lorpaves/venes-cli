@@ -245,7 +245,9 @@ A session says the mode it asks permission in as `permissionMode`, and the modes
 
 A Claude Code session's are Claude Code's own: `default`, which its terminal calls Manual, `acceptEdits` and `plan` always, then `bypassPermissions` and `auto` for a session that has them. Claude Code tells no one which a session has, so those two are listed once the session has been seen in them. Its mode is changed where a person changes it, in its terminal: the helper presses Shift+Tab, which goes round the session's modes, and reads the status bar after each press, until the bar says the mode asked for. A mode the bar comes all the way round without is one the session doesn't have, as `bypassPermissions` is for a session that wasn't started with it: the command fails with `mode_unavailable`, and the session is back in the mode it was in. The modes passed on the way are ones the session has, and are listed from then on. A hook says a session's mode only when the session does something, so the status bar is also read when a session is joined, which catches a mode switched to in the terminal since. A session outside Rex and tmux is refused with `no_pane`, and one with a dialog open with `dialog_open`. `dontAsk` is only ever started in, so it can be a session's `permissionMode` and never one of its `permissionModes`.
 
-A Codex session's are the three choices Codex's terminal gives under `/permissions`: `readOnly` (Read Only), `workspace` (Default) and `fullAccess` (Full Access), each an approval policy and a sandbox. `setMode` takes hold from the session's next turn and holds for the turns after, and `session.mode` says so at once. Settings that are none of the three, as from a config of the reader's own, are `custom`, which can't be switched to.
+A Codex session's are the three choices Codex's terminal gives under `/permissions`, and planning: `readOnly` (Read Only), `workspace` (Default) and `fullAccess` (Full Access), each an approval policy and a sandbox, then `plan`. For one of the three, `setMode` takes hold from the session's next turn and holds for the turns after, and `session.mode` says so at once. Settings that are none of the three, as from a config of the reader's own, are `custom`, which can't be switched to.
+
+`plan` is Codex's Plan mode, which its terminal goes in and out of with Shift+Tab: Codex looks, asks, and writes a plan, and changes nothing. Codex keeps it apart from the three, so a session that's planning still has one of them, and is back in it once the planning stops. `setMode` starts and stops the planning at once (Codex's `thread/settings/update`), for every client of the thread, Codex's own terminal among them, and one of the three picked while it plans stops it too. A Codex that won't take it fails the command with `mode_unavailable`.
 
 ### Rex
 
@@ -301,7 +303,7 @@ A Codex session is told with the events and commands a Claude Code session has, 
 | `join`, `history` | The same replies, read from Codex's stored turns a few at a time, so a page is whole turns. `before` is a number the helper gives out, good until it restarts. |
 | `capabilities` | `models` from Codex's own list, each with its `effortLevels`. `commands` are the few of its terminal's that the helper carries out, and `skills` those a `$` names: see below. |
 | `configure` | `model` and `effort` take hold from the session's next turn, and `session.model` and `session.effort` say so at once |
-| `setMode` | One of Codex's three choices of what it may do without asking, from the session's next turn. See [Permission modes](#permission-modes). |
+| `setMode` | One of Codex's three choices of what it may do without asking, from the session's next turn, or `plan`, at once. See [Permission modes](#permission-modes). |
 | `respond` | Answers Codex. See below. |
 | `delete` | Stops a turn going on, and has Codex delete the thread for good |
 
@@ -321,7 +323,9 @@ Everything else Codex does is a `tool.start` and a `tool.end`, named after the k
 
 A line that starts with `!` is your own command, as in Codex's terminal: `send` has Codex run it in your shell, outside its sandbox and with no approval asked. It comes back as it does for Claude Code, and so does one typed with `!` at Codex's terminal: `message.user` with `shell: true` and the line as typed, with the send's `clientId` when it came from one, then `message.output` with what it printed in `stdout`, `stderr` empty, and `replies`. Codex doesn't answer a line run by itself, so `replies` is false, the session is never `running` for it, and no `turn.end` follows. One run during a turn is taken in by that turn's reply, and has `replies: true`. In history it's a `user` item with `shell: true` and an `output` item, as for Claude Code.
 
-`plan.updated` is Codex's plan as it stands, whole each time: `explanation`, and `plan`, a list of `{step, status}` with a status of `pending`, `inProgress` or `completed`.
+`plan.updated` is Codex's plan as it stands, whole each time: `explanation`, and `plan`, a list of `{step, status}` with a status of `pending`, `inProgress` or `completed`. That's its checklist of what it's doing, which isn't Plan mode.
+
+A plan written in Plan mode is a `tool.start` and a `tool.end` named `ExitPlanMode`, Claude Code's call for the same thing, with the plan in `input.plan`: once, when the plan is whole. History has it as a `tool` item of that name.
 
 **Requests.** Codex asks every client of a thread, and takes the first answer. Answered somewhere else, a request closes with `by: "terminal"`.
 
@@ -330,8 +334,11 @@ A line that starts with `!` is your own command, as in Codex's terminal: `send` 
 | `permission`, `toolName` `commandExecution` or `fileChange` | Codex asking to run a command or change files. `input` is what Codex sent: `command`, `cwd`, `reason`, `commandActions`, and for a file change its `changes`. `options` are its other ways of saying yes, in the words of its own terminal, such as "Yes, and don't ask again for commands that start with …". | `allow` is its plain yes, and `allow` with `option` one of those. `deny` stops the turn, as "No, and tell Codex what to do differently" does in its terminal, and a `message` with it is sent as the next message once the turn has stopped. |
 | `permission`, `toolName` `permissions` | Codex asking for more room than its sandbox gives. `input.permissions` is what it wants. | `allow` grants it for the turn, and with `option: "session"` for the session. `deny` grants nothing, and the turn goes on. |
 | `question` | Codex's questions, in the shape Claude Code's have: `input.questions`, each with `question`, `header`, `options` and `multiSelect: false`, and Codex's own `id`, `isOther` and `isSecret` | `allow` with `answers` by each question's text, as for Claude Code |
+| `plan`, `toolName` `ExitPlanMode` | The helper, once a turn in Plan mode has ended on a plan, as Codex's terminal asks then: "Implement this plan?". `input.plan` is the plan, and `options` has the terminal's first way on, `implement`, "Yes, implement this plan". | `allow`, with that `option` or none, stops the planning and sends Codex its terminal's words for it, "Implement the plan.". `deny` goes on planning, and a `message` with it, what to change, is sent as the next message. |
 
-**What it doesn't do yet.** Slash commands, switching how much Codex may do without asking, approving a plan made in plan mode, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
+A plan's request stays open while the session rests, which is `waiting` meanwhile. A client that joins then has the request in `requests`, and the turn that wrote the plan in `items`, whole, once it's history. It closes with `by: "terminal"` when a turn starts some other way, as from Codex's terminal, or when the planning is stopped. The terminal's other way on, a new thread with the plan, isn't offered.
+
+**What it doesn't do yet.** A plan carried out in a new thread, a plan's text as it's written, a subagent's own tool calls (its `collabAgentToolCall` is one tool call), and a list of commands left running.
 
 ### Antigravity sessions
 
@@ -598,7 +605,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `background_session` | `delete` doesn't handle background sessions. Use `claude rm`, which has its own rules about their worktrees. |
 | `bad_model`, `bad_effort` | `configure` was given something that isn't a model on offer or an effort level |
 | `bad_mode` | `setMode` was given something other than a mode a session of its kind can be switched to |
-| `mode_unavailable` | The session went all the way round its modes without coming to the one asked for, and is in the mode it was in |
+| `mode_unavailable` | The session went all the way round its modes without coming to the one asked for, and is in the mode it was in. For a Codex session, Codex wouldn't start or stop planning |
 | `command_failed` | A Codex session wouldn't carry out a slash command: the message says why, as that a turn is going on |
 | `mode_failed` | The terminal didn't show the session's mode as expected, so it was left as it is. Claude Code's status bar may have changed. |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |

@@ -25,7 +25,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import { MODE_IDS, asksTrust, hasTrustPicked, isIdle, isUp, readBar, readPrompt, showsDialog } from './agyscreen.mjs';
-import { moveToTrash } from './files.mjs';
+import { mediaTypeOf, moveToTrash } from './files.mjs';
+import { imageSize } from './imagesize.mjs';
 import { checkedFolder } from './folders.mjs';
 import { HelperError } from './errors.mjs';
 import { choicesOf, chooseRow } from './prompt.mjs';
@@ -76,6 +77,12 @@ const MODELS_LIFETIME_MS = 10 * 60_000;
 const MODELS_LIMIT_MS = 20_000;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_SUFFIX = new RegExp(`-(${EFFORTS.join('|')})$`);
+// As big a picture as is read for a client, as for a Codex session's.
+const PICTURE_BYTES = 20 * 1024 * 1024;
+// A picture's id, as a page is given it: whether it's one a call gave back or one a message came with,
+// the step it's of, and which of that step's it is.
+const PICTURE_ID = /^(step|said)-(\d+):(\d+)$/;
+
 // How long Antigravity is given to go once it's told to, before a conversation of its is deleted. It
 // had gone within a second when measured.
 const QUIT_LIMIT_MS = 5000;
@@ -202,6 +209,65 @@ const isReplyStep = step => step.type === 'PLANNER_RESPONSE';
 const resultIndex = (reply, at) => reply.step_index + 1 + at;
 export const toolUseId = index => `step-${index}`;
 
+// The pictures a message was sent with: the files its first lines name, where each is a picture that's
+// there, as a client's attachments are typed at its head. With them, the message's own words.
+export function saidPictures(text) {
+  const lines = text.split('\n');
+  const paths = [];
+  for (const line of lines) {
+    const named = line.trim();
+    if (!path.isAbsolute(named) || !mediaTypeOf(named).startsWith('image/')) break;
+    try {
+      if (!fs.statSync(named).isFile()) break;
+    } catch {
+      break;
+    }
+    paths.push(named);
+  }
+  return { paths, rest: lines.slice(paths.length).join('\n') };
+}
+
+// Where a step's pictures are. A call that looked at a picture, or made one, has it as a file among the
+// conversation's own, which its step names (`media`): only one inside `root`, where Antigravity keeps
+// what's its own, is one. A message's are the files its first lines name.
+export function pictureSourcesOf(step, root) {
+  if (isUserStep(step)) return saidPictures(requestOf(step.content)).paths.map(file => ({ path: file, isSaid: true }));
+  return (Array.isArray(step?.media) ? step.media : []).flatMap(media => {
+    if (typeof media?.uri !== 'string' || !media.uri.startsWith('file://') || !`${media.mime_type}`.startsWith('image/')) return [];
+    let file;
+    try {
+      file = path.resolve(decodeURIComponent(new URL(media.uri).pathname));
+    } catch {
+      return [];
+    }
+    return root && file.startsWith(path.resolve(root) + path.sep) ? [{ path: file, mediaType: media.mime_type }] : [];
+  });
+}
+
+// A picture read for a client, or nothing when it has gone or is too big. One a message names has to be
+// a picture by what's in it too, and not only by its name.
+export function readPicture(source, { limit = PICTURE_BYTES } = {}) {
+  try {
+    if (fs.statSync(source.path).size > limit) return undefined;
+    const data = fs.readFileSync(source.path).toString('base64');
+    if (source.isSaid && !imageSize(data).width) return undefined;
+    return { mediaType: source.mediaType ?? mediaTypeOf(source.path), data };
+  } catch {
+    return undefined; // gone, or out of reach
+  }
+}
+
+// What a page is told of a step's pictures, as of a Claude Code session's: each by the id to ask for it
+// by, its kind, how big it is, and its size in pixels where that can be told.
+export function picturesOf(step, root) {
+  const kind = isUserStep(step) ? 'said' : 'step';
+  return pictureSourcesOf(step, root).flatMap((source, index) => {
+    const picture = readPicture(source);
+    if (!picture) return [];
+    return [{ id: `${kind}-${step.step_index}:${index}`, mediaType: picture.mediaType, bytes: Math.floor(picture.data.length * 3 / 4), ...imageSize(picture.data) }];
+  });
+}
+
 // A call as a client is told of it, in a Claude Code call's shape where it has one: its name, and what it was given.
 export function toolOf({ name, args = {} } = {}) {
   const file = args.Path ?? args.AbsolutePath ?? args.TargetFile;
@@ -240,8 +306,9 @@ const responseOf = (name, text) => (name === 'Bash' ? { stdout: text, stderr: ''
 
 // What was said in a conversation, as history has it, from its steps in order: what someone said,
 // what was thought and said back, each call with how it ended, and a turn's end where the next
-// message, or the end of it all, shows one.
-export function historyOf(steps) {
+// message, or the end of it all, shows one. With `root`, where Antigravity keeps its own, a message
+// and a call have their pictures too, and a message's words are then without the lines that named them.
+export function historyOf(steps, { root = undefined } = {}) {
   const items = [];
   const calls = new Map();
   let hasReply = false;
@@ -249,7 +316,9 @@ export function historyOf(steps) {
     if (isUserStep(step)) {
       if (hasReply) items.push({ role: 'turn_end' });
       hasReply = false;
-      items.push({ role: 'user', text: requestOf(step.content) });
+      const text = requestOf(step.content);
+      const images = root ? picturesOf(step, root) : [];
+      items.push({ role: 'user', text: images.length ? saidPictures(text).rest : text, ...(images.length && { images }) });
     } else if (isReplyStep(step)) {
       hasReply = true;
       if (step.thinking?.trim()) items.push({ role: 'thinking', text: step.thinking.trim() });
@@ -262,7 +331,8 @@ export function historyOf(steps) {
     } else if (calls.has(step.step_index)) {
       const call = calls.get(step.step_index);
       const { text, isError } = resultOf(step, call.name);
-      Object.assign(call, { result: text || undefined, isError });
+      const images = root ? picturesOf(step, root) : [];
+      Object.assign(call, { result: text || undefined, isError, ...(images.length && { images }) });
     }
   }
   if (hasReply) items.push({ role: 'turn_end' });
@@ -500,12 +570,18 @@ export class Antigravity {
     return this.#store.find(id)?.transcriptPath ?? transcriptOf(this.#data, id);
   }
 
+  // Where Antigravity keeps what's its own, the command line's beside the desktop app's: a picture a
+  // step names is read only from in here.
+  get #root() {
+    return path.dirname(this.#data);
+  }
+
   // The transcript a hook names, where it's one of Antigravity's own: in the folder its apps keep
   // theirs in, the command line's beside the desktop app's. Any other file is none of the helper's to read.
   #namedTranscript(file) {
     if (typeof file !== 'string' || !file.endsWith('.jsonl')) return undefined;
     const resolved = path.resolve(file);
-    return resolved.startsWith(path.dirname(this.#data) + path.sep) ? resolved : undefined;
+    return resolved.startsWith(this.#root + path.sep) ? resolved : undefined;
   }
 
   // A conversation's steps. For a session being followed they're read as the transcript grows: what was
@@ -678,6 +754,9 @@ export class Antigravity {
       this.#store.report(id, 'message.user', {
         text, ...(mine?.clientId && { clientId: mine.clientId }), ...(mine?.attachments?.length ? { attachments: mine.attachments.map(shownUpload) } : {}),
       }, { lastPrompt: text });
+      // The pictures it came with, as a Claude Code session tells of a message's.
+      const images = last ? picturesOf(last, this.#root) : [];
+      if (images.length) this.#store.report(id, 'message.images', { images });
     }
     this.#store.report(id, 'session.status', { status: 'running' });
   }
@@ -733,6 +812,9 @@ export class Antigravity {
     this.#store.report(id, 'tool.end', {
       toolUseId: toolUseId(index), name: tool.name, response: responseOf(tool.name, text), durationMs: Date.now() - tool.at, isError: isError || Boolean(payload.error),
     });
+    // What it looked at, or made, as a Claude Code session tells of a tool's pictures.
+    const images = step ? picturesOf(step, this.#root) : [];
+    if (images.length) this.#store.report(id, 'tool.images', { toolUseId: toolUseId(index), images });
   }
 
   // A turn's end: what was waiting is off, what was still going won't say how it ended, and the
@@ -1171,9 +1253,9 @@ export class Antigravity {
   // What was said before the turn going on: the steps before the message that started it.
   #past(sessionId) {
     const steps = this.#steps(sessionId);
-    if (!this.#sessions.get(sessionId)?.turn) return historyOf(steps);
+    if (!this.#sessions.get(sessionId)?.turn) return historyOf(steps, { root: this.#root });
     const start = steps.findLastIndex(isUserStep);
-    return historyOf(start >= 0 ? steps.slice(0, start) : steps);
+    return historyOf(start >= 0 ? steps.slice(0, start) : steps, { root: this.#root });
   }
 
   async history({ sessionId, limit, before }) {
@@ -1240,7 +1322,13 @@ export class Antigravity {
     return {};
   }
 
-  image() {
-    throw new HelperError('unknown_image', 'This image is no longer there.');
+  // A picture of a conversation's, by the id a page was given for it: read where its step says it is.
+  image({ sessionId, imageId }) {
+    const [, , index, which] = PICTURE_ID.exec(String(imageId)) ?? [];
+    const step = index === undefined ? undefined : this.#steps(sessionId).find(found => found.step_index === Number(index));
+    const source = step && String(imageId).startsWith(isUserStep(step) ? 'said-' : 'step-') ? pictureSourcesOf(step, this.#root)[Number(which)] : undefined;
+    const picture = source && readPicture(source);
+    if (!picture) throw new HelperError('unknown_image', 'This image is no longer there.');
+    return picture;
   }
 }

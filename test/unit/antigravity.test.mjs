@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  AGENT, Antigravity, conversationFiles, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, requestOf, resultOf, runsIn, stepsIn, toolOf,
-  transcriptOf, typedText,
+  AGENT, Antigravity, conversationFiles, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, pictureSourcesOf, picturesOf, readPicture, requestOf,
+  resultOf, runsIn, saidPictures, stepsIn, toolOf, transcriptOf, typedText,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -642,6 +642,93 @@ test('what its bar says it runs on is told when it\'s changed at the Mac, betwee
   const told = events.length;
   await new Promise(resolve => { setTimeout(resolve, 80); });
   assert.deepEqual([store.get(ID).model, store.get(ID).effort, events.slice(told).filter(event => event.kind === 'session.model').length], ['gemini-4-hydrogen', 'high', 0]);
+});
+
+// A picture of one pixel, and something that's only named like one.
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+// How big a picture is said to be: from the length of what's sent of it, as for any session's.
+const PNG_BYTES = Math.floor(PNG.toString('base64').length * 3 / 4);
+
+// A conversation with a picture a call looked at, kept among its own files as Antigravity keeps one, and a message that came with one.
+function pictured(t) {
+  const made = setup(t, { timing: { watch: 100_000 } });
+  const media = path.join(path.dirname(made.file), 'media', 'step_2_media_0.png');
+  fs.mkdirSync(path.dirname(media), { recursive: true });
+  fs.writeFileSync(media, PNG);
+  const sent = path.join(made.data, 'sent.png');
+  fs.writeFileSync(sent, PNG);
+  const looked = { ...result(2, 'Showing binary file of type image/png'), media: [{ mime_type: 'image/png', uri: `file://${media}` }] };
+  const steps = [user(0, 'look at pic.png'), reply(1, { calls: [READ] }), looked, reply(3, { content: 'Blue' }), user(4, `${sent}\nand this one?`), reply(5, { content: 'Blue too' })];
+  // What Antigravity keeps is under the folder its own folder is in, which here is where the test's folder is.
+  return { ...made, media, sent, steps, root: path.dirname(made.data) };
+}
+
+test('a call\'s pictures are the ones its step names among Antigravity\'s own files, and a message\'s the files its first lines name', t => {
+  const { media, sent, steps, root, data } = pictured(t);
+  assert.deepEqual(pictureSourcesOf(steps[2], root), [{ path: media, mediaType: 'image/png' }]);
+  assert.deepEqual(picturesOf(steps[2], root), [{ id: 'step-2:0', mediaType: 'image/png', bytes: PNG_BYTES, width: 1, height: 1 }]);
+  assert.deepEqual(picturesOf(steps[4], root), [{ id: 'said-4:0', mediaType: 'image/png', bytes: PNG_BYTES, width: 1, height: 1 }]);
+  assert.deepEqual(saidPictures(`${sent}\nand this one?`), { paths: [sent], rest: 'and this one?' });
+  // Only the first lines, only files that are there, and only pictures by their names.
+  const text = path.join(data, 'notes.txt');
+  fs.writeFileSync(text, 'words');
+  assert.deepEqual(saidPictures(`see ${sent}`).paths, []);
+  assert.deepEqual(saidPictures(`first\n${sent}`).paths, []);
+  assert.deepEqual(saidPictures(`${text}\n${sent}`).paths, []);
+  assert.deepEqual(saidPictures(`${path.join(data, 'gone.png')}\nwhere?`).paths, []);
+  assert.deepEqual(saidPictures(`${sent}\n${sent}`), { paths: [sent, sent], rest: '' });
+  // A file named like a picture that isn't one isn't read as a message's.
+  const fake = path.join(data, 'fake.png');
+  fs.writeFileSync(fake, 'not a picture at all');
+  assert.equal(readPicture({ path: fake, isSaid: true }), undefined);
+  assert.deepEqual(picturesOf(user(6, `${fake}\nlook`), root), []);
+  // What a step names outside Antigravity's own folders, or that isn't a picture or a file, is nothing.
+  const named = uri => pictureSourcesOf({ step_index: 9, type: 'GENERIC', media: [{ mime_type: 'image/png', uri }] }, root);
+  assert.deepEqual([named('file:///etc/passwd'), named(`file://${root}/../elsewhere.png`), named('https://example.com/a.png'), named(undefined)], [[], [], [], []]);
+  assert.deepEqual(pictureSourcesOf({ step_index: 9, type: 'GENERIC', media: [{ mime_type: 'application/pdf', uri: `file://${media}` }] }, root), []);
+  assert.deepEqual([pictureSourcesOf({ step_index: 9, type: 'GENERIC' }, root), pictureSourcesOf(steps[2], undefined)], [[], []]);
+  // One too big, or gone since, isn't read.
+  assert.equal(readPicture({ path: media }, { limit: 10 }), undefined);
+  assert.equal(readPicture({ path: path.join(data, 'gone.png') }), undefined);
+});
+
+test('history has a message\'s and a call\'s pictures, and a picture is given by its id', async t => {
+  const { agent, write, steps, root, sent } = pictured(t);
+  write(steps);
+  const items = historyOf(steps, { root });
+  assert.deepEqual(items.map(item => [item.role, item.text ?? item.name, item.images?.map(image => image.id)]), [
+    ['user', 'look at pic.png', undefined], ['tool', 'Read', ['step-2:0']], ['assistant', 'Blue', undefined], ['turn_end', undefined, undefined],
+    // Its words are without the line that named its picture.
+    ['user', 'and this one?', ['said-4:0']], ['assistant', 'Blue too', undefined], ['turn_end', undefined, undefined],
+  ]);
+  // With nowhere said to read them from, there are none, and a message's words are as it was typed.
+  assert.deepEqual(historyOf(steps).map(item => [item.text, 'images' in item]).filter(([text]) => text?.includes('this one')), [[`${sent}\nand this one?`, false]]);
+  assert.deepEqual((await agent.history({ sessionId: ID })).items.filter(item => item.images).map(item => item.images[0].id), ['step-2:0', 'said-4:0']);
+  assert.deepEqual(agent.image({ sessionId: ID, imageId: 'step-2:0' }), { mediaType: 'image/png', data: PNG.toString('base64') });
+  assert.deepEqual(agent.image({ sessionId: ID, imageId: 'said-4:0' }), { mediaType: 'image/png', data: PNG.toString('base64') });
+  for (const imageId of ['step-2:1', 'step-3:0', 'said-2:0', 'step-4:0', 'step-99:0', 'nonsense', undefined, '../../x']) {
+    assert.throws(() => agent.image({ sessionId: ID, imageId }), { code: 'unknown_image' }, String(imageId));
+  }
+});
+
+test('a turn tells of the pictures a message came with and a call looked at', async t => {
+  const { agent, events, write, hook, steps, sent } = pictured(t);
+  write(steps.slice(0, 1));
+  await hook('SessionStart');
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: 'look at pic.png' });
+  write(steps.slice(0, 3));
+  await hook('PostToolUse', { stepIdx: 2, toolCall: { id: 'call_1', ...READ }, error: '' });
+  const told = events.filter(event => event.kind.startsWith('tool.'));
+  assert.deepEqual(told.map(event => [event.kind, event.toolUseId]), [['tool.start', 'step-2'], ['tool.end', 'step-2'], ['tool.images', 'step-2']]);
+  assert.deepEqual(told[2].images, [{ id: 'step-2:0', mediaType: 'image/png', bytes: PNG_BYTES, width: 1, height: 1 }]);
+  write(steps.slice(0, 4));
+  await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
+  // A message sent from a client with a picture: its words, what it was sent with, and the picture.
+  await agent.send({ sessionId: ID, text: 'and this one?', clientId: 'c1', attachments: [{ uploadId: 'u1', name: 'sent.png', mediaType: 'image/png', size: PNG.length, path: sent, kind: 'image' }] });
+  write(steps.slice(0, 5));
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 5, lastUserInput: `${sent}\nand this one?` });
+  const said = events.filter(event => event.kind.startsWith('message.')).slice(-2);
+  assert.deepEqual(said.map(event => [event.kind, event.text, event.images?.map(image => image.id)]), [['message.user', 'and this one?', undefined], ['message.images', undefined, ['said-4:0']]]);
 });
 
 test('with no Antigravity on the Mac there\'s nothing to list or start', async t => {

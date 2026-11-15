@@ -113,6 +113,15 @@ test('a block on another server is reached there', async t => {
   assert.equal(calls()[0].server, 'unix:///other.sock');
 });
 
+// Which is what keeps a helper under test off this Mac's own server: REX_SERVER alone doesn't.
+test('a helper given its one server names it on every command, and starts none', async t => {
+  const calls = fakeRex(t);
+  process.env.VENES_REX_SERVER = 'unix:///only.sock';
+  t.after(() => { delete process.env.VENES_REX_SERVER; });
+  await pressKey({ ...SESSION, rexServer: 'unix:///other.sock' }, 'Enter');
+  assert.deepEqual(calls()[0].args.slice(0, 3), ['-S', 'unix:///only.sock', '--autostart=false']);
+});
+
 const listing = sessions => JSON.stringify({ sessions });
 const ran = JSON.stringify({ window_id: 'window:1', block_ids: ['block:9'] });
 

@@ -7,7 +7,7 @@
 // VENES_E2E_CLAUDE_CONFIG_DIR runs the sessions with another Claude Code config, and so another
 // account, than this Mac's ~/.claude.
 //
-// Isolation: a dedicated tmux socket and VENES_HOME, and no user settings loaded.
+// Isolation: a dedicated tmux socket, a Rex server of its own and VENES_HOME, and no user settings loaded.
 // Nothing is installed: the plugin exists only for these sessions.
 
 import assert from 'node:assert/strict';
@@ -86,24 +86,58 @@ const pushServer = http.createServer((req, res) => {
 await new Promise(resolve => { pushServer.listen(0, '127.0.0.1', resolve); });
 const PUSH_URL = `http://127.0.0.1:${pushServer.address().port}/push`;
 
+// Rex, for the cases that run in it: a server of this run's own, with nothing of this Mac's in it.
+// The command can't be left to find it. Given a server in REX_SERVER that it can't reach, it quietly
+// uses this Mac's own instead, where a case would go on to rename and close the sessions of the
+// helper that's really running. So every command names this run's server with -S and may not start
+// one, which fails where the other falls back. A helper does the same when it's given the server
+// in VENES_REX_SERVER, as every helper here is, and every session, for the helper its hooks start.
 const REX_SOCKET = `${HOME}-rex.sock`;
 const REX_SERVER = `unix://${REX_SOCKET}`;
+const REX_PORT = 18744;
+const REX_COMMAND = (() => { try { return execFileSync('sh', ['-c', 'command -v rex'], { encoding: 'utf8' }).trim(); } catch { return undefined; } })();
+const hasRex = Boolean(REX_COMMAND);
+const ONLY_THIS_RUNS = ['-S', REX_SERVER, '--autostart=false'];
 const barerEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(CLAUDE|REX_)/.test(key)));
 const rexEnv = { ...barerEnv, REX_SERVER };
-const hasRex = (() => { try { execFileSync('sh', ['-c', 'command -v rex'], { stdio: 'ignore' }); return true; } catch { return false; } })();
-const rex = (...a) => execFileSync('rex', a, { encoding: 'utf8', env: rexEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+const rex = (...a) => execFileSync(REX_COMMAND, [...ONLY_THIS_RUNS, ...a], { encoding: 'utf8', env: rexEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+// Nothing started from here gets what Rex set for the shell this runs from, which names this Mac's
+// server and a session in it.
+for (const key of Object.keys(process.env)) if (key.startsWith('REX_')) delete process.env[key];
+process.env.VENES_REX_SERVER = REX_SERVER;
 const REX_KEYS = { Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right' };
 // The session a case is running in Rex, if it is.
 let inRex;
 let rexServerProcess;
+const isRunning = child => Boolean(child) && child.exitCode === null && child.signalCode === null;
+const isAlive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// A run stopped from outside can leave its server behind. It still holds the port, so the next
+// run's can't start. It's known by the socket it was told to listen on, which is no one else's.
+async function stopStrayRexServers() {
+  let pids = [];
+  try {
+    pids = execFileSync('lsof', ['-nP', `-iTCP:${REX_PORT}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' }).split('\n').filter(Boolean).map(Number);
+  } catch { /* no one listens there */ }
+  for (const pid of pids) {
+    const command = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8' });
+    if (!command.includes(`--listen ${REX_SERVER} `)) throw new Error(`port ${REX_PORT} is taken by something other than a server this suite left`);
+    process.kill(pid, 'SIGKILL');
+  }
+  for (let i = 0; i < 60 && pids.some(isAlive); i++) await delay(50);
+}
 async function startRexServer() {
-  if (rexServerProcess) return;
+  if (isRunning(rexServerProcess)) return;
+  await stopStrayRexServers();
   fs.rmSync(REX_SOCKET, { force: true });
-  rexServerProcess = spawn('rex', [
-    'server', 'run', '--listen', REX_SERVER, '--extra-listen', 'http://127.0.0.1:18744', '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
+  const server = spawn(REX_COMMAND, [
+    'server', 'run', '--listen', REX_SERVER, '--extra-listen', `http://127.0.0.1:${REX_PORT}`, '--allow-anonymous', '--state-dir', `${HOME}-rex`, '--restore=false',
   ], { env: rexEnv, stdio: 'ignore' });
-  for (let i = 0; i < 100 && !fs.existsSync(REX_SOCKET); i++) await delay(50);
+  rexServerProcess = server;
+  for (let i = 0; i < 100 && !fs.existsSync(REX_SOCKET) && isRunning(server); i++) await delay(50);
   await delay(200);
+  // Nothing runs in Rex unless the server that answers is the one just started.
+  const { pid, endpoint } = JSON.parse(rex('whoami', '--json'));
+  if (pid !== server.pid || endpoint !== REX_SERVER) throw new Error(`the Rex server that answers isn't this run's: ${endpoint}`);
 }
 process.on('exit', () => rexServerProcess?.kill());
 
@@ -185,6 +219,16 @@ async function stopHelper() {
   }
 }
 process.on('exit', () => { try { process.kill(helperPid(), 'SIGTERM'); } catch { /* not running */ } });
+// The helper of a run that was killed outright: the one the pid file names, if it still holds this
+// suite's socket. The number alone could be anyone's by now.
+function stopStrayHelper() {
+  const pid = helperPid();
+  if (!pid) return;
+  try {
+    const held = execFileSync('lsof', ['-a', '-p', String(pid), '-U', '-Fn'], { encoding: 'utf8' }).split('\n');
+    if (held.includes(`n${paths.clientSocket}`)) process.kill(pid, 'SIGKILL');
+  } catch { /* gone already */ }
+}
 async function connect() {
   for (let i = 0; i < 40; i++) {
     try { return await HelperClient.connect(paths.clientSocket); } catch { await delay(100); }
@@ -251,7 +295,7 @@ function launch({ mode = 'default', sources = 'project', model = MODEL, settings
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -262,7 +306,7 @@ function launchInRex({ mode = 'default', sources = 'project', model = MODEL, set
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
-    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, 'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, 'TERM=xterm-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
   const cmd = ['exec', 'env', '-i', 'REX_BLOCK="$REX_BLOCK"', 'REX_SESSION="$REX_SESSION"', 'REX_SERVER="$REX_SERVER"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -1676,7 +1720,7 @@ T('a_shell_left_running_elsewhere_isnt_a_turn', { mode: 'bypassPermissions' }, a
 });
 
 // A plain address here, since a tailnet is only another way of reaching the same listener.
-const REX_URL = 'ws://127.0.0.1:18744';
+const REX_URL = `ws://127.0.0.1:${REX_PORT}`;
 const awaitLine = (pipe, test, ms = 5000) => new Promise((resolve, reject) => {
   const found = pipe.stream.lines.find(test);
   if (found) { resolve(found); return; }
@@ -1685,7 +1729,7 @@ const awaitLine = (pipe, test, ms = 5000) => new Promise((resolve, reject) => {
 });
 // What the app runs, with this test's helper in place of ~/.venes/venes.
 const pipeCommand = () => [
-  '/bin/bash', '-c', `read -t 60 _ && env VENES_HOME='${HOME}' VENES_DOWNLOADS='${DOWNLOADS}' VENES_AUTHORIZED_KEYS='${AUTHORIZED_KEYS}' DISABLE_UPDATES=1 VENES_SDK_DIR='${SDK_DIR}' '${process.execPath}' '${CLI}' attach --pipe`,
+  '/bin/bash', '-c', `read -t 60 _ && env VENES_HOME='${HOME}' VENES_REX_SERVER='${REX_SERVER}' VENES_DOWNLOADS='${DOWNLOADS}' VENES_AUTHORIZED_KEYS='${AUTHORIZED_KEYS}' DISABLE_UPDATES=1 VENES_SDK_DIR='${SDK_DIR}' '${process.execPath}' '${CLI}' attach --pipe`,
 ];
 
 if (hasRex) {
@@ -2393,6 +2437,20 @@ function forgetSessionsSince(before) {
 
 fs.mkdirSync(WS, { recursive: true });
 const sessionsBefore = storedSessions();
+// Stopped from outside, a run still takes down what it started and forgets its sessions. The
+// handlers for 'exit' do that, and a signal on its own would end the run without them.
+let stopped = false;
+process.on('exit', () => {
+  try { tmux('kill-server'); } catch { /* not running */ }
+  forgetSessionsSince(sessionsBefore);
+  if (!stopped) return;
+  // A session cut short still writes its last lines down, after it was forgotten. Whoever stopped
+  // the run may not wait this long, which is why it's the second time round.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  forgetSessionsSince(sessionsBefore);
+});
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { stopped = true; process.exit(1); });
+stopStrayHelper();
 fs.rmSync(HOME, { recursive: true, force: true });
 for (const own of [DOWNLOADS, AUTHORIZED_KEYS, CLAUDE_SETTINGS]) fs.rmSync(own, { recursive: true, force: true });
 fs.rmSync(path.join(WS, '.claude'), { recursive: true, force: true });

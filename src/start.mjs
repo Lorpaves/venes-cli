@@ -14,7 +14,7 @@ const CHECK_MS = 300;
 const KEY_SETTLE_MS = 300;
 const SESSION_PREFIX = 'venes-new-';
 // As a resumed session gets them.
-const PASSED_ENV = ['PATH', 'LANG', 'LC_ALL', 'CLAUDE_CONFIG_DIR', 'VENES_HOME', 'VENES_CLAUDE_SETTINGS', 'VENES_TMUX_SOCKET', 'DISABLE_UPDATES'];
+const PASSED_ENV = ['PATH', 'LANG', 'LC_ALL', 'CLAUDE_CONFIG_DIR', 'VENES_HOME', 'VENES_CLAUDE_SETTINGS', 'VENES_TMUX_SOCKET', 'VENES_REX_SERVER', 'DISABLE_UPDATES'];
 // Claude Code's question, and its answer picked. "No, exit" comes first, and is the one picked to start with.
 const TRUST_QUESTION = /Yes, I trust this folder/;
 const TRUST_PICKED = /❯\s*Yes, I trust this folder/;

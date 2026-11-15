@@ -36,9 +36,14 @@ export function isInstalled() {
   return process.env.PATH.split(':').some(dir => fs.existsSync(path.join(dir, 'rex')));
 }
 
+// For a helper under test, which must never reach this Mac's own server: the one server it may use,
+// named on every command, and never started by one. Left to REX_SERVER, the command quietly uses
+// this Mac's server whenever it can't reach the one it was given.
+const onlyServer = () => (process.env.VENES_REX_SERVER ? ['-S', process.env.VENES_REX_SERVER, '--autostart=false'] : []);
+
 async function rex({ rexServer } = {}, args, input) {
   const env = rexServer ? { ...process.env, REX_SERVER: rexServer } : process.env;
-  const child = exec('rex', args, { timeout: COMMAND_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env });
+  const child = exec('rex', [...onlyServer(), ...args], { timeout: COMMAND_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env });
   if (input !== undefined) child.child.stdin.end(input);
   const { stdout } = await child;
   return stdout;

@@ -1708,3 +1708,28 @@ test('a session can be switched to the modes it always has, and to those it has 
   other.noteMode('nobody', 'plan');
   assert.equal(told.length, before);
 });
+
+test('how much has changed in a session\'s repository is kept with it, and told when it changes', () => {
+  const store = new SessionStore();
+  const told = [];
+  store.on('event', event => { if (event.kind === 'session.changes') told.push([event.sessionId, event.files, event.added, event.removed]); });
+  store.handleHook({ session_id: 'c', cwd: '/w', permission_mode: 'default', hook_event_name: 'UserPromptSubmit', prompt: 'go' });
+  // The key is there from the start, so that a client that joins again drops what it showed before.
+  assert.equal(store.sessions()[0].changes, null);
+  // Nothing changed, or no repository, is nothing to say of a session that had nothing.
+  store.noteChanges('c', { files: 0, added: 0, removed: 0 });
+  store.noteChanges('c', undefined);
+  assert.deepEqual(told, []);
+  store.noteChanges('c', { files: 2, added: 10, removed: 3 });
+  assert.deepEqual(store.sessions()[0].changes, { files: 2, added: 10, removed: 3 });
+  // The same again is nothing new, and other numbers are.
+  store.noteChanges('c', { files: 2, added: 10, removed: 3 });
+  store.noteChanges('c', { files: 2, added: 11, removed: 3 });
+  // Back to nothing, as after a commit, is told as no files, and kept as none.
+  store.noteChanges('c', { files: 0, added: 0, removed: 0 });
+  assert.deepEqual(told, [['c', 2, 10, 3], ['c', 2, 11, 3], ['c', 0, 0, 0]]);
+  assert.equal(store.sessions()[0].changes, null);
+  // A session that isn't known is no one's.
+  store.noteChanges('nobody', { files: 1, added: 1, removed: 0 });
+  assert.equal(told.length, 3);
+});

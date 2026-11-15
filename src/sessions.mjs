@@ -578,6 +578,21 @@ export class SessionStore extends EventEmitter {
     this.#emit(s, 'session.mode', { permissionMode: mode, permissionModes: modesOf(s) });
   }
 
+  // How much has changed in the session's repository, counted elsewhere and kept here, so that a client that
+  // joins later has it. Nothing changed, and no repository, are both `null`, and told as no files.
+  noteChanges(id, counted) {
+    const s = this.#sessions.get(id);
+    if (!s) return;
+    const next = counted?.files > 0 ? { files: counted.files, added: counted.added ?? 0, removed: counted.removed ?? 0 } : null;
+    const last = s.changes ?? null;
+    if (next?.files === last?.files && next?.added === last?.added && next?.removed === last?.removed) {
+      s.changes = next;
+      return;
+    }
+    s.changes = next;
+    this.#emit(s, 'session.changes', next ?? { files: 0, added: 0, removed: 0 });
+  }
+
   // A session's mode was changed some other way than a hook saying so, as from afar in its terminal,
   // which passes other modes on the way to the one asked for. Those are modes it has, too.
   noteMode(id, mode, passed = []) {
@@ -930,6 +945,8 @@ export class SessionStore extends EventEmitter {
       permissionMode: s.permissionMode, permissionModes: modesOf(s), transcriptPath: s.transcriptPath, backgroundTasks: s.backgroundTasks,
       tasks: [...s.tasks.values()].map(taskView),
       startedAt: s.startedAt, lastEventAt: s.lastEventAt, requests: this.pendingFor(s).map(r => r.id),
+      // Always there, so that a client that joins again takes away what it showed before.
+      changes: s.changes ?? null,
       ...(s.agent && { agent: s.agent }),
     };
   }

@@ -13,7 +13,7 @@ import { AGENT as CODEX, Codex } from './codex.mjs';
 import { listFolder, readChunk, readFile } from './files.mjs';
 import {
   branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
-  status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
+  countChanges, status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
 } from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
@@ -58,6 +58,12 @@ const HELD_CHECK_MS = 300;
 const REGISTRY_SAVE_MS = 2000;
 // How long a status waits for the account's per-model limits the first time they're read.
 const MODEL_LIMITS_WAIT_MS = 2500;
+// What may have changed a session's repository: a tool, a turn, a line for the shell, and its start, when
+// nothing has been counted yet. The count waits this long, so that a run of them is counted once.
+const RECOUNTED_AFTER = new Set(['tool.end', 'turn.end', 'message.output', 'session.started', 'session.discovered', 'session.attached']);
+const RECOUNT_WAIT_MS = 700;
+// The longest a client waits for the count with the session it asked for.
+const JOIN_COUNT_MS = 1500;
 // Claude Code draws a permission prompt as it asks the hook, so the screen is read for a moment.
 const PROMPT_READ_LIMIT_MS = 2000;
 const PROMPT_READ_CHECK_MS = 100;
@@ -221,6 +227,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   heldTimer.unref();
 
   store.on('event', event => {
+    if (RECOUNTED_AFTER.has(event.kind)) recount(event.sessionId);
     if (event.kind === 'request.opened' && event.request.kind === 'permission') {
       offerPromptRows(store, event.request).catch(error => console.error(`prompt rows: ${error.message}`));
     }
@@ -340,6 +347,32 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return root;
   };
 
+  // How much has changed in a session's repository, the first of them, which is the one its git page opens on.
+  const countChangesOf = async sessionId => {
+    const roots = await repositoriesFor(sessionId).catch(() => []);
+    const state = roots.length ? await gitStatus(roots[0]).catch(() => undefined) : undefined;
+    store.noteChanges(sessionId, countChanges(state));
+  };
+  // Counted a moment after what may have changed it, so that a run of tools is counted once.
+  const recounting = new Map();
+  function recount(sessionId) {
+    if (!sessionId || recounting.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      recounting.delete(sessionId);
+      countChangesOf(sessionId).catch(error => console.error(`changes: ${error.message}`));
+    }, RECOUNT_WAIT_MS);
+    timer.unref();
+    recounting.set(sessionId, timer);
+  }
+  // For a client that asks for the session: counted now, unless git takes too long over it, and then it follows.
+  const countedChanges = sessionId => Promise.race([
+    countChangesOf(sessionId).catch(() => {}), new Promise(resolve => { setTimeout(resolve, JOIN_COUNT_MS).unref(); }),
+  ]);
+  // What a client did to the repository changes the count as well.
+  const thenRecount = async (sessionId, doing) => {
+    try { return await doing; } finally { recount(sessionId); }
+  };
+
   // Codex's stored threads come with the first page, which is where what's running comes too.
   const listLibrary = async ({ limit, offset }, socket) => {
     const [page, threads] = await Promise.all([
@@ -441,10 +474,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     gitCommit: async ({ sessionId, root, commit }) => gitCommit(await repositoryFor(sessionId, root), { commit }),
     gitBranches: async ({ sessionId, root }) => gitBranches(await repositoryFor(sessionId, root)),
     // The few things that change the repository: what the next commit takes, the commit itself, and the branch.
-    gitStage: async ({ sessionId, root, paths, all }) => gitStage(await repositoryFor(sessionId, root), { paths, all }),
-    gitUnstage: async ({ sessionId, root, paths, all }) => gitUnstage(await repositoryFor(sessionId, root), { paths, all }),
-    gitCommitStaged: async ({ sessionId, root, message }) => gitCommitStaged(await repositoryFor(sessionId, root), { message }),
-    gitSwitch: async ({ sessionId, root, branch }) => gitSwitch(await repositoryFor(sessionId, root), { branch }),
+    gitStage: async ({ sessionId, root, paths, all }) => thenRecount(sessionId, gitStage(await repositoryFor(sessionId, root), { paths, all })),
+    gitUnstage: async ({ sessionId, root, paths, all }) => thenRecount(sessionId, gitUnstage(await repositoryFor(sessionId, root), { paths, all })),
+    gitCommitStaged: async ({ sessionId, root, message }) => thenRecount(sessionId, gitCommitStaged(await repositoryFor(sessionId, root), { message })),
+    gitSwitch: async ({ sessionId, root, branch }) => thenRecount(sessionId, gitSwitch(await repositoryFor(sessionId, root), { branch })),
     // The mode a session asks permission in. A Claude Code session's is changed in its terminal, as a
     // person changes it, and a Codex session's through Codex's server, from its next turn.
     setMode: forCodex('setMode', async ({ sessionId, mode }) => {
@@ -486,6 +519,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // Nothing here awaits for a session the helper knows, so every event is either in this
     // reply or follows it on the wire.
     join: async msg => {
+      await countedChanges(msg.sessionId);
       if (await isCodex(msg.sessionId)) return codex.join(msg);
       const session = store.find(msg.sessionId);
       await noteShownMode(session);

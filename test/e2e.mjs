@@ -2268,6 +2268,9 @@ T('a_change_is_staged_committed_and_the_branch_switched', { mode: 'bypassPermiss
       return [state.staged.map(file => file.path).sort(), state.changes.map(file => file.path).sort()];
     };
     assert.deepEqual(await paths(), [[], ['e2e-left.txt', 'e2e-stage.txt']]);
+    // How much has changed comes with the session when it's asked for, counted as the status lists it.
+    const changes = async () => (await r.client.request('join', { sessionId, limit: 1 })).sessions[0].changes;
+    assert.deepEqual(await changes(), { files: 2, added: 2, removed: 0 });
     await r.client.request('gitStage', { sessionId, paths: ['e2e-stage.txt'] });
     assert.deepEqual(await paths(), [['e2e-stage.txt'], ['e2e-left.txt']]);
     // Before the first commit, and after it.
@@ -2286,6 +2289,10 @@ T('a_change_is_staged_committed_and_the_branch_switched', { mode: 'bypassPermiss
     assert.deepEqual([commits.map(entry => entry.hash), hasMore], [[second.commit.hash, first.commit.hash], false]);
     assert.deepEqual([commits[0].subject, commits[0].parents, commits[0].refs, commits[1].parents], ['E2E: the second', [first.commit.hash], [{ name: 'e2e-main', kind: 'head' }], []]);
     assert.deepEqual(await paths(), [[], ['e2e-left.txt']]);
+    // A commit takes its files out of the count, which is told of without being asked for.
+    const told = await r.wait(e => e.kind === 'session.changes' && e.sessionId === sessionId && e.files === 1, 8000, 'session.changes after the commit');
+    assert.deepEqual([told.added, told.removed], [1, 0]);
+    assert.deepEqual(await changes(), { files: 1, added: 1, removed: 0 });
 
     git('branch', 'e2e-other', first.commit.hash);
     assert.deepEqual((await r.client.request('gitSwitch', { sessionId, branch: 'e2e-other' })).branch, 'e2e-other');

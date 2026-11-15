@@ -264,6 +264,16 @@ export async function status(cwd) {
   return { root, ...state, staged: counted(state.staged, inIndex), changes: counted(state.changes, inFolder), ...(isTruncated && { truncated: true }) };
 }
 
+// How much has changed since the last commit, for one line to say: the files a status lists, staged or not,
+// each counted once, and the lines they gained and lost between them. It's what the status itself lists, so
+// the line agrees with the page that shows the files. A file that isn't text is a file with no lines.
+export function countChanges(state) {
+  if (!state) return undefined;
+  const listed = [...(state.staged ?? []), ...(state.changes ?? [])];
+  const sum = key => listed.reduce((total, file) => total + (file.binary ? 0 : file[key] ?? 0), 0);
+  return { files: new Set(listed.map(file => file.path)).size, added: sum('added'), removed: sum('removed') };
+}
+
 // The paths that have changed, by what happened to each, for a file list to mark: relative to the repository's top.
 export async function changedPaths(cwd) {
   const state = await status(cwd).catch(() => undefined);

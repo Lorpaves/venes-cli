@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  branches, changedPaths, commit, commitStaged, diff, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat, parseRefs, parseStatus,
+  branches, changedPaths, commit, commitStaged, countChanges, diff, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat, parseRefs, parseStatus,
   repositoriesOf, repositoriesUnder, repositoryOf, stage, status, switchBranch, unstage,
 } from '../../src/git.mjs';
 
@@ -36,6 +36,18 @@ function committed(t) {
   made.git('commit', '-q', '-m', 'First commit', '-m', 'With a body\nof two lines.');
   return made;
 }
+
+test('what has changed is counted as the status lists it: each file once, and the lines of them all', () => {
+  const counted = countChanges({
+    staged: [{ path: 'a.js', status: 'modified', added: 3, removed: 1 }, { path: 'logo.png', status: 'added', binary: true }],
+    // Changed again since it was staged, a new file, and one too big to have been counted.
+    changes: [{ path: 'a.js', status: 'modified', added: 2, removed: 4 }, { path: 'new.txt', status: 'untracked', added: 7, removed: 0 }, { path: 'big.bin', status: 'untracked' }],
+  });
+  assert.deepEqual(counted, { files: 4, added: 12, removed: 5 });
+  assert.deepEqual(countChanges({ staged: [], changes: [] }), { files: 0, added: 0, removed: 0 });
+  // Outside a repository there's nothing to count.
+  assert.equal(countChanges(undefined), undefined);
+});
 
 test('a status is read from the form git keeps for programs', () => {
   const text = [

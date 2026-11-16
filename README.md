@@ -329,6 +329,11 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 
 Claude Code asks before it works in a folder it doesn't trust yet, and runs no hooks, the helper's included, until that's answered. `trusted` reads its own rules from `~/.claude.json`. A folder is trusted when the folder, or one above it, has been accepted. Inside a git repository the search stops at the repository's top folder, and outside one it goes up to the top of the disk. The home folder is asked about every time. `start` for a folder that isn't trusted fails with `needs_trust` and starts nothing. With `trust: true`, the reader's word in the app, it answers Claude Code's question with "Yes, I trust this folder", as the keys at the Mac would. If Claude Code asks about a folder that looked trusted, `start` picks "No, exit", so nothing is left running, and fails with `needs_trust`.
 
+Claude Code can ask something else before a session starts or is back, with a list to pick from: as it asks about Code Mode, at every start, of whoever has set `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE` and not yet said yes to it at a terminal. The helper answers none of that. It reads the question off the terminal, and the reader answers it:
+
+- **A session resumed by a message** has the question asked on it as a request of kind `question`, in the shape of one Claude asks (`toolName: "AskUserQuestion"`, `input.questions` with one question: its `question`, the question's name as its `header`, its `options`). The message that resumed it is taken, and is the first thing the session hears once the question is answered. `respond` with `answers` keyed by the question presses that option in the terminal, as someone there would. Refused with `decision: "deny"`, it stays on the terminal, and the next message to the session is refused with `dialog_open` and has it asked again. Answered at the terminal instead, the request closes with `by: "terminal"`.
+- **A new session** has no session yet to ask on. `start` is refused with `needs_choice`, whose `details` are the question's `title`, `text` and `options`. Ask the reader, and send `start` for the same `cwd` with `choice` set to the option they picked: it's pressed in the terminal that's waiting, and the session starts there. Sent with no `choice`, the same question comes back, from the same terminal.
+
 ### Codex sessions
 
 Codex has a server for its own clients, which its desktop app, its editor extension and its remote control go through, and it keeps one running on this Mac as a daemon (`codex app-server daemon`). The helper is one more client of it, over the daemon's control socket, `~/.codex/app-server-control/app-server-control.sock`: a session here is a thread there, and everything comes and goes as that server's own messages. Nothing is typed into a terminal or read off one, and no hooks are installed in Codex.
@@ -626,6 +631,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `resume_failed` | Claude Code quit, or took too long, resuming a stored session |
 | `sdk_unavailable` | The Agent SDK couldn't be installed, so `library` has nothing to list. The next request tries again. |
 | `no_tmux` | Neither Rex nor tmux is installed, so a stored session can't be resumed, or a new one started |
+| `needs_choice` | Claude Code asks something with a list to pick from before a new session starts. `details` has its `title`, `text` and `options`. Ask the reader, and send `start` again with `choice` |
 | `needs_trust` | Claude Code or Antigravity asks first whether to trust the folder, or Codex would trust it without asking. Ask the reader, and send `start` again with `trust: true`. |
 | `no_codex` | Codex isn't installed, or its server wouldn't start, so a Codex session can't be started or opened |
 | `no_antigravity` | Antigravity's `agy` isn't on the PATH, so an Antigravity session can't be started |
@@ -682,6 +688,8 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 ## Behaviour worth knowing
 
 - **Permission mode is respected.** Prompts appear only when Claude Code would ask, so `bypassPermissions` shows no approvals. Questions and plans still appear.
+- **What Claude Code asks is the reader's to answer.** A question it puts up in the terminal before a session starts or is back is shown to the reader, and nothing is pressed for them: see [Starting a session](#starting-a-session).
+- **Models past the first five are under More models.** Claude Code's picker keeps them under a row of that name since 2.1.325, which the helper unfolds to reach one.
 - **Interrupts and terminal rejections fire no hook.** The helper finds them in the transcript, usually within half a second.
 - **`turn.end` doesn't mean all work is finished.** Check `backgroundTasks`.
 - **Long messages reach Claude as pasted text.** Past roughly 800 characters, or with many lines, Claude Code wraps a message in `<pasted_content>`. Claude still acts on it, and the helper shows the original text.

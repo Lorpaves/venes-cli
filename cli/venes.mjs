@@ -21,7 +21,7 @@ import {
 import { choose } from '../src/choice.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAccount, tailnetAddress } from '../src/rex.mjs';
 import { localName, pairingHost, readUpload, tailnetAddressOf, tailscaleStatus } from '../src/ssh.mjs';
-import { askedOverSSH, firewallNote, networksShutOut, windowsCommand } from '../src/winssh.mjs';
+import { askedOverSSH, firewallNote, isElevated, networksShutOut, windowsCommand } from '../src/winssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
@@ -321,6 +321,12 @@ const commands = {
   async ssh() {
     const asked = askedOverSSH(process.env.SSH_ORIGINAL_COMMAND);
     if (!asked) throw new Error('This key only reaches Venes.');
+    // A phone doesn't start the helper from an administrator's SSH session, which has an administrator's
+    // full rights: so would the helper, and Claude Code at the computer, which doesn't, could neither
+    // reach that helper nor start its own. It's Claude Code that starts it there.
+    if (!(await isRunning()) && isElevated()) {
+      throw new Error('Venes isn\'t running on this computer yet. Start Claude Code there, and it starts with it.');
+    }
     await commands[asked[0]]([]);
   },
   // Run as administrator by `pair`, when it couldn't itself write where Windows keeps administrators'

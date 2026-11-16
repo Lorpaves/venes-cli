@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { addPairingLine, allowPhone, pairingLine, pairingParts, phoneCommand, removePhoneKeys } from '../../src/pairing.mjs';
 import {
-  askedOverSSH, firewallNote, isAdministrator, isAdministratorsFile, keepsAdministratorsKeys, networksShutOut, outwardAddress, windowsAuthorizedKeysFile,
+  askedOverSSH, firewallNote, isAdministrator, isAdministratorsFile, isElevated, keepsAdministratorsKeys, networksShutOut, outwardAddress, windowsAuthorizedKeysFile,
   windowsCommand,
 } from '../../src/winssh.mjs';
 
@@ -134,4 +134,13 @@ test('the address this computer goes out from is one of its own, or none where i
   if (address === undefined) return;
   const mine = Object.values(os.networkInterfaces()).flat().map(each => each.address);
   assert.ok(mine.includes(address), address);
+});
+
+test('a process has an administrator\'s full rights by the level it runs at', () => {
+  const at = level => `"Mandatory Label\\${level}","Label","${{ High: 'S-1-16-12288', Medium: 'S-1-16-8192', System: 'S-1-16-16384' }[level]}","Mandatory group"\r\n`;
+  assert.equal(isElevated(() => ADMIN_GROUPS + at('High')), true, 'an administrator\'s SSH session, or a terminal opened as one');
+  assert.equal(isElevated(() => ADMIN_GROUPS + at('Medium')), false, 'an administrator\'s terminal that wasn\'t');
+  assert.equal(isElevated(() => USER_GROUPS + at('Medium')), false);
+  assert.equal(isElevated(() => at('System')), true);
+  assert.equal(isElevated(() => { throw new Error('no whoami'); }), false);
 });

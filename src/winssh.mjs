@@ -27,6 +27,16 @@ export function isAdministrator(groups = () => execFileSync('whoami', ['/groups'
   }
 }
 
+// Whether this process has an administrator's full rights, as everything in an administrator's SSH
+// session has: `whoami` lists the level it runs at, high for those, or the system's own.
+export function isElevated(groups = () => execFileSync('whoami', ['/groups', '/fo', 'csv', '/nh'], { encoding: 'utf8' })) {
+  try {
+    return /S-1-16-(?:12288|16384)\b/.test(groups());
+  } catch {
+    return false;
+  }
+}
+
 // Whether sshd reads administrators' keys from the one file it has for them all, as it's set to when
 // installed. Someone who took that out of sshd_config has their keys in their own folder.
 export function keepsAdministratorsKeys(config = () => fs.readFileSync(path.join(sshFolder(), 'sshd_config'), 'utf8')) {

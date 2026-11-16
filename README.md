@@ -162,6 +162,7 @@ Not finished, and **not yet tried with the app itself**: everything below was ru
 
 - **Paths.** The app takes a path apart at its slashes, so the helper says `C:\Users\ada\work` as `/C:/Users/ada/work` and takes it back the same way. `/` lists the drives.
 - **The helper.** Its launcher is `%USERPROFILE%\.venes\venes.cmd`, and its two sockets are named pipes. Windows' management service starts it, so that it's no session's to end: started any other way, it went when the SSH session that started it closed.
+- **Who starts it.** Claude Code at the computer does, when a session starts. A phone that connects before that, to an administrator's account, is told to start Claude Code there: sshd gives an administrator's session an administrator's full rights, and a helper started with those couldn't be reached by Claude Code, which runs without them. For the same reason a Claude Code run as administrator and one that isn't don't share a helper.
 - **The Recycle Bin.** What's deleted from the app is moved into the bin's own folder on its drive, where Explorer shows it and puts it back. On a drive with no bin for the account, nothing is deleted.
 - **In WSL.** Claude Code inside WSL is on Linux, and so is the helper: the Linux notes above are the ones that apply. That hasn't been run.
 - **Not there yet.** Typing into a session and starting one (there's no tmux, and Rex's server for Windows isn't used), the status line, Codex and Antigravity.

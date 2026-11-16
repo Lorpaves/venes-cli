@@ -305,6 +305,7 @@ test('with no Codex running, there is nothing, and nothing is started to look', 
   await codex.restore();
   assert.deepEqual(await codex.library(), []);
   assert.equal(await codex.owns('anything'), false);
+  assert.equal(codex.denies('anything'), false, 'a Codex that can\'t be asked hasn\'t said no');
   assert.deepEqual(store.sessions(), []);
   assert.equal(server.starts, 0);
 });
@@ -1190,9 +1191,13 @@ test('the library has Codex\'s stored threads, and says which are going on', asy
 test('whose a session is gets asked of Codex once', async () => {
   const { codex, server, store } = setup({ threads: [stored('old')] });
   assert.equal(await codex.owns('old'), true);
+  assert.equal(codex.denies('claude-session'), false, 'not asked yet, so not said');
   assert.equal(await codex.owns('claude-session'), false);
   assert.equal(await codex.owns('claude-session'), false);
   assert.equal(server.called('thread/read').length, 2);
+  // Codex said it has no such thread, which is what lets a client be told a session has gone.
+  assert.equal(codex.denies('claude-session'), true);
+  assert.equal(codex.denies('old'), false);
   assert.equal(await codex.owns(undefined), false);
   // One the helper has from Claude Code's hooks isn't Codex's, whatever Codex would say.
   store.handleHook({ session_id: 'hooked', cwd: '/w', hook_event_name: 'SessionStart' });

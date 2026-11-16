@@ -724,6 +724,11 @@ export class Codex {
     }
   }
 
+  // Whether Codex itself has said it has no such thread. A Codex that couldn't be asked hasn't said so.
+  denies(sessionId) {
+    return this.#owned.get(sessionId) === false;
+  }
+
   // The connection to the daemon, made when it's first wanted. `start` starts the daemon if it isn't
   // running, which is for someone who asked for Codex, and not for a list that could do without.
   async #open({ start }) {

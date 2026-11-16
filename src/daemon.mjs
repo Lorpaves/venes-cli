@@ -329,6 +329,16 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return { ...page, turn: [], queued: [], seq, requests: [], sessions: [{ id: sessionId, status, cwd: info?.cwd, model, tasks: [], backgroundTasks: 0 }] };
   };
 
+  // A session a client still lists that is nowhere any more: Claude Code has none stored by that id, and
+  // every other agent, asked, said it has none either. It was deleted outside Venes, as a thread is that's
+  // deleted in Codex's own app. Clients are told it has gone, so their lists let go of it: opened, it was an
+  // empty page with whatever commands the client last had. An agent that couldn't be asked hasn't said no.
+  const announceGone = (sessionId, error) => {
+    if (error?.code !== 'unknown_session' || typeof sessionId !== 'string' || store.find(sessionId)) return;
+    if (!others.every(other => (other.denies ? other.denies(sessionId) : true))) return;
+    store.forget(sessionId);
+  };
+
   // A Codex session's commands go to Codex's server, and any other's the way they always did.
   // The agent a session is another's than Claude Code's, if it is.
   const otherOf = async sessionId => {
@@ -623,7 +633,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       if (other) return other.join(msg);
       const session = store.find(msg.sessionId);
       await noteShownMode(session);
-      if (!session?.transcriptPath) return joinStored(msg);
+      if (!session?.transcriptPath) {
+        return joinStored(msg).catch(error => {
+          announceGone(msg.sessionId, error);
+          throw error;
+        });
+      }
       const turn = store.openTurn(session);
       const [first] = turn;
       const start = first && { at: first.at, prompt: first.kind === 'message.user' ? first.text : undefined };

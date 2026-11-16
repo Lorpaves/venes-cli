@@ -563,7 +563,13 @@ T('question_with_a_file', { mode: 'bypassPermissions' }, async r => {
   );
   await r.client.request('respond', { requestId: request.id, decision: 'allow', answers, attachments: { 'Which color?': [notes.uploadId] } });
   const end = await r.turnEnd(90000);
-  assert.match(end.lastMessage, /Red/);
+  // The answer reached Claude with the file attached to it: the question's own result says so. The reply
+  // shows the file was read; that it names the colour too is the model's to choose, and haiku sometimes
+  // leaves it out, as it did on 0.28.3 as well.
+  const asked = r.events.find(event => event.kind === 'tool.end' && event.name === 'AskUserQuestion');
+  const told = JSON.stringify(asked?.response ?? null);
+  assert.match(told, /Red/, 'the answer reached Claude');
+  assert.match(told, /answer notes\.txt/, 'with the file attached to it');
   assert.match(end.lastMessage, /FIG/i);
 });
 

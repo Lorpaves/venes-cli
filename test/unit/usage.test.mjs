@@ -352,6 +352,36 @@ test('what was used in the last day is counted by the hour too', t => {
   assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(path.dirname(folders.claude[0]), '..', 'helper', 'usage.json'), 'utf8')).files[session].hours), [hourOf(NOW - 1000)]);
 });
 
+test('what a cache saved, and each model\'s part, are told by the day and by the hour', t => {
+  const { folders, write, read } = setup(t);
+  const hour = 60 * 60 * 1000;
+  write(path.join(folders.claude[0], '-code', 'a.jsonl'), [
+    reply({ id: 'msg_1', at: NOW - hour, usage: { input_tokens: 10, output_tokens: 100, cache_read_input_tokens: 1_000_000 } }),
+    reply({ id: 'msg_2', daysAgo: 2, model: 'claude-unlisted-9', usage: { input_tokens: 5000, output_tokens: 0 } }),
+  ]);
+  write(path.join(folders.codex[0], 'rollout-a.jsonl'), [context(), record(SPENT, 1)]);
+  const found = read();
+  const { claude, codex } = found.agents;
+  const at = found.hours.indexOf(hourOf(NOW - hour));
+  // Claude's cache read saved what it would have cost as input, less what it did cost.
+  near(claude.saved.at(-1), 1_000_000 * (4e-6 - 2e-7), 'today');
+  near(claude.hourly.saved[at], 1_000_000 * (4e-6 - 2e-7), 'that hour');
+  near(codex.saved.at(-2), 600 * (1e-5 - 1e-6), 'yesterday');
+  assert.equal(sum(claude.saved.slice(0, -1)), 0);
+  // Each model, the costliest first, with its cost and all its tokens by the day and by the hour.
+  assert.deepEqual(claude.models.map(own => own.model), ['claude-opus-5-5', 'claude-unlisted-9']);
+  const [opus, unlisted] = claude.models;
+  assert.deepEqual([opus.tokens.at(-1), opus.hourly.tokens[at], unlisted.tokens.at(-3), sum(unlisted.cost)], [1_000_110, 1_000_110, 5000, 0]);
+  // One the price list has nothing for says how many of its tokens that was, and one it has says nothing.
+  assert.deepEqual([unlisted.unpriced, 'unpriced' in opus], [5000, false]);
+  near(opus.cost.at(-1), 10 * 4e-6 + 100 * 2e-5 + 1_000_000 * 2e-7, 'its cost');
+  assert.deepEqual([opus.cost.length, opus.hourly.cost.length], [90, 24]);
+  assert.deepEqual(codex.models.map(own => [own.model, sum(own.tokens)]), [['gpt-6-astra', 1050]]);
+  // And so they're told to a client.
+  const told = usageReply({ read: found, now: NOW }).agents.find(agent => agent.agent === 'claude');
+  assert.deepEqual([told.saved, told.models], [claude.saved, claude.models]);
+});
+
 test('a read stops when its time is up, says so, and the next goes on from there', t => {
   const { folders, write, read } = setup(t);
   const big = Array.from({ length: 3 }, (_, i) => reply({ id: `msg_${i}`, usage: { input_tokens: 1, output_tokens: 1 } }));

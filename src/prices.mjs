@@ -92,15 +92,31 @@ export function priceFor(prices, model) {
 // with the reasoning in it, or beside it as `reasoning` where an agent counts that apart. A request of
 // the size at which a maker charges more is charged so whole. One run at a service `tier` the maker
 // charges apart for is charged at that tier's prices, and at the usual ones where it lists none.
-export function costOf(price, { input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, cacheWriteLong = 0 } = {}, tier = undefined) {
+export function costOf(price, tokens = {}, tier = undefined) {
   if (!price) return undefined;
-  const own = tier ? price.tiers?.[tier] : undefined;
-  const base = own ? { ...price, ...own, over: own.over } : price;
-  const isOver = base.over && input + cacheRead + cacheWrite + cacheWriteLong > base.over.tokens;
-  const rates = isOver ? { ...base, ...base.over } : base;
+  const { input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, cacheWriteLong = 0 } = tokens;
+  const rates = ratesFor(price, tokens, tier);
   const write = rates.cacheWrite ?? rates.input;
   return input * rates.input + output * rates.output + reasoning * (rates.reasoning ?? rates.output) + cacheRead * (rates.cacheRead ?? rates.input)
     + cacheWrite * write + cacheWriteLong * (rates.cacheWriteLong ?? write);
+}
+
+// The prices a request is charged at: its tier's, where it was run at one the maker charges apart for,
+// and those for its size, where it's over the size the maker charges more from.
+function ratesFor(price, { input = 0, cacheRead = 0, cacheWrite = 0, cacheWriteLong = 0 }, tier) {
+  const own = tier ? price.tiers?.[tier] : undefined;
+  const base = own ? { ...price, ...own, over: own.over } : price;
+  const isOver = base.over && input + cacheRead + cacheWrite + cacheWriteLong > base.over.tokens;
+  return isOver ? { ...base, ...base.over } : base;
+}
+
+// What reading from a cache saved a request, in dollars: what its cache reads would have cost as input,
+// less what they did cost. Nothing where the maker lists no price for reading a cache.
+export function savingsOf(price, tokens = {}, tier = undefined) {
+  if (!price || !(tokens.cacheRead > 0)) return 0;
+  const rates = ratesFor(price, tokens, tier);
+  if (!(rates.input >= 0) || !(rates.cacheRead >= 0)) return 0;
+  return tokens.cacheRead * Math.max(rates.input - rates.cacheRead, 0);
 }
 
 // Whether the helper may ask for the list, which someone who has turned off what Claude Code needn't

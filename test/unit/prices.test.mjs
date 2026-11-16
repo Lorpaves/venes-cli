@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Prices, costOf, mayFetchPrices, priceFor, reduced } from '../../src/prices.mjs';
+import { Prices, costOf, mayFetchPrices, priceFor, reduced, savingsOf } from '../../src/prices.mjs';
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-prices-'));
@@ -84,6 +84,19 @@ test('a request costs what each kind of its tokens does, and more whole once it 
   near(costOf(prices['claude-opus-5-5'], { output: 1e6, reasoning: 1e6 }), 40);
   near(costOf(prices['gemini-4-argon'], { output: 1e6, reasoning: 1e6 }), 4 + 3);
   assert.equal(costOf(undefined, { input: 5 }), undefined);
+});
+
+test('what a cache saved is its reads at the input\'s price, less what they cost', () => {
+  const prices = reduced(LIST);
+  const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} is not ${expected}`);
+  near(savingsOf(prices['claude-opus-5-5'], { input: 10, cacheRead: 1e6, output: 5 }), 4 - 0.2);
+  // At a tier, and over the size a maker charges more from, at the prices the request was charged at.
+  near(savingsOf(prices['gpt-6-astra'], { input: 100_000, cacheRead: 100_000 }, 'priority'), 100_000 * (2e-5 - 2e-6));
+  near(savingsOf(prices['gpt-6-astra'], { input: 200_000, cacheRead: 100_000 }), 100_000 * (2e-5 - 2e-6));
+  // Nothing with no cache read, with no price for reading one, or with no price at all.
+  for (const [price, tokens] of [[prices['claude-opus-5-5'], { input: 1e6 }], [prices['gemini-4-argon'], { cacheRead: 1e6 }], [undefined, { cacheRead: 1e6 }]]) {
+    assert.equal(savingsOf(price, tokens), 0);
+  }
 });
 
 test('the prices in hand are the last read of the list, or the copy the helper came with', t => {

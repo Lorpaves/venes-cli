@@ -14,7 +14,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { HelperError } from './errors.mjs';
-import { costOf, priceFor } from './prices.mjs';
+import { costOf, priceFor, savingsOf } from './prices.mjs';
 
 const exec = promisify(execFile);
 const WORKER = fileURLToPath(new URL('usage-worker.mjs', import.meta.url));
@@ -23,7 +23,7 @@ const WORKER_BUFFER_BYTES = 8 << 20;
 
 export const DAYS = 90;
 export const HOURS = 24;
-const VERSION = 3;
+const VERSION = 4;
 const HOUR_MS = 60 * 60_000;
 const CHUNK_BYTES = 1 << 20;
 // How many of a transcript's last requests are remembered, to count once one that's written on several
@@ -101,14 +101,16 @@ export function codexTokens(usage = {}) {
 }
 
 // A day's tally for a model, or an hour's: [input, output, cache read, cache written, dollars, tokens
-// with no price].
-const blank = () => [0, 0, 0, 0, 0, 0];
+// with no price, dollars a cache saved].
+const blank = () => [0, 0, 0, 0, 0, 0, 0];
 
 // Adds what a request used at `at` to `into`: to its day among `days`, and to its hour among `hours`
 // where that's no longer ago than `hoursFrom`, which is as far back as hours are told. `tier` is the
 // service tier it was run at, where the maker charges apart for one.
 function tally(into, at, model, tokens, prices, sign = 1, tier = undefined) {
-  const cost = costOf(priceFor(prices, model), tokens, tier);
+  const price = priceFor(prices, model);
+  const cost = costOf(price, tokens, tier);
+  const saved = savingsOf(price, tokens, tier);
   const all = tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cacheRead + tokens.cacheWrite + tokens.cacheWriteLong;
   const slots = [(into.days[dayOf(at)] ??= {})];
   if (at >= into.hoursFrom) slots.push((into.hours[hourOf(at)] ??= {}));
@@ -120,6 +122,7 @@ function tally(into, at, model, tokens, prices, sign = 1, tier = undefined) {
     sum[3] += sign * (tokens.cacheWrite + tokens.cacheWriteLong);
     if (cost === undefined) sum[5] += sign * all;
     else sum[4] += sign * cost;
+    sum[6] += sign * saved;
   }
 }
 
@@ -494,22 +497,31 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
   const blankSums = slots => ({
     tokens: { input: slots.map(() => 0), output: slots.map(() => 0), cacheRead: slots.map(() => 0), cacheWrite: slots.map(() => 0) },
     cost: slots.map(() => 0),
+    saved: slots.map(() => 0),
   });
+  const blankModel = () => ({ cost: days.map(() => 0), tokens: days.map(() => 0), unpriced: 0, hourly: { cost: hours.map(() => 0), tokens: hours.map(() => 0) } });
   const dayAt = new Map(days.map((day, at) => [day, at]));
   const hourAt = new Map(hours.map((hour, at) => [hour, at]));
-  // Adds what was counted in each of `counted`'s slots to `sums`, and gives the tokens with no price.
-  const add = (sums, counted, places) => {
+  // Adds what was counted in each of `counted`'s slots to `sums`, and each model's cost and tokens to
+  // `models`, by the day or by the hour, and gives the tokens with no price.
+  const add = (sums, models, counted, places, isHourly) => {
     let unpriced = 0;
-    for (const [slot, models] of Object.entries(counted ?? {})) {
+    for (const [slot, byModel] of Object.entries(counted ?? {})) {
       const at = places.get(slot);
       if (at === undefined) continue;
-      for (const [input, output, cacheRead, cacheWrite, cost, without] of Object.values(models)) {
+      for (const [model, [input, output, cacheRead, cacheWrite, cost, without, saved = 0]] of Object.entries(byModel)) {
         sums.tokens.input[at] += input;
         sums.tokens.output[at] += output;
         sums.tokens.cacheRead[at] += cacheRead;
         sums.tokens.cacheWrite[at] += cacheWrite;
         sums.cost[at] += cost;
+        sums.saved[at] += saved;
         unpriced += without;
+        const own = (models[model] ??= blankModel());
+        const into = isHourly ? own.hourly : own;
+        into.cost[at] += cost;
+        into.tokens[at] += input + output + cacheRead + cacheWrite;
+        if (!isHourly) own.unpriced += without;
       }
     }
     return unpriced;
@@ -523,13 +535,25 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
     const isCounted = entry.agent === 'codex' && !entry.hasRecords;
     const byDay = isCounted ? entry.counted : entry.days;
     if (!Object.keys(byDay ?? {}).length && !agents[entry.agent]) continue;
-    const sums = (agents[entry.agent] ??= { ...blankSums(days), unpriced: 0, hourly: blankSums(hours) });
-    sums.unpriced += add(sums, byDay, dayAt);
-    add(sums.hourly, isCounted ? entry.countedHours : entry.hours, hourAt);
+    const sums = (agents[entry.agent] ??= { ...blankSums(days), unpriced: 0, hourly: blankSums(hours), byModel: {} });
+    sums.unpriced += add(sums, sums.byModel, byDay, dayAt, false);
+    add(sums.hourly, sums.byModel, isCounted ? entry.countedHours : entry.hours, hourAt, true);
   }
+  const sumOf = list => list.reduce((total, value) => total + value, 0);
   for (const sums of Object.values(agents)) {
-    sums.cost = rounded(sums.cost);
-    sums.hourly.cost = rounded(sums.hourly.cost);
+    for (const part of [sums, sums.hourly]) {
+      part.cost = rounded(part.cost);
+      part.saved = rounded(part.saved);
+    }
+    // Each model that used anything in the days told, the costliest first.
+    sums.models = Object.entries(sums.byModel)
+      .filter(([, own]) => sumOf(own.tokens) > 0 || sumOf(own.cost) > 0)
+      .map(([model, own]) => ({
+        model, cost: rounded(own.cost), tokens: own.tokens, hourly: { cost: rounded(own.hourly.cost), tokens: own.hourly.tokens },
+        ...(own.unpriced > 0 && { unpriced: own.unpriced }),
+      }))
+      .sort((a, b) => sumOf(b.cost) - sumOf(a.cost) || sumOf(b.tokens) - sumOf(a.tokens) || a.model.localeCompare(b.model));
+    delete sums.byModel;
   }
   return { days, hours, agents, scanning, ...(codexLimits && { codexLimits }) };
 }
@@ -565,7 +589,10 @@ export function usageReply({ read, limits = {}, shown = () => true, now = Date.n
     if (!used && !said?.limits?.length) return [];
     return [{
       agent,
-      ...(used && { tokens: used.tokens, cost: used.cost, ...(used.hourly && { hourly: used.hourly }), ...(used.unpriced > 0 && { unpriced: used.unpriced }) }),
+      ...(used && {
+        tokens: used.tokens, cost: used.cost, ...(used.saved && { saved: used.saved }), ...(used.hourly && { hourly: used.hourly }),
+        ...(used.models && { models: used.models }), ...(used.unpriced > 0 && { unpriced: used.unpriced }),
+      }),
       ...(said?.limits?.length && { limits: said.limits }),
       ...(said?.plan && { plan: said.plan }),
       ...(said?.credits && { credits: said.credits }),

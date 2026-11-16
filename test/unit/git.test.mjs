@@ -11,7 +11,7 @@ import {
 
 // A repository of the test's own, with nothing of this Mac's git settings in it.
 function repository(t) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-git-')));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-git-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_AUTHOR_DATE: '2026-01-02T03:04:05Z', GIT_COMMITTER_DATE: '2026-01-02T03:04:05Z' };
   const git = (...args) => execFileSync('git', ['-C', root, '-c', 'user.name=Ada', '-c', 'user.email=ada@example.com', '-c', 'commit.gpgsign=false', ...args], { env, encoding: 'utf8' });
@@ -122,7 +122,7 @@ test('the names at a commit are told apart by what they are', () => {
 });
 
 test('a folder that\'s in no repository has none, and one inside a repository has its top', async t => {
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-nogit-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-nogit-')));
   t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
   assert.equal(await repositoryOf(outside), undefined);
   assert.equal(await status(outside), undefined);
@@ -371,7 +371,7 @@ test('the folder moves to another branch, unless that would write over what\'s c
 });
 
 test('nothing changes outside a repository', async t => {
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-nogit-')));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-nogit-')));
   t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
   for (const act of [() => stage(outside, { all: true }), () => unstage(outside, { all: true }), () => commitStaged(outside, { message: 'x' }), () => switchBranch(outside, { branch: 'main' })]) {
     await assert.rejects(act(), error => error.code === 'no_repository');
@@ -380,7 +380,7 @@ test('nothing changes outside a repository', async t => {
 
 // A project kept as several repositories in one folder that isn't one itself, with a folder of none beside them.
 function project(t) {
-  const top = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-project-')));
+  const top = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-project-')));
   t.after(() => fs.rmSync(top, { recursive: true, force: true }));
   for (const name of ['ios', 'helper', 'Tap 2', 'Tap 10']) {
     fs.mkdirSync(path.join(top, name, 'src'), { recursive: true });

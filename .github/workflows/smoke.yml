@@ -4,7 +4,7 @@
 name: smoke
 on:
   push:
-    branches: [windows]
+    branches: [main, windows]
   workflow_dispatch:
 permissions:
   contents: read

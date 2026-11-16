@@ -138,6 +138,18 @@ The helper does on Linux what it does on a Mac, with what a Linux system has:
 
 What has been run on Linux: the unit tests, and the helper end to end in an Ubuntu container, installed by its script into Claude Code, paired over sshd, reached as the app reaches it, with files made and trashed, terminals driven through tmux and through Rex, and hooks taken in from both. A whole session with Claude Code signed in has only been run on macOS.
 
+## Windows
+
+Not finished: **the app can't pair with a Windows computer yet.** What's there is the helper itself and the hooks that tell it of a session.
+
+- **In WSL.** Claude Code inside WSL is on Linux, and so is the helper: the Linux notes above are the ones that apply. That hasn't been run.
+- **Node.js.** The helper needs `node` on the `PATH`. Claude Code's own installer doesn't bring one.
+- **Hooks.** With [Git for Windows](https://git-scm.com/downloads/win) installed, Claude Code runs a hook in Git Bash, which takes about 0.15 seconds. Without it, Claude Code runs the hook in PowerShell, which takes about a second, twice for each tool Claude uses. So install Git for Windows. Either way a hook that fails never stops a tool: before 0.27.0 it did, on Windows with no Git for Windows.
+- **The helper.** It starts when a session starts, as elsewhere. Its launcher is `%USERPROFILE%\.venes\venes.cmd`, and its two sockets are named pipes.
+- **Not there yet.** Pairing, typing into a session (there's no tmux), the Recycle Bin, the status line, Codex and Antigravity.
+
+What has been run on Windows: the smoke test (`node test/smoke.mjs`) on Windows 11 on Arm and on GitHub's Windows machines, and Claude Code 2.1.325 with the plugin on Windows 11, with Git for Windows and without, against a stand-in for the model's API: sessions were followed and tools ran.
+
 ## How it works
 
 ```

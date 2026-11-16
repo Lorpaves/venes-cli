@@ -192,9 +192,10 @@ function forgetCodexTrust() {
 async function stopCodexServer({ forget = true } = {}) {
   if (!codexServer) return;
   if (forget) await forgetCodexThreads().catch(error => console.log(`      codex threads not deleted: ${error.message}`));
-  const gone = new Promise(resolve => { codexServer.once('exit', resolve); });
+  const gone = codexServer.exitCode !== null ? Promise.resolve(true) : new Promise(resolve => { codexServer.once('exit', () => resolve(true)); });
   codexServer.kill();
-  await Promise.race([gone, delay(3000)]);
+  // One still there after a few seconds is ended at once: left running, it outlived the run, three on one day.
+  if (!(await Promise.race([gone, delay(3000).then(() => false)]))) codexServer.kill('SIGKILL');
   codexServer = undefined;
   fs.rmSync(path.dirname(CODEX_SOCKET), { recursive: true, force: true });
   if (forget) forgetCodexTrust();

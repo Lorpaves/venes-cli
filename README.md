@@ -16,7 +16,7 @@ brew install lorpaves/venes/venes
 
 That installs the plugin into Claude Code, starts its background helper, and puts `venes` on your PATH. Sessions that were open before need a restart or `/reload-plugins` to be seen. The plugin then keeps itself up to date through Claude Code, and `brew upgrade` updates it whenever there's a new release.
 
-Without Homebrew, as on Linux, run the install script, which does the same but leaves the command at `~/.venes/venes`:
+That's the same on a Mac and on Linux, where Homebrew runs too. Without Homebrew, run the install script, which does the same but leaves the command at `~/.venes/venes`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Lorpaves/venes-cli/main/install.sh | sh
@@ -127,7 +127,7 @@ If `~/.venes/venes` isn't there, the helper never started, and `claude plugin un
 
 The helper does on Linux what it does on a Mac, with what a Linux system has:
 
-- **Installing.** The install script above, since Homebrew's cask is for macOS. It needs `curl`, which a session's hooks reach the helper with.
+- **Installing.** With Homebrew as on a Mac, or with the install script above. Either way it needs `curl`, which a session's hooks reach the helper with. With Homebrew, an upgrade from 0.28.2 or earlier takes Venes off whole before it installs the new one, and phones have to be paired again that once: the script that tells an upgrade from an uninstall couldn't on Linux until 0.28.3.
 - **tmux.** 3.2 or later, which is the first that can start a session with the settings the helper gives it. Ubuntu 22.04 and Debian 12 have one, and older systems' own packages don't.
 - **Pairing over SSH.** Remote Login is the SSH server: `sudo systemctl enable --now ssh` (the service is `sshd` on Fedora and Arch). `venes pair` draws its code itself, with nothing to install for it.
 - **Pairing through Rex.** The Rex server from [its own installer](https://www.superlogical.com/rex/docs/installation), with its Tailscale on: `rex server tailscale login`, then `rex server tailscale on`.
@@ -136,7 +136,7 @@ The helper does on Linux what it does on a Mac, with what a Linux system has:
 - **The account's picture.** `~/.face`, or the one the system keeps for the account, if it's a JPEG or a PNG under a megabyte.
 - **No Screen Sharing.** That's a Mac's own. `screen` answers that it's off.
 
-What has been run on Linux: the unit tests, and the helper end to end in an Ubuntu container, installed by its script into Claude Code, paired over sshd, reached as the app reaches it, with files made and trashed, terminals driven through tmux and through Rex, and hooks taken in from both. A whole session with Claude Code signed in has only been run on macOS.
+What has been run on Linux: the unit tests, the Homebrew cask on a machine of GitHub's (installed, reinstalled as an upgrade does, and uninstalled), and the helper end to end in an Ubuntu container, installed by its script into Claude Code, paired over sshd, reached as the app reaches it, with files made and trashed, terminals driven through tmux and through Rex, and hooks taken in from both. A whole session with Claude Code signed in has only been run on macOS.
 
 ## Windows
 

@@ -1,0 +1,47 @@
+# Tries the Homebrew cask on Linux, where nobody has a desk to try it at: installed from the tap as
+# anyone would, looked at, reinstalled as an upgrade does, and uninstalled. Run by hand, after a
+# release: it installs what the tap has. No Claude Code is signed in here, so no session runs.
+name: brew-linux
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Claude Code, by its own installer
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version
+      - name: Homebrew, as the machine has it
+        run: |
+          test -x /home/linuxbrew/.linuxbrew/bin/brew
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          /home/linuxbrew/.linuxbrew/bin/brew --version
+      # By its full name, as the README has it: that is also what Homebrew takes as trusting the cask.
+      - name: Install the cask from the tap
+        run: brew install lorpaves/venes/venes
+      - name: What it left
+        run: |
+          echo "venes is: $(command -v venes)"
+          venes version
+          claude plugin list
+          venes status
+          echo kept > "$HOME/.venes/kept-through-an-upgrade"
+      # An upgrade only stops the helper, so phones stay paired. Linux's ps once hid that it was one.
+      - name: Reinstall, as an upgrade does
+        run: |
+          brew reinstall venes 2>&1 | tee /tmp/reinstall.log
+          venes version
+          if grep -q "Deleted" /tmp/reinstall.log; then echo "the reinstall took Venes off whole"; exit 1; fi
+          test -f "$HOME/.venes/kept-through-an-upgrade"
+      - name: Uninstall
+        run: |
+          brew uninstall venes
+          if command -v venes; then echo "venes is still on the PATH"; exit 1; fi
+          claude plugin list
+          if pgrep -fl "venes.mjs daemon"; then echo "the helper is still running"; exit 1; fi
+          if [ -e "$HOME/.venes" ]; then echo "~/.venes is still there"; exit 1; fi

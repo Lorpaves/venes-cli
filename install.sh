@@ -53,10 +53,10 @@ command="~/.venes/venes"
 if [ -n "${HOMEBREW_PATH:-}" ]; then command="venes"; fi
 started=""
 if [ -n "$plugin" ] && [ -f "$plugin/cli/venes.mjs" ] && node "$plugin/cli/venes.mjs" setup; then started=yes; fi
-# On Linux there's no Homebrew to do it, so the command is linked where Claude Code's own is, when
-# that folder is on the PATH and has no other `venes` in it. Uninstalling takes the link away.
+# On Linux without Homebrew there's nothing to do that, so the command is linked where Claude Code's
+# own is, when that folder is on the PATH and has no other `venes` in it. Uninstalling takes the link away.
 link="$HOME/.local/bin/venes"
-if [ "$(uname -s)" = Linux ] && [ -n "$started" ] && [ -d "$HOME/.local/bin" ]; then
+if [ "$(uname -s)" = Linux ] && [ -z "${HOMEBREW_PATH:-}" ] && [ -n "$started" ] && [ -d "$HOME/.local/bin" ]; then
   if [ ! -e "$link" ] || [ "$(readlink "$link" 2>/dev/null)" = "$HOME/.venes/venes" ]; then
     ln -sf "$HOME/.venes/venes" "$link"
     case ":$PATH:" in *":$HOME/.local/bin:"*) command="venes" ;; esac

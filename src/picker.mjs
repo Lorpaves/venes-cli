@@ -11,6 +11,11 @@ const OPEN_KEY = 'M-p';
 const THIS_SESSION_KEY = 's';
 const THIS_SESSION_HINT = /\bs to use this session only\b/;
 const HIGHLIGHTED_ROW = /^\s*❯\s*(\d+)\.\s+(.*?)\s*$/;
+// Since Claude Code 2.1.325 the models past the first few are kept under a row of their own, More
+// models, which has no number. Enter unfolds it, and the footer says so while it's the row pointed at:
+// there, and only there, Enter isn't the key that saves a default.
+const FOLD_ROW = /^\s*❯\s*([▸▾])\s+(.*?)\s*$/;
+const FOLD_HINT = /\bEnter to (expand|collapse)\b/;
 const EFFORT_LINE = /\b(low|medium|high|xhigh|max) effort\b.*to adjust/i;
 const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CURRENT_MARK = ' ✔';
@@ -27,16 +32,21 @@ const failed = () => new HelperError('picker_failed', 'The terminal\'s model pic
 // screen that dialogs are looked for in, and the lowest marker is the picker's, because the prompt
 // goes while it's open and only a message further up could look the same.
 export function readPicker(screen) {
-  if (!THIS_SESSION_HINT.test(bottomOf(screen).split(/\s+/).join(' '))) return undefined;
+  const footer = bottomOf(screen).split(/\s+/).join(' ');
   const lines = screen.split('\n');
-  const row = lines.findLast(line => HIGHLIGHTED_ROW.test(line))?.match(HIGHLIGHTED_ROW);
+  const pointed = lines.findLast(line => HIGHLIGHTED_ROW.test(line) || FOLD_ROW.test(line));
+  const fold = pointed?.match(FOLD_ROW);
+  // The row the rest are folded under, told by what its footer says of Enter.
+  if (fold) return FOLD_HINT.test(footer) ? { fold: footer.match(FOLD_HINT)[1] === 'expand' ? 'closed' : 'open', text: fold[2] } : undefined;
+  if (!THIS_SESSION_HINT.test(footer)) return undefined;
+  const row = pointed?.match(HIGHLIGHTED_ROW);
   if (!row) return undefined;
   const effort = lines.findLast(line => EFFORT_LINE.test(line))?.match(EFFORT_LINE)[1].toLowerCase();
   return { number: Number(row[1]), text: row[2], effort };
 }
 
-const isOnRow = ({ text }, label) => text === label || text.startsWith(`${label} `);
-const isOnCurrentRow = ({ text }) => text.split(/\s{2,}/)[0].endsWith(CURRENT_MARK);
+const isOnRow = ({ number, text }, label) => number !== undefined && (text === label || text.startsWith(`${label} `));
+const isOnCurrentRow = ({ number, text }) => number !== undefined && text.split(/\s{2,}/)[0].endsWith(CURRENT_MARK);
 
 async function waitFor(session, isDone, { limit, check }) {
   const end = Date.now() + limit;
@@ -56,10 +66,20 @@ async function press(session, key, isBlocked, hasMoved, timing) {
 
 async function moveToRow(session, start, { label, number }, isBlocked, timing) {
   let picker = start;
+  // The numbered row it was last on, which says which way the row is from the one the rest are folded under.
+  let last;
   for (let step = 0; step < MOST_ROWS; step++) {
     if (isOnRow(picker, label)) return picker;
+    if (picker.fold) {
+      const isBelow = last === undefined || last < number;
+      // Unfolded with Enter, which the screen was just read to say unfolds here and saves nothing.
+      if (isBelow && picker.fold === 'closed') picker = await press(session, 'Enter', isBlocked, next => next.fold === 'open', timing);
+      else picker = await press(session, isBelow ? 'Down' : 'Up', isBlocked, next => !next.fold, timing);
+      continue;
+    }
     const { number: from } = picker;
     if (from === number) break;
+    last = from;
     picker = await press(session, from < number ? 'Down' : 'Up', isBlocked, next => next.number !== from, timing);
   }
   throw failed();
@@ -69,7 +89,7 @@ async function moveToEffort(session, start, effort, isBlocked, timing) {
   let picker = start;
   for (let step = 0; step < EFFORT_ORDER.length; step++) {
     if (picker.effort === effort) return picker;
-    if (!picker.effort) throw failed();
+    if (!picker.effort || picker.fold) throw failed();
     const { effort: from } = picker;
     const key = EFFORT_ORDER.indexOf(from) < EFFORT_ORDER.indexOf(effort) ? 'Right' : 'Left';
     picker = await press(session, key, isBlocked, next => next.effort !== from, timing);
@@ -82,7 +102,9 @@ async function choose(session, { row, effort }, isBlocked, timing) {
   if (row) picker = await moveToRow(session, picker, row, isBlocked, timing);
   // Pressing the key on any other row would switch the model as well.
   else if (!isOnCurrentRow(picker)) throw failed();
-  if (effort) await moveToEffort(session, picker, effort, isBlocked, timing);
+  if (effort) picker = await moveToEffort(session, picker, effort, isBlocked, timing);
+  // The key is for a model's row, which this has to be.
+  if (picker.fold) throw failed();
   refuseIfRequested(isBlocked);
   await pressKey(session, THIS_SESSION_KEY);
   await waitFor(session, open => !open, timing);

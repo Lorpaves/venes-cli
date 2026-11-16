@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
+import path from 'node:path';
 import readlinePromises from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -13,12 +14,14 @@ import { MARKETPLACE, PLUGIN_ID, claudeConfigDir, isPluginInstalled, uninstall a
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
-  START_SSH, WAY_STEPS, addPairingKey, authorizedKeysFile, defaultWay, enrollPhone, findTmux, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName,
+  START_SSH, WAY_STEPS, addPairingKey, addPairingLine, authorizedKeysFile, defaultWay, enrollPhone, findTmux, hasPairingKey, isPortOpen, knownHostKey, macName,
+  pairingLine, pairingParts, phoneCommand,
   makeNonce, makeOneTimeKey, pairingLink, pairingWays, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink, wayNote,
 } from '../src/pairing.mjs';
 import { choose } from '../src/choice.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAccount, tailnetAddress } from '../src/rex.mjs';
-import { pairingHost, readUpload, tailnetAddressOf, tailscaleStatus } from '../src/ssh.mjs';
+import { localName, pairingHost, readUpload, tailnetAddressOf, tailscaleStatus } from '../src/ssh.mjs';
+import { askedOverSSH, firewallNote, networksShutOut, windowsCommand } from '../src/winssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
@@ -268,8 +271,13 @@ const commands = {
   // takes Rex when that works, and SSH otherwise, as `--rex` and `--ssh` pick one outright.
   async pair(args) {
     writeLauncher(paths);
-    process.env.PATH = `${process.env.PATH}:${REX_FOLDER}`;
     const port = Number(process.env.VENES_SSH_PORT || 22);
+    // On Windows there's one way in so far, over SSH, and no terminal the app could type into.
+    if (isWindows) {
+      await pairOverSSH({ id: 'ssh', state: 'ready' }, port, { isTerminal: !!(process.stdin.isTTY && process.stdout.isTTY), needsTmux: false });
+      return;
+    }
+    process.env.PATH = `${process.env.PATH}:${REX_FOLDER}`;
     const asked = args.includes('--ssh') ? 'ssh' : args.includes('--rex') ? 'rex' : undefined;
     const rexInstalled = isRexInstalled();
     const ways = pairingWays({
@@ -288,8 +296,27 @@ const commands = {
   },
   // What the one-time key in authorized_keys runs. It takes one line, the phone's public key.
   async enroll([nonce]) {
-    enrollPhone(authorizedKeysFile(), nonce, await readLine(process.stdin));
+    // On Windows the one-time key can outlast its five minutes, where taking it out needs an
+    // administrator, so what says the pairing is still open is kept beside the helper.
+    if (isWindows && !takePairing(nonce)) throw new Error('This code has expired. Run pair again for a new one.');
+    enrollPhone(authorizedKeysFile(), nonce, await readLine(process.stdin), phoneCommand(paths.launcher));
     console.log('ok');
+  },
+  // What a phone's key runs on Windows, whatever the phone asked for, which sshd leaves in the
+  // environment: the two things the app asks, and nothing else.
+  async ssh() {
+    const asked = askedOverSSH(process.env.SSH_ORIGINAL_COMMAND);
+    if (!asked) throw new Error('This key only reaches Venes.');
+    await commands[asked[0]]([]);
+  },
+  // Run as administrator by `pair`, when it couldn't itself write where Windows keeps administrators'
+  // keys. It adds one line, and only one that is a pairing's: a key that can do nothing but enroll a
+  // phone with this helper.
+  async 'add-key'([encoded]) {
+    const line = Buffer.from(encoded ?? '', 'base64url').toString();
+    const parts = pairingParts(line);
+    if (!parts || line !== pairingLine(parts.publicKey, windowsCommand(paths.launcher, 'enroll', parts.nonce), parts.nonce)) throw new Error('Not a pairing\'s key.');
+    addPairingLine(authorizedKeysFile(), line);
   },
   library: () => withClient(async client => {
     print(await client.request('library'));
@@ -404,6 +431,51 @@ async function pairThroughRex(way, isTerminal) {
   return undefined;
 }
 
+// A pairing that's open, on Windows: a file beside the helper that says until when. The one-time key
+// can stay in an administrator's keys past its time there, and does nothing once this is gone.
+const pairingMarker = nonce => path.join(paths.home, 'pairings', nonce);
+
+function openPairing(nonce) {
+  const folder = path.dirname(pairingMarker(nonce));
+  // One pairing at a time: whatever an earlier one left is done with.
+  fs.rmSync(folder, { recursive: true, force: true });
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(pairingMarker(nonce), String(Date.now() + PAIRING_LIMIT_MS));
+}
+
+function closePairing(nonce) {
+  for (const file of [pairingMarker(nonce), `${pairingMarker(nonce)}.done`]) fs.rmSync(file, { force: true });
+}
+
+// Whether the pairing is still open, which asking closes: a code works once. What's left says it was used.
+function takePairing(nonce) {
+  if (!/^[A-Za-z0-9_-]+$/.test(nonce ?? '')) return false;
+  let until = 0;
+  try {
+    until = Number(fs.readFileSync(pairingMarker(nonce), 'utf8'));
+    fs.rmSync(pairingMarker(nonce), { force: true });
+  } catch {
+    return false;
+  }
+  if (!(Date.now() < until)) return false;
+  fs.writeFileSync(`${pairingMarker(nonce)}.done`, '');
+  return true;
+}
+
+// Has Windows ask the person to let one line be added to the administrators' keys, by a copy of this
+// run as administrator. Whether it was added.
+function addKeyAsAdministrator(line) {
+  const quoted = value => `'${value.replace(/'/g, "''")}'`;
+  const list = `"${fileURLToPath(import.meta.url)}" add-key ${Buffer.from(line).toString('base64url')}`;
+  const script = `try { $run = Start-Process -Verb RunAs -Wait -PassThru -WindowStyle Hidden -FilePath ${quoted(process.execPath)} -ArgumentList ${quoted(list)}; exit $run.ExitCode } catch { exit 1 }`;
+  return spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore', windowsHide: true }).status === 0;
+}
+
+// Where OpenSSH Server is added, in Windows' Settings.
+function openOptionalFeatures() {
+  spawn('cmd.exe', ['/c', 'start', 'ms-settings:optionalfeatures'], { stdio: 'ignore', windowsHide: true }).on('error', () => {});
+}
+
 // A Mac without Rex is reached over SSH, which needs Remote Login. In a terminal, that is waited for
 // while the person turns it on. `needsTmux` is for a way picked as tmux, which can't be used without it.
 async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
@@ -413,13 +485,14 @@ async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
     if (!isTerminal) throw new Error(`${first}${isRexInstalled() ? ' Or turn on Serve over Tailscale in Rex.' : ''}`);
     console.log(`${WAY_STEPS.ssh.off} Waiting for it to be on…\n`);
     if (isMac) openSharingSettings();
+    if (isWindows) openOptionalFeatures();
     if (!(await waitFor(() => isPortOpen(port)))) throw new Error(`${isMac ? 'Remote Login is still off' : 'The SSH server still isn\'t answering'}. Run this again once it's on.`);
   }
   const file = authorizedKeysFile();
   const nonce = makeNonce();
   const { seed, publicKey } = makeOneTimeKey();
   const tailscale = await tailscaleStatus();
-  const host = pairingHost(tailscale, localHostName());
+  const host = pairingHost(tailscale, await localName());
   // All of this can fail, so it comes before anything is added to authorized_keys.
   const link = pairingLink({
     host, port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
@@ -427,8 +500,32 @@ async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
   const code = renderQR(qrModules(link));
   // An override has to reach the command too, since sshd runs it with a clean environment.
   const prefix = process.env.VENES_AUTHORIZED_KEYS ? `VENES_AUTHORIZED_KEYS='${file}' ` : '';
-  addPairingKey(file, publicKey, `${prefix}'${paths.launcher}' enroll ${nonce}`, nonce);
-  const cleanUp = () => removePairingKey(file, nonce);
+  const command = isWindows ? windowsCommand(paths.launcher, 'enroll', nonce) : `${prefix}'${paths.launcher}' enroll ${nonce}`;
+  if (isWindows) openPairing(nonce);
+  try {
+    // On Windows a pairing that never finished can have left its key behind, which goes now.
+    if (isWindows) addPairingLine(file, pairingLine(publicKey, command, nonce));
+    else addPairingKey(file, publicKey, command, nonce);
+  } catch (error) {
+    // An administrator's keys are in a file that a terminal not opened as administrator can't touch.
+    if (!isWindows || !['EPERM', 'EACCES'].includes(error.code)) throw error;
+    console.log('Windows keeps an administrator\'s SSH keys in a file only an administrator can change. It will ask to let Node.js make changes '
+      + 'to this computer: that is this, adding a key for the phone to that file.\n');
+    if (!addKeyAsAdministrator(pairingLine(publicKey, command, nonce))) {
+      closePairing(nonce);
+      throw new Error('The key wasn\'t added. Run this again and answer Yes when Windows asks, or run it in a terminal opened as administrator.');
+    }
+  }
+  const cleanUp = () => {
+    if (isWindows) closePairing(nonce);
+    try {
+      removePairingKey(file, nonce);
+    } catch {
+      // Left where it is, on Windows, where it can do nothing once the pairing is closed.
+    }
+  };
+  // Windows says a phone is enrolled beside the helper, since the keys may not be this terminal's to read.
+  const isPaired = () => (isWindows ? fs.existsSync(`${pairingMarker(nonce)}.done`) : !hasPairingKey(file, nonce));
   // SIGHUP is what closing the terminal window sends.
   for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
     process.on(signal, () => { cleanUp(); process.exit(130); });
@@ -438,10 +535,13 @@ async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
     ? `The phone reaches this ${computer} on your tailnet: sign in to Tailscale in the app when it asks.`
     : `Tailscale is off on this ${computer}, so the phone can only reach it on this network. Turn Tailscale on to reach it from anywhere.`;
   const tmux = needsTmux ? '\n\nRun Claude Code inside tmux, so the app can type into it: tmux new -A -s cc' : '';
-  console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes. ${reach}${tmux}\n`);
+  const windows = isWindows ? '\n\nOn Windows the app follows a session and answers what it asks. It can\'t type into one yet.' : '';
+  const shut = isWindows ? firewallNote(networksShutOut()) : '';
+  console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes. ${reach}${tmux}${windows}${shut ? `\n\n${shut}` : ''}\n`);
   const deadline = Date.now() + PAIRING_LIMIT_MS;
   while (Date.now() < deadline) {
-    if (!hasPairingKey(file, nonce)) {
+    if (isPaired()) {
+      if (isWindows) closePairing(nonce);
       console.log('Paired.');
       return;
     }

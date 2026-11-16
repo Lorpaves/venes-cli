@@ -24,3 +24,8 @@ jobs:
       - name: Smoke
         timeout-minutes: 5
         run: node test/smoke.mjs
+      # The unit tests that are of Windows, or the same on any system. The rest were written for a Mac.
+      - name: Unit tests that hold on Windows
+        if: ${{ matrix.os == 'windows-latest' }}
+        timeout-minutes: 5
+        run: node --test test/unit/winssh.test.mjs test/unit/qr.test.mjs test/unit/plugin.test.mjs

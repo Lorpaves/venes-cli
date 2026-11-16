@@ -8,6 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../../src/paths.mjs';
 import { launcherScript, writeLauncher } from '../../src/setup.mjs';
 
+// What's tried here of the launcher and of hook.sh is a Mac's and Linux's: Windows has its own of each,
+// which test/smoke.mjs runs.
+const posix = { skip: process.platform === 'win32' };
+
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const hookScript = path.join(root, 'scripts/hook.sh');
 const readJson = file => JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
@@ -17,12 +21,12 @@ function withTempDir(run) {
   try { return run(dir); } finally { fs.rmSync(dir, { recursive: true }); }
 }
 
-test('the launcher needs nothing from PATH and passes its arguments on', () => {
+test('the launcher needs nothing from PATH and passes its arguments on', posix, () => {
   const script = launcherScript({ home: '/h/.venes' }, '/opt/homebrew/bin/node', "/it's/venes.mjs");
   assert.ok(script.includes(`VENES_HOME='/h/.venes' exec '/opt/homebrew/bin/node' '/it'\\''s/venes.mjs' "$@"`));
 });
 
-test('the launcher is written executable', () => {
+test('the launcher is written executable', posix, () => {
   withTempDir(dir => {
     const paths = helperPaths(path.join(dir, 'h'));
     writeLauncher(paths);
@@ -47,7 +51,7 @@ function runHook(dir, mode, { launcher }) {
   return { ...result, calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n') : [] };
 }
 
-test('the hook prints nothing and succeeds when the helper is down', () => {
+test('the hook prints nothing and succeeds when the helper is down', posix, () => {
   withTempDir(dir => {
     const result = runHook(dir, 'fast', { launcher: true });
     assert.equal(result.status, 0);
@@ -56,7 +60,7 @@ test('the hook prints nothing and succeeds when the helper is down', () => {
   });
 });
 
-test('a session start sets the helper up, and any event does while there\'s no launcher yet', () => {
+test('a session start sets the helper up, and any event does while there\'s no launcher yet', posix, () => {
   const setup = `${path.join(root, 'cli/venes.mjs')} setup`;
   withTempDir(dir => assert.deepEqual(runHook(dir, 'session-start', { launcher: true }).calls, [setup]));
   withTempDir(dir => assert.deepEqual(runHook(dir, 'fast', { launcher: false }).calls, [setup], 'after /reload-plugins'));
@@ -72,7 +76,7 @@ test('only PermissionRequest waits, and every hook runs the bundled script', () 
     assert.equal(mode === 'hold', event === 'PermissionRequest', event);
     assert.ok(timeout > 0, event);
   }
-  assert.ok(fs.statSync(hookScript).mode & 0o100);
+  if (process.platform !== 'win32') assert.ok(fs.statSync(hookScript).mode & 0o100);
 });
 
 // One line for three shells. sh and Git Bash become the script and never read on. PowerShell, which
@@ -90,11 +94,11 @@ function runHookLine(dir, { script }) {
   return { status: result.status, ran: fs.existsSync(ran) ? fs.readFileSync(ran, 'utf8').trim().split('\n') : [] };
 }
 
-test('sh becomes the script, whose word is the hook\'s, and never starts Node', { skip: process.platform === 'win32' }, () => {
+test('sh becomes the script, whose word is the hook\'s, and never starts Node', posix, () => {
   withTempDir(dir => assert.deepEqual(runHookLine(dir, { script: true }), { status: 3, ran: ['sh fast'] }));
 });
 
-test('with no script to become, sh stops there', { skip: process.platform === 'win32' }, () => {
+test('with no script to become, sh stops there', posix, () => {
   withTempDir(dir => {
     const { status, ran } = runHookLine(dir, { script: false });
     assert.deepEqual([status !== 0, ran], [true, []]);

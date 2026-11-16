@@ -140,15 +140,20 @@ What has been run on Linux: the unit tests, and the helper end to end in an Ubun
 
 ## Windows
 
-Not finished: **the app can't pair with a Windows computer yet.** What's there is the helper itself and the hooks that tell it of a session.
+Not finished. The helper runs, hooks tell it of a session, and a phone can be paired over SSH to follow sessions and answer what they ask. The app can't type into a session on Windows yet, and **pairing has only been tried by the commands the app sends, not with the app itself.**
 
 - **In WSL.** Claude Code inside WSL is on Linux, and so is the helper: the Linux notes above are the ones that apply. That hasn't been run.
 - **Node.js.** The helper needs `node` on the `PATH`. Claude Code's own installer doesn't bring one.
 - **Hooks.** With [Git for Windows](https://git-scm.com/downloads/win) installed, Claude Code runs a hook in Git Bash, which takes about 0.15 seconds. Without it, Claude Code runs the hook in PowerShell, which takes about a second, twice for each tool Claude uses. So install Git for Windows. Either way a hook that fails never stops a tool: before 0.27.0 it did, on Windows with no Git for Windows.
 - **The helper.** It starts when a session starts, as elsewhere. Its launcher is `%USERPROFILE%\.venes\venes.cmd`, and its two sockets are named pipes.
-- **Not there yet.** Pairing, typing into a session (there's no tmux), the Recycle Bin, the status line, Codex and Antigravity.
+- **Pairing over SSH.** With Windows' own OpenSSH Server: add it in Settings > System > Optional features, then in a terminal opened as administrator, `Start-Service sshd; Set-Service sshd -StartupType Automatic`. Then `%USERPROFILE%\.venes\venes.cmd pair`.
+  - **An administrator's keys.** sshd keeps them in `C:\ProgramData\ssh\administrators_authorized_keys`, which only an administrator can change. In a terminal that wasn't opened as one, Windows asks to let Node.js make changes: that's `pair`, adding the one-time key there. Any other account's keys are in its own `.ssh\authorized_keys`, and nothing is asked.
+  - **The firewall.** Windows lets SSH in only on a network it calls private, and calls a new network public. `pair` says so when that's in the way, and how to change it.
+  - **The phone's key.** sshd on Windows gives a command to `cmd`, which can make nothing of `~/.venes/venes attach`. So the phone's key is tied to `venes.cmd ssh`, which reads what the phone asked for and does it if it's `attach` or `receive`. The key can run nothing else, and can still forward a port.
+  - **The address.** The tailnet's when Tailscale is on, and otherwise the computer's address on its network, which a router can change.
+- **Not there yet.** Typing into a session (there's no tmux, and Rex's server for Windows isn't used), the Recycle Bin, the status line, Codex and Antigravity.
 
-What has been run on Windows: the smoke test (`node test/smoke.mjs`) on Windows 11 on Arm and on GitHub's Windows machines, and Claude Code 2.1.325 with the plugin on Windows 11, with Git for Windows and without, against a stand-in for the model's API: sessions were followed and tools ran.
+What has been run on Windows: the smoke test (`node test/smoke.mjs`) on Windows 11 on Arm and on GitHub's Windows machines; Claude Code 2.1.325 with the plugin on Windows 11, with Git for Windows and without, against a stand-in for the model's API, where sessions were followed and tools ran; and pairing with Windows 11's OpenSSH Server from another computer, in a terminal opened as administrator and in one that wasn't.
 
 ## How it works
 

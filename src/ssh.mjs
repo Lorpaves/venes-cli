@@ -4,8 +4,10 @@
 import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { HelperError } from './errors.mjs';
-import { allowPhone, authorizedKeysFile, isPortOpen, knownHostKey, localHostName } from './pairing.mjs';
-import { isMac } from './platform.mjs';
+import { allowPhone, authorizedKeysFile, isPortOpen, knownHostKey, localHostName, phoneCommand } from './pairing.mjs';
+import { helperPaths } from './paths.mjs';
+import { isMac, isWindows } from './platform.mjs';
+import { outwardAddress } from './winssh.mjs';
 import { MAX_UPLOAD_BYTES, tooLarge } from './uploads.mjs';
 
 const SSH_PORT = 22;
@@ -96,11 +98,18 @@ export async function screenAccess({
 // Lets the phone's key in, and says where to log in with it: by tailnet first, which works from
 // anywhere, then by name on the local network. None while Remote Login is off.
 export async function sshAccess(publicKey, {
-  keys = authorizedKeysFile(), sshOpen = () => isPortOpen(SSH_PORT), status = tailscaleStatus,
+  keys = authorizedKeysFile(), sshOpen = () => isPortOpen(SSH_PORT), status = tailscaleStatus, command = phoneCommand(helperPaths().launcher),
+  local = localName,
 } = {}) {
-  allowPhone(keys, publicKey);
-  const hosts = (await sshOpen()) ? [tailnetAddressOf(await status()), localHostName()].filter(Boolean) : [];
+  allowPhone(keys, publicKey, command);
+  const hosts = (await sshOpen()) ? [tailnetAddressOf(await status()), await local()].filter(Boolean) : [];
   return { user: os.userInfo().username, port: SSH_PORT, hostKey: knownHostKey(), hosts };
+}
+
+// What a phone on the same network calls this computer: a name where the computer answers to one, and
+// on Windows its address there.
+export async function localName() {
+  return isWindows ? (await outwardAddress()) ?? os.hostname() : localHostName();
 }
 
 const badUpload = message => new HelperError('bad_upload', message);

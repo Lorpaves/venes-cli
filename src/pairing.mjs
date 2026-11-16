@@ -9,12 +9,15 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { HelperError } from './errors.mjs';
-import { isMac } from './platform.mjs';
+import { isMac, isWindows } from './platform.mjs';
 import { qrRows } from './qr.mjs';
+import {
+  WINDOWS_START_SSH, isAdministratorsFile, keepToAdministrators, scanHostKey, windowsAuthorizedKeysFile, windowsCommand, windowsHostKeyFile,
+} from './winssh.mjs';
 
 const PAIRING_COMMENT = 'venes-pairing';
 const PHONE_COMMENT = 'venes-phone';
-const HOST_KEY_FILE = '/etc/ssh/ssh_host_ed25519_key.pub';
+const HOST_KEY_FILE = isWindows ? windowsHostKeyFile() : '/etc/ssh/ssh_host_ed25519_key.pub';
 const PHONE_KEY = /^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/;
 const ED25519_PREFIX = 'ssh-ed25519';
 
@@ -25,19 +28,31 @@ function sshString(bytes) {
 }
 
 export function authorizedKeysFile(env = process.env) {
-  return env.VENES_AUTHORIZED_KEYS || path.join(os.homedir(), '.ssh', 'authorized_keys');
+  if (env.VENES_AUTHORIZED_KEYS) return env.VENES_AUTHORIZED_KEYS;
+  return isWindows ? windowsAuthorizedKeysFile() : path.join(os.homedir(), '.ssh', 'authorized_keys');
 }
 
 function readLines(file) {
   try {
-    return fs.readFileSync(file, 'utf8').split('\n').filter(line => line.length > 0);
+    // A file last saved on Windows can end its lines the way Windows does.
+    return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(line => line.length > 0);
   } catch (error) {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
 }
 
+// On Windows who may read a file is kept with the file, so it's written where it is: one moved into
+// its place would take the folder's rules, and sshd reads no keys from a file others can change.
+function writeInPlace(file, text) {
+  const isNew = !fs.existsSync(file);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+  if (isNew && isAdministratorsFile(file)) keepToAdministrators(file);
+}
+
 function writeLines(file, lines) {
+  if (isWindows) return writeInPlace(file, lines.map(line => `${line}\n`).join(''));
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.venes`;
   fs.writeFileSync(temporary, lines.map(line => `${line}\n`).join(''), { mode: 0o600 });
@@ -53,10 +68,30 @@ export function makeOneTimeKey() {
   return { seed, publicKey: `${ED25519_PREFIX} ${blob.toString('base64')}` };
 }
 
+// A command as authorized_keys takes one: between quotes, with any of its own marked.
+const forced = command => `command="${command.replace(/"/g, '\\"')}"`;
+
 export function pairingLine(publicKey, command, nonce) {
-  const options = `command="${command}",restrict`;
-  return `${options} ${publicKey} ${PAIRING_COMMENT}-${nonce}`;
+  return `${forced(command)},restrict ${publicKey} ${PAIRING_COMMENT}-${nonce}`;
 }
+
+// What a pairing's line is made of, for one that has to be checked before it's written: its key and
+// its nonce. Nothing for a line that isn't a pairing's.
+export function pairingParts(line) {
+  const found = line.match(new RegExp(`^command="[^\\n]*",restrict (${ED25519_PREFIX} [A-Za-z0-9+/]+={0,2}) ${PAIRING_COMMENT}-([A-Za-z0-9_-]+)$`));
+  return found ? { publicKey: found[1], nonce: found[2] } : undefined;
+}
+
+// Adds a pairing's line as it is, in place of any left by a pairing that never finished.
+export function addPairingLine(file, line) {
+  const stale = new RegExp(` ${PAIRING_COMMENT}-[A-Za-z0-9_-]+$`);
+  writeLines(file, [...readLines(file).filter(each => !stale.test(each)), line]);
+}
+
+// What a phone's key is tied to on Windows, where sshd gives a command to cmd, which can make nothing
+// of the one the app sends: the helper, which reads what was asked for and does it. Elsewhere a
+// phone's key isn't tied to anything.
+export const phoneCommand = (launcher, platform = process.platform) => (platform === 'win32' ? windowsCommand(launcher, 'ssh') : undefined);
 
 export function addPairingKey(file, publicKey, command, nonce) {
   writeLines(file, [...readLines(file), pairingLine(publicKey, command, nonce)]);
@@ -75,19 +110,20 @@ export function removePairingKey(file, nonce) {
 }
 
 // Takes the phone's key in exchange for the one-time key, which only works this once.
-export function enrollPhone(file, nonce, phoneKey) {
+export function enrollPhone(file, nonce, phoneKey, command = undefined) {
   if (!PHONE_KEY.test(phoneKey)) throw new Error('That is not an Ed25519 public key.');
   if (!removePairingKey(file, nonce)) throw new Error('This pairing has already been used.');
-  allowPhone(file, phoneKey);
+  allowPhone(file, phoneKey, command);
 }
 
 // Lets a phone log in with its own key, once. One that paired through Rex asks for this itself, to
 // send files over SSH: whoever reaches the helper can do as much already.
-export function allowPhone(file, phoneKey) {
+// With a `command`, the key can do nothing but run it.
+export function allowPhone(file, phoneKey, command = undefined) {
   if (typeof phoneKey !== 'string' || !PHONE_KEY.test(phoneKey)) throw new HelperError('bad_key', 'That is not an Ed25519 public key.');
   const lines = readLines(file);
-  if (!lines.some(line => line.startsWith(`${phoneKey} `) || line === phoneKey)) {
-    writeLines(file, [...lines, `${phoneKey} ${PHONE_COMMENT}`]);
+  if (!lines.some(line => line === phoneKey || line.startsWith(`${phoneKey} `) || line.includes(` ${phoneKey} `))) {
+    writeLines(file, [...lines, `${command ? `${forced(command)} ` : ''}${phoneKey} ${PHONE_COMMENT}`]);
   }
 }
 
@@ -112,7 +148,14 @@ export function hostKeyFingerprint(line) {
 }
 
 export function readHostKeyFingerprint(file = process.env.VENES_HOST_KEY || HOST_KEY_FILE) {
-  return hostKeyFingerprint(fs.readFileSync(file, 'utf8'));
+  try {
+    return hostKeyFingerprint(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    // On Windows the file can be an administrator's alone to read, and the server is asked instead.
+    const shown = isWindows && !process.env.VENES_HOST_KEY ? scanHostKey() : undefined;
+    if (!shown) throw error;
+    return hostKeyFingerprint(shown);
+  }
 }
 
 // The interface this computer reaches the rest of the world by, on Linux, which says so itself.
@@ -205,8 +248,8 @@ export function defaultWay(ways) {
   return ways.find(way => way.state === 'ready') ?? ways.find(way => way.state === 'off') ?? ways[0];
 }
 
-// How a Linux system's SSH server is started, which a Mac calls Remote Login.
-export const START_SSH = 'Start the SSH server: `sudo systemctl enable --now ssh` (the service is `sshd` on Fedora and Arch).';
+// How a Linux system's SSH server is started, which a Mac calls Remote Login, and Windows' own.
+export const START_SSH = isWindows ? WINDOWS_START_SSH : 'Start the SSH server: `sudo systemctl enable --now ssh` (the service is `sshd` on Fedora and Arch).';
 
 // What to do to use a way that isn't ready, on Linux.
 const LINUX_WAY_STEPS = {

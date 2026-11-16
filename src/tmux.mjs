@@ -91,6 +91,8 @@ function isClaude(command) {
 // Panes running Claude that haven't sent an event yet: they join the event stream
 // on their next hook, so clients can list them as waiting for activity.
 export async function findClaudePanes(sockets) {
+  // There's no tmux on Windows itself, and its `ps` is another program.
+  if (process.platform === 'win32') return [];
   const { stdout } = await exec('ps', ['-axww', '-o', 'pid=,ppid=,comm='], { timeout: COMMAND_TIMEOUT_MS });
   const children = new Map();
   const claudePids = new Set();

@@ -127,6 +127,6 @@ try {
   try { console.error(fs.readFileSync(paths.logFile, 'utf8').split('\n').slice(-30).join('\n')); } catch { /* no log */ }
 } finally {
   try { launch('stop'); } catch { /* gone already */ }
-  fs.rmSync(work, { recursive: true, force: true, maxRetries: 5 });
+  try { fs.rmSync(work, { recursive: true, force: true, maxRetries: 5 }); } catch { /* still held by something on its way out */ }
 }
 process.exit(failed ? 1 : 0);

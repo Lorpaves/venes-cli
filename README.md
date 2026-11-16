@@ -151,7 +151,7 @@ Not finished. What's there: the helper follows the sessions at the computer, and
 
 `venes-windows` is this plugin with hooks that start Node themselves. A hook takes about 75 ms that way. The plugin under its own name, `venes`, works on Windows too, through a shell: about 0.16 seconds a hook in Git Bash where [Git for Windows](https://git-scm.com/downloads/win) is installed, and about a second in PowerShell where it isn't. Before 0.27.0 a hook failed in PowerShell, which stopped every tool Claude used.
 
-**Pairing.** With Windows' own OpenSSH Server: add it in Settings > System > Optional features, then in a terminal opened as administrator, `Start-Service sshd; Set-Service sshd -StartupType Automatic`. Then `%USERPROFILE%\.venes\venes.cmd pair`.
+**Pairing.** With Windows' own OpenSSH Server: add it in Settings > System > Optional features, then in a terminal opened as administrator, `Start-Service sshd; Set-Service sshd -StartupType Automatic`. Then `cmd /c "%USERPROFILE%\.venes\venes.cmd" pair`, which PowerShell and the older prompt both take: `%USERPROFILE%` alone means nothing to PowerShell, and `~` nothing to the older prompt.
 
 - **An administrator's keys.** sshd keeps them in `C:\ProgramData\ssh\administrators_authorized_keys`, which only an administrator can change. In a terminal that wasn't opened as one, Windows asks to let Node.js make changes: that's `pair`, adding the one-time key there. Any other account's keys are in its own `.ssh\authorized_keys`, and nothing is asked.
 - **The firewall.** Windows lets SSH in only on a network it calls private, and calls a new network public. `pair` says so when that's in the way, and how to change it.

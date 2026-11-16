@@ -186,7 +186,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     forget: async id => { forgotten.push(id); },
     kill: pid => { killed.push(pid); terminal.onKill?.(pid); },
     env: { PATH: '/bin', VENES_HOME: '/h', SECRET: 'x' },
-    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, modelsWait: 200, usageWait: 200, quitLimit: 150, quitCheck: 5, ...timing },
+    timing: { watch: 15, rest: 15, startLimit: 400, startCheck: 5, keySettle: 1, pasteSettle: 1, stepWait: 60, stepCheck: 5, keyLimit: 300, keyCheck: 5, commandLimit: 300, commandSettle: 40, modelsWait: 200, usageWait: 200, quitLimit: 150, quitCheck: 5, ...timing },
   });
   t.after(() => agent.stop());
   const file = transcriptOf(data, ID);
@@ -943,4 +943,52 @@ test('a folder\'s commands are asked of Antigravity once and kept, and one that 
 test('what the protocol lists that isn\'t a command by a name is left out', () => {
   assert.deepEqual(commandsFrom(undefined), []);
   assert.deepEqual(commandsFrom([{ name: '/slashed' }, { name: '' }, { name: 'plan', description: 7 }]), [{ name: 'plan', description: '7', argumentHint: '' }]);
+});
+
+// The list /model opens, as Antigravity 1.5.8 draws it.
+const MODEL_PAGE = [
+  RULE, '>', RULE, 'Switch Model', '  Search:', '  Gemini 4 Argon', '> Gemini 4 Hydrogen  (current)', '  Gemini 3.8 Flash',
+  'Keyboard: ↑/↓ Navigate  enter Select  esc Go Back', bar(''),
+].join('\n');
+
+test('a command that opens a page in the terminal leaves it open for a client that shows pages, to see and work', async t => {
+  const { agent, terminal, store, hook } = setup(t);
+  await hook('SessionStart', {});
+  // The list of commands is up while the line is typed, which isn't something in the way, and Enter opens the page.
+  terminal.onKey = key => { if (key === 'Enter') terminal.screen = MODEL_PAGE; if (key === 'Escape') terminal.screen = IDLE; };
+  assert.deepEqual(await agent.send({ sessionId: ID, text: '/model', clientId: 'c1', pages: true }), { queued: false, page: true });
+  assert.equal(terminal.pasted.at(-1), '/model');
+  assert.notEqual(store.find(ID).status, 'running', 'no turn is waited for');
+  const { page } = await agent.page({ sessionId: ID });
+  const text = page.lines.map(line => line.map(run => run.text).join(''));
+  assert.deepEqual([text[0], text.at(-1)], ['Switch Model', 'Keyboard: ↑/↓ Navigate  enter Select  esc Go Back']);
+  // A message would be typed into its search box, so it's refused while the page is open.
+  await assert.rejects(agent.send({ sessionId: ID, text: 'hello', clientId: 'c2' }), { code: 'dialog_open' });
+  await agent.pageKey({ sessionId: ID, key: 'Down' });
+  await agent.pageText({ sessionId: ID, text: 'flash' });
+  assert.deepEqual([terminal.keys.at(-1), terminal.pasted.at(-1)], ['Down', 'flash']);
+  await assert.rejects(agent.pageKey({ sessionId: ID, key: 'C-c' }), { code: 'bad_key' });
+  await agent.pageClose({ sessionId: ID });
+  assert.equal(terminal.keys.at(-1), 'Escape');
+  assert.deepEqual(await agent.page({ sessionId: ID }), { page: null });
+  await assert.rejects(agent.pageKey({ sessionId: ID, key: 'Enter' }), { code: 'no_page' }, 'with nothing open, Enter would send what\'s in the box');
+});
+
+test('for a client that shows no pages, such a command is closed again and refused', async t => {
+  const { agent, terminal, hook } = setup(t);
+  await hook('SessionStart', {});
+  terminal.onKey = key => { if (key === 'Enter') terminal.screen = MODEL_PAGE; if (key === 'Escape') terminal.screen = IDLE; };
+  await assert.rejects(agent.send({ sessionId: ID, text: '/model', clientId: 'c1' }), { code: 'terminal_only' });
+  assert.equal(terminal.keys.at(-1), 'Escape');
+  assert.equal(terminal.screen, IDLE);
+});
+
+test('a command that only prints something leaves the session waiting, and a file\'s path isn\'t a command', async t => {
+  const { agent, terminal, store, hook } = setup(t);
+  await hook('SessionStart', {});
+  assert.deepEqual(await agent.send({ sessionId: ID, text: '/usage', clientId: 'c1', pages: true }), { queued: false });
+  assert.notEqual(store.find(ID).status, 'running');
+  // A message with a file starts with the file's path, which begins with a slash too.
+  assert.deepEqual(await agent.send({ sessionId: ID, text: 'look', clientId: 'c2', attachments: [{ path: '/tmp/a.png', name: 'a.png' }] }), { queued: false });
+  assert.equal(store.find(ID).status, 'running', 'a message waits for its turn');
 });

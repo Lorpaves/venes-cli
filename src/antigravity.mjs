@@ -25,14 +25,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import {
-  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog,
+  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog, showsPage,
 } from './agyscreen.mjs';
 import { mediaTypeOf, moveToTrash } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
 import { checkedFolder } from './folders.mjs';
 import { HelperError } from './errors.mjs';
 import { choicesOf, chooseRow } from './prompt.mjs';
-import { emptyBox } from './terminal.mjs';
+import { PAGE_KEYS, emptyBox, pageOf as openPageOf } from './terminal.mjs';
 import { VERSION } from './version.mjs';
 import { computer } from './platform.mjs';
 
@@ -81,6 +81,10 @@ const KEY_LIMIT_MS = 2000;
 const KEY_CHECK_MS = 50;
 // A command of the terminal's own said what it did within a second when measured.
 const COMMAND_LIMIT_MS = 6000;
+// How long a command the reader sent is given to open its page or start its turn, as a Claude Code
+// session's is, and how many times Esc is pressed to close a page that opened others.
+const COMMAND_SETTLE_MS = 1500;
+const PAGE_CLOSE_PRESSES = 3;
 // How long the models Antigravity lists are kept, and how long it's given to list them.
 const MODELS_LIFETIME_MS = 10 * 60_000;
 const MODELS_LIMIT_MS = 20_000;
@@ -625,7 +629,7 @@ export class Antigravity {
     this.#timing = {
       watch: WATCH_MS, rest: REST_CHECK_MS, startLimit: START_LIMIT_MS, startCheck: START_CHECK_MS, keySettle: KEY_SETTLE_MS,
       pasteSettle: PASTE_SETTLE_MS, stepWait: STEP_WAIT_MS, stepCheck: STEP_CHECK_MS, keyLimit: KEY_LIMIT_MS, keyCheck: KEY_CHECK_MS,
-      commandLimit: COMMAND_LIMIT_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, quitLimit: QUIT_LIMIT_MS, quitCheck: QUIT_CHECK_MS,
+      commandLimit: COMMAND_LIMIT_MS, commandSettle: COMMAND_SETTLE_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, quitLimit: QUIT_LIMIT_MS, quitCheck: QUIT_CHECK_MS,
       boxSettle: BOX_SETTLE_MS, ...timing,
     };
     this.#timer = setInterval(() => this.#lookAtAll(), this.#timing.watch);
@@ -1282,25 +1286,29 @@ export class Antigravity {
     return known;
   }
 
-  async send({ sessionId, text, clientId, lane, attachments = [] }) {
+  async send({ sessionId, text, clientId, lane, attachments = [], pages = false }) {
     const known = await this.#live(sessionId);
-    const message = { clientId, text, lane: lane ?? 'next', attachments };
+    const message = { clientId, text, lane: lane ?? 'next', attachments, pages: pages === true };
     // A turn takes nothing more once it's going: what's sent meanwhile waits for its end.
     if (this.#session(sessionId).turn || this.#store.isBusy(known) || this.#store.pendingFor(known).length) {
       this.#store.hold(known, message);
       return { queued: true };
     }
-    await this.deliver(known, message);
-    return { queued: false };
+    const opened = await this.deliver(known, message);
+    return { queued: false, ...(opened === 'page' && { page: true }) };
   }
 
-  // A message is typed into the terminal, and starts a turn when Antigravity says so.
-  async deliver(known, { text, clientId, attachments = [] }) {
+  // A message is typed into the terminal, and starts a turn when Antigravity says so. A command is one too,
+  // and can open a page there instead, as /model does its list: 'page' then, for a client that can show one.
+  async deliver(known, { text, clientId, attachments = [], pages = false }) {
     this.#withPane(known);
     const session = this.#session(known.id);
     if (session.turn) throw new HelperError('send_failed', 'Antigravity is still answering the last message.');
     const typed = typedText(text, attachments);
     if (!typed.trim()) throw new HelperError('bad_text', 'Nothing to send.');
+    // A line that starts with a slash is a command of the terminal's. One with a file before it isn't one:
+    // the file's path is what it starts with.
+    const isCommand = !attachments.length && typeof text === 'string' && text.trimStart().startsWith('/');
     await this.#refuseIfOpen(known);
     const entry = { typed, text, clientId, attachments, at: Date.now() };
     session.typed.push(entry);
@@ -1308,15 +1316,93 @@ export class Antigravity {
       await this.#emptyBox(known);
       await this.#terminal.paste(known, typed);
       await pause(this.#timing.pasteSettle);
-      await this.#refuseIfOpen(known);
+      // A command's own list opens as it's typed, for Enter to take the command from: nothing in the way.
+      if (!isCommand) await this.#refuseIfOpen(known);
       await this.#terminal.pressKey(known, 'Enter');
     } catch (error) {
       session.typed = session.typed.filter(found => found !== entry);
       throw error;
     }
+    if (isCommand) {
+      const left = await this.#afterCommand(known, session, pages);
+      if (left === 'page') {
+        // What's picked on the page is the terminal's doing, and no turn will tell of this line.
+        session.typed = session.typed.filter(found => found !== entry);
+        return left;
+      }
+      // A command that only printed something leaves the terminal waiting, with no turn to wait for. The
+      // line stays known as the client's, for a turn that's slow to start.
+      if (left !== 'turn') return undefined;
+    }
     // Until its hook says the turn has started, so that nothing else is typed behind it.
     this.#store.report(known.id, 'session.status', { status: 'running' });
     session.lastHookAt = Date.now();
+    return undefined;
+  }
+
+  // What a command the reader sent has left: a 'turn', as a command that's a message to a model starts;
+  // a 'page' that it opened in the terminal, for a client that can show one, which any other is refused,
+  // with the page closed again; or nothing, as a command that only prints something leaves.
+  async #afterCommand(known, session, pages) {
+    let screen = '';
+    for (const end = Date.now() + this.#timing.commandSettle; Date.now() < end; await pause(this.#timing.keyCheck)) {
+      if (session.turn) return 'turn';
+      screen = await this.#terminal.readScreen(known).catch(() => '');
+      if (showsPage(screen)) break;
+    }
+    if (session.turn) return 'turn';
+    if (showsPage(screen)) {
+      if (pages) return 'page';
+      await this.#closePage(known);
+      throw new HelperError('terminal_only', 'That command only works at the terminal.');
+    }
+    return isIdle(screen) ? undefined : 'turn';
+  }
+
+  // Esc, for as long as a page is what's open: with nothing open it would stop a turn.
+  async #closePage(known) {
+    for (let press = 0; press < PAGE_CLOSE_PRESSES; press++) {
+      if (!showsPage(await this.#terminal.readScreen(known).catch(() => ''))) return;
+      await this.#terminal.pressKey(known, 'Escape');
+      await pause(this.#timing.keySettle);
+    }
+  }
+
+  // What a command opened in the session's terminal, to see and work from afar, as a Claude Code session's
+  // is: null when nothing is.
+  async page({ sessionId }) {
+    const known = this.#withPane(await this.#live(sessionId));
+    if (!showsPage(await this.#terminal.readScreen(known))) return { page: null };
+    const read = this.#terminal.readStyledScreen ?? this.#terminal.readScreen;
+    // Down to the line that says how to move in it: the bar under that is the terminal's own, not the page's.
+    const screen = (await read(known)).trimEnd();
+    const bar = screen.lastIndexOf('\n');
+    return { page: openPageOf(bar < 0 ? screen : screen.slice(0, bar), () => true) };
+  }
+
+  // A key for what's open, and nothing else: with nothing open, Esc would stop the turn and Enter would
+  // send what's in the box.
+  async pageKey({ sessionId, key }) {
+    if (!PAGE_KEYS.includes(key)) throw new HelperError('bad_key', `${key} isn't a key a page takes.`);
+    const known = this.#withPane(await this.#live(sessionId));
+    if (!showsPage(await this.#terminal.readScreen(known))) throw new HelperError('no_page', 'Nothing is open in the terminal.');
+    await this.#terminal.pressKey(known, key);
+    return {};
+  }
+
+  // Text for a page's search box.
+  async pageText({ sessionId, text }) {
+    if (typeof text !== 'string' || !text) throw new HelperError('bad_text', 'Nothing to type.');
+    const known = this.#withPane(await this.#live(sessionId));
+    if (!showsPage(await this.#terminal.readScreen(known))) throw new HelperError('no_page', 'Nothing is open in the terminal.');
+    await this.#terminal.paste(known, text);
+    return {};
+  }
+
+  // Closes what's open, as the reader leaves it.
+  async pageClose({ sessionId }) {
+    await this.#closePage(this.#withPane(await this.#live(sessionId)));
+    return {};
   }
 
   // Esc, as at the Mac: on a prompt it says no, and in a turn it stops it. Nothing tells of either,

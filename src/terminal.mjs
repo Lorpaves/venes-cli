@@ -201,12 +201,13 @@ export const sendText = (session, text, isBlocked) => sendMessage(session, { tex
 // What a command opened, like /mcp's servers or /config's settings, from the edge it opened under
 // to its footer, as runs of text that look alike: null when nothing is open. `screen` has the
 // escape sequences that colour it.
-export function pageOf(screen) {
+// `isOpen` says whether a screen has something open, for a terminal that isn't Claude Code's.
+export function pageOf(screen, isOpen = showsDialog) {
   const rows = screenCells(screen);
   const plain = rows.map(plainText);
   let end = plain.length;
   while (end > 0 && !plain[end - 1].trim()) end -= 1;
-  if (!showsDialog(plain.slice(0, end).join('\n'))) return null;
+  if (!isOpen(plain.slice(0, end).join('\n'))) return null;
   const top = plain.slice(0, end).findLastIndex(line => PAGE_EDGE.test(line));
   const lines = rows.slice(top + 1, end).map(cells => {
     let last = cells.length;
@@ -290,7 +291,7 @@ export function resumeTerminal(env = process.env) {
   return {
     // Windows has no tmux, so without Rex nothing can be started there, which is known before anything is tried.
     canStart: useRex || process.platform !== 'win32',
-    startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, pressKey,
+    startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, readStyledScreen, pressKey,
     paste: (session, text) => backendOf(session).paste(session, text),
     foreground: session => backendOf(session).foreground(session),
     findSession: backend.findSession,

@@ -1551,6 +1551,23 @@ export class Codex {
     });
   }
 
+  // Codex is worked through its server, not a terminal, so no command of it opens a page there.
+  async page() {
+    return { page: null };
+  }
+
+  async pageKey() {
+    throw new HelperError('no_page', 'Nothing is open in the terminal.');
+  }
+
+  async pageText() {
+    throw new HelperError('no_page', 'Nothing is open in the terminal.');
+  }
+
+  async pageClose() {
+    return {};
+  }
+
   // The folder a stored thread ran in, for what works on a folder.
   async folderOf(sessionId) {
     const link = await this.#open({ start: false }).catch(() => undefined);

@@ -9,8 +9,9 @@ export const MODE_IDS = ['default', 'acceptEdits', 'auto', 'plan'];
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const IDLE_HINT = /^\?\s+for shortcuts\b/;
 const BUSY_HINT = /^esc to cancel\b/;
-// The line under a list of choices, which says how to move in it.
-const NAVIGATE = /^\s*↑\/↓\s+Navigate\b/;
+// The line under a list of choices, which says how to move in it. A page a command opens, as /model's
+// list is, has "Keyboard:" before it.
+const NAVIGATE = /^\s*(?:Keyboard:\s*)?↑\/↓\s+Navigate\b/;
 const ROW = /^\s*(>\s*)?(\d+)\.\s+(\S.*?)\s*$/;
 // The rule across the screen that a prompt opens under.
 const EDGE = /^\s*─{20,}\s*$/;
@@ -88,6 +89,17 @@ export function showsDialog(screen) {
   let end = lines.length - 2;
   while (end >= 0 && !lines[end].trim()) end -= 1;
   return Boolean(readPrompt(screen)) || (end >= 0 && NAVIGATE.test(lines[end])) || TRUST_QUESTION.test(lines.slice(-20).join('\n'));
+}
+
+// Whether a page is open that a command of the terminal's own opened, as /model's list of models is, or
+// the list of commands that opens as one is typed: a list to move in, with a line under it that says
+// how. Not a prompt that asks whether something may be done, and not the question about a folder.
+export function showsPage(screen) {
+  if (readPrompt(screen) || TRUST_QUESTION.test(linesOf(screen).slice(-20).join('\n'))) return false;
+  const lines = linesOf(screen);
+  let end = lines.length - 2;
+  while (end >= 0 && !lines[end].trim()) end -= 1;
+  return end >= 0 && NAVIGATE.test(lines[end]);
 }
 
 // Whether it's waiting for a message, with nothing going and nothing open.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog } from '../../src/agyscreen.mjs';
+import { asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog, showsPage } from '../../src/agyscreen.mjs';
 import { choicesOf } from '../../src/prompt.mjs';
 
 // Screens as Antigravity's terminal drew them (1.5.8), 110 columns across.
@@ -94,4 +94,26 @@ test('what\'s typed in its box is told from the line an empty box shows by the b
     [true, true, false, false, false, false]);
   // With the bar saying nothing and the box empty, as for a moment after a key, nothing's typed. Nor on a screen with no box.
   assert.deepEqual([hasTyped(typed('>')), hasTyped(COMMAND), hasTyped(''), boxOf(COMMAND), boxOf('$ ls')], [false, false, false, undefined, undefined]);
+});
+
+// As Antigravity 1.5.8 draws them: the list /model opens, and the list of commands that opens as one is typed.
+const MODEL_PAGE = [
+  RULE, '>', RULE, 'Switch Model', '  Search:', '          ────────────────────', '  Gemini 4 Argon', '  Gemini 4 Hydrogen',
+  '> Orchestrator (Argon)  (current)', '  Gemini 3.8 Flash', 'Keyboard: ↑/↓ Navigate  enter Select  esc Go Back', bar('', 'auto · Orchestrator (Argon)'),
+].join('\n');
+const COMMANDS_LIST = [
+  RULE, '> /', RULE, '> /add-dir             Add a directory to the workspace', '  /agents              List available custom agents',
+  '   ↓ 45 more', '  ↑/↓ Navigate · enter Select · tab Complete', bar('esc to cancel', 'auto · Orchestrator (Argon)'),
+].join('\n');
+
+test('a page a command opened is a list to move in, and neither a prompt nor the question about a folder', () => {
+  const prompt = [
+    'Command', RULE, 'Requesting permission for:', '   echo three', 'Run this command?', '> 1. Yes, run command', '  2. No, cancel',
+    '  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command', bar('esc to cancel', 'Gemini 4 Hydrogen · xhigh'),
+  ].join('\n');
+  const idle = ['> ', RULE, bar('? for shortcuts', 'Gemini 4 Hydrogen · xhigh')].join('\n');
+  assert.deepEqual([MODEL_PAGE, COMMANDS_LIST, prompt, idle].map(showsPage), [true, true, false, false]);
+  assert.equal(showsPage(['Do you trust the contents of this project?', '', '> Yes, I trust this folder', '  No, exit', '  ↑/↓ Navigate · enter Confirm', bar('', 'x')].join('\n')), false);
+  // Either is something open, which a message mustn't be typed into: the page's line starts "Keyboard:".
+  assert.deepEqual([MODEL_PAGE, COMMANDS_LIST, prompt, idle].map(showsDialog), [true, true, true, false]);
 });

@@ -727,24 +727,25 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return { queued: false, ...(page && { page: true }) };
     },
     // What a command opened in the terminal, to see and work from afar: null when nothing is.
-    page: async ({ sessionId }) => ({ page: await readPage(sessionWithPane(sessionId)) }),
-    pageKey: async ({ sessionId, key }) => {
+    // Another agent's session has pages of its own kind, or none, and answers for them itself.
+    page: forOther('page', async ({ sessionId }) => ({ page: await readPage(sessionWithPane(sessionId)) })),
+    pageKey: forOther('pageKey', async ({ sessionId, key }) => {
       const session = sessionWithPane(sessionId);
       await typing(session.id, () => pressPageKey(session, key));
       return {};
-    },
-    pageText: async ({ sessionId, text }) => {
+    }),
+    pageText: forOther('pageText', async ({ sessionId, text }) => {
       if (typeof text !== 'string' || !text) throw new HelperError('bad_text', 'Nothing to type.');
       const session = sessionWithPane(sessionId);
       await typing(session.id, () => typeOnPage(session, text));
       return {};
-    },
+    }),
     // Closes what's open, as the reader leaves it.
-    pageClose: async ({ sessionId }) => {
+    pageClose: forOther('pageClose', async ({ sessionId }) => {
       const session = sessionWithPane(sessionId);
       await typing(session.id, () => closePage(session));
       return {};
-    },
+    }),
     cancel: msg => {
       const taken = store.takeHeld(store.get(msg.sessionId), msg.clientId);
       // Its files go back in the composer, to go with another message or be taken out.

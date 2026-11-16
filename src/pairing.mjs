@@ -238,7 +238,7 @@ export const WAY_STEPS = !isMac ? LINUX_WAY_STEPS : {
 
 // Where tmux is, looking where Homebrew puts it too.
 export function findTmux(env = process.env) {
-  const folders = [...(env.PATH ?? '').split(':'), '/opt/homebrew/bin', '/usr/local/bin'];
+  const folders = [...(env.PATH ?? '').split(path.delimiter), '/opt/homebrew/bin', '/usr/local/bin'];
   return folders.map(folder => path.join(folder, 'tmux')).find(file => {
     try {
       fs.accessSync(file, fs.constants.X_OK);

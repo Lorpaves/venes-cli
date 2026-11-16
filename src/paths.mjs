@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pluginFolder } from './agyhooks.mjs';
+import pipes from './pipename.cjs';
+
+const isWindows = process.platform === 'win32';
 
 // Where things downloaded go. A Mac has one folder for it. A Linux desktop says where its own is, which
 // may be named in the person's language, in a file in the home folder.
@@ -22,9 +25,11 @@ export function downloadsFolder({ home = os.homedir(), platform = process.platfo
 export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedir(), '.venes')) {
   return {
     home,
-    hookSocket: path.join(home, 'hook.sock'),
-    clientSocket: path.join(home, 'client.sock'),
-    launcher: path.join(home, 'venes'),
+    // Sockets in the folder, or on Windows the pipes that stand in for them.
+    hookSocket: isWindows ? pipes.pipeName(home, 'hook') : path.join(home, 'hook.sock'),
+    clientSocket: isWindows ? pipes.pipeName(home, 'client') : path.join(home, 'client.sock'),
+    // A shell script, or on Windows a command file, which every shell there can run.
+    launcher: path.join(home, isWindows ? 'venes.cmd' : 'venes'),
     pidFile: path.join(home, 'helper.pid'),
     logFile: path.join(home, 'helper.log'),
     noAutoUpdate: path.join(home, 'no-auto-update'),

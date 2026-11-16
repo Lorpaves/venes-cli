@@ -33,7 +33,8 @@ const SESSION_LABEL = 'Venes';
 export const INSTALL_FOLDER = path.join(os.homedir(), 'Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS');
 
 export function isInstalled() {
-  return process.env.PATH.split(':').some(dir => fs.existsSync(path.join(dir, 'rex')));
+  const name = process.platform === 'win32' ? 'rex.exe' : 'rex';
+  return (process.env.PATH ?? '').split(path.delimiter).some(dir => fs.existsSync(path.join(dir, name)));
 }
 
 // For a helper under test, which must never reach this Mac's own server: the one server it may use,

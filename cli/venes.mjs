@@ -6,7 +6,7 @@ import readlinePromises from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
-import { computer, isMac } from '../src/platform.mjs';
+import { computer, isMac, isWindows } from '../src/platform.mjs';
 import { writeLauncher } from '../src/setup.mjs';
 import { installStatusLine, removeStatusLine, runStatusLine, switchOnStatusLine } from '../src/status.mjs';
 import { MARKETPLACE, PLUGIN_ID, claudeConfigDir, isPluginInstalled, uninstall as uninstallVenes } from '../src/uninstall.mjs';
@@ -77,7 +77,8 @@ async function ensureRunning() {
   if (await isRunning()) return;
   fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   const log = fs.openSync(paths.logFile, 'a');
-  spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon'], { detached: true, stdio: ['ignore', log, log] }).unref();
+  // On Windows a process that's let go would open a window of its own, which this keeps shut.
+  spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon'], { detached: true, stdio: ['ignore', log, log], windowsHide: true }).unref();
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await isRunning()) return;
@@ -135,7 +136,8 @@ const commands = {
     if (isNewer(running?.version, VERSION)) return;
     writeLauncher(paths);
     try {
-      installStatusLine(statusLineOptions());
+      // Not on Windows yet, where the command Claude Code would run is written for another shell.
+      if (!isWindows) installStatusLine(statusLineOptions());
     } catch {
       // The phone shows less of a session, and nothing else changes.
     }

@@ -1,0 +1,32 @@
+# Tries the helper where it can't be tried at a desk: on Windows above all, and on Linux and macOS
+# beside it. No Claude Code is signed in on these machines, so this is the helper's own plumbing: set
+# up, reached by a client, told of a session by the hook's script, and asked and answered a permission.
+name: smoke
+on:
+  push:
+    branches: [windows]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Smoke
+        run: node test/smoke.mjs
+      # How much of the unit tests, which were written on a Mac, already holds on Windows. It's for
+      # reading, and doesn't fail the run.
+      - name: Unit tests on Windows
+        if: ${{ always() && matrix.os == 'windows-latest' }}
+        continue-on-error: true
+        shell: bash
+        run: node --test --test-timeout=120000 test/unit/*.test.mjs 2>&1 | tail -80

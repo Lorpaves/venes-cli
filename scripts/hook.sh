@@ -12,6 +12,16 @@ find_node() {
   done
 }
 
+# On Windows the helper is reached through a named pipe, which curl can't open, so Node does all of
+# this there. Git Bash runs this script, and says so in a variable of its own, which costs nothing to
+# look at anywhere else.
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    node=$(find_node)
+    if [ -n "$node" ]; then exec "$node" "$root/scripts/hook.cjs" "$@"; fi
+    exit 0 ;;
+esac
+
 limit=4
 case "$1" in
   hold) limit=86400 ;; # the terminal dialog stays usable while this waits

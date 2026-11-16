@@ -83,9 +83,17 @@ export function readModelLimits(limits, now = Date.now()) {
   });
 }
 
+// npm, which on Windows is a command file that can't be started as a program is. The script it runs
+// is beside Node there, and Node runs that itself.
+function runNpm(args, options) {
+  if (process.platform !== 'win32') return exec('npm', args, options);
+  const script = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  return exec(process.execPath, [script, ...args], options);
+}
+
 function findOnPath(name) {
-  for (const dir of process.env.PATH.split(':')) {
-    const file = path.join(dir, name);
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    const file = path.join(dir, process.platform === 'win32' ? `${name}.exe` : name);
     try {
       fs.accessSync(file, fs.constants.X_OK);
       return file;
@@ -114,7 +122,7 @@ export class Library {
     fs.mkdirSync(partial, { recursive: true });
     const args = ['install', '--prefix', partial, '--no-audit', '--no-fund', '--ignore-scripts', '--omit=optional', '--omit=peer', `${SDK_PACKAGE}@${SDK_VERSION}`];
     try {
-      await exec('npm', args, { timeout: INSTALL_TIMEOUT_MS, signal: this.#stopping.signal });
+      await runNpm(args, { timeout: INSTALL_TIMEOUT_MS, signal: this.#stopping.signal });
     } catch (error) {
       fs.rmSync(partial, { recursive: true, force: true });
       throw new HelperError('sdk_unavailable', `Couldn't install the Agent SDK: ${error.message}`);

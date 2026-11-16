@@ -10,15 +10,24 @@ const shellQuote = value => `'${value.replace(/'/g, `'\\''`)}'`;
 // path, which disappears on the next node upgrade.
 function nodePath() {
   const dirs = (process.env.PATH ?? '').split(path.delimiter);
-  return dirs.map(dir => path.join(dir, 'node')).find(file => fs.existsSync(file)) ?? process.execPath;
+  const name = process.platform === 'win32' ? 'node.exe' : 'node';
+  return dirs.map(dir => path.join(dir, name)).find(file => fs.existsSync(file)) ?? process.execPath;
 }
 
 // A fixed entry point for a CLI whose real path changes with every plugin version.
 // A command run over SSH gets a minimal PATH without node, so everything is absolute.
-export function launcherScript({ home }, node = nodePath(), cli = CLI) {
+export function launcherScript({ home }, node = nodePath(), cli = CLI, platform = process.platform) {
+  if (platform === 'win32') return windowsLauncher({ home }, node, cli);
   return `#!/bin/sh
 VENES_HOME=${shellQuote(home)} exec ${shellQuote(node)} ${shellQuote(cli)} "$@"
 `;
+}
+
+// The same for Windows, as a command file: cmd runs it, and so do PowerShell and Git Bash by its name.
+// A percent sign in a path would be read as a variable's, so each is doubled.
+export function windowsLauncher({ home }, node, cli) {
+  const plain = value => value.replace(/%/g, '%%');
+  return `@echo off\r\nset "VENES_HOME=${plain(home)}"\r\n"${plain(node)}" "${plain(cli)}" %*\r\n`;
 }
 
 export function writeLauncher(paths) {

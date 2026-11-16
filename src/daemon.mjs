@@ -46,7 +46,7 @@ import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
-import { computer } from './platform.mjs';
+import { computer, isWindows } from './platform.mjs';
 
 export const PROTOCOL_VERSION = 1;
 // What Claude Code sets for its own child processes, and the session that happened to start the
@@ -813,11 +813,14 @@ export function dropParentSession(env) {
 }
 
 export async function startDaemon(paths) {
-  process.env.PATH = [...EXTRA_PATH, process.env.PATH].join(':');
+  process.env.PATH = [...EXTRA_PATH, process.env.PATH].join(path.delimiter);
   dropParentSession(process.env);
   fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   if (await socketIsLive(paths.clientSocket)) throw new HelperError('already_running', 'The helper is already running.');
-  for (const file of [paths.hookSocket, paths.clientSocket]) fs.rmSync(file, { force: true });
+  // A socket left by a helper that was killed is in the way of a new one. A pipe goes with its helper.
+  if (!isWindows) {
+    for (const file of [paths.hookSocket, paths.clientSocket]) fs.rmSync(file, { force: true });
+  }
 
   const store = new SessionStore({ agentParent: readAgentParent });
   // A session missed here comes back with its next hook, but sessions.json outlives this

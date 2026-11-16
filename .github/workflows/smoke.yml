@@ -22,11 +22,5 @@ jobs:
         with:
           node-version: 24
       - name: Smoke
+        timeout-minutes: 5
         run: node test/smoke.mjs
-      # How much of the unit tests, which were written on a Mac, already holds on Windows. It's for
-      # reading, and doesn't fail the run.
-      - name: Unit tests on Windows
-        if: ${{ always() && matrix.os == 'windows-latest' }}
-        continue-on-error: true
-        shell: bash
-        run: node --test --test-timeout=120000 test/unit/*.test.mjs 2>&1 | tail -80

@@ -136,7 +136,7 @@ The helper does on Linux what it does on a Mac, with what a Linux system has:
 - **The account's picture.** `~/.face`, or the one the system keeps for the account, if it's a JPEG or a PNG under a megabyte.
 - **No Screen Sharing.** That's a Mac's own. `screen` answers that it's off.
 
-What has been run on Linux: the unit tests, the Homebrew cask on a machine of GitHub's (installed, reinstalled as an upgrade does, and uninstalled), and the helper end to end in an Ubuntu container, installed by its script into Claude Code, paired over sshd, reached as the app reaches it, with files made and trashed, terminals driven through tmux and through Rex, and hooks taken in from both. A whole session with Claude Code signed in has only been run on macOS.
+What has been run on Linux: the unit tests, the Homebrew cask on a machine of GitHub's (installed, reinstalled as an upgrade does, and uninstalled), and the helper end to end in an Ubuntu container, installed by its script into Claude Code, paired over sshd, reached as the app reaches it, with files made and trashed, terminals driven through tmux and through Rex, and hooks taken in from both. And with the app itself, in an iPhone simulator paired with Ubuntu 24.04 over SSH: sessions of Claude Code (against a stand-in for the model's API), of Codex and of Antigravity (both signed in) were started from the app, typed into through tmux, and asked and answered for permission, with the folder's trust asked first where it wasn't trusted. Not run on Linux: Claude Code signed in to an account, pairing through Rex's Tailscale, and a phone rather than a simulator.
 
 ## Windows
 

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import readlinePromises from 'node:readline/promises';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { computer, isMac, isWindows } from '../src/platform.mjs';
@@ -73,12 +73,47 @@ function isRunning() {
   });
 }
 
+// Starts the helper to run on its own, writing to its log.
+function letHelperGo() {
+  const cli = fileURLToPath(import.meta.url);
+  // On Windows a process started the usual way is handed every handle this one was given, which Node
+  // always asks for there. A helper started in an SSH session would hold that session's pipes, and the
+  // session could never end. What PowerShell's Start-Process starts is handed none. It has nowhere to
+  // write either, so it's told to open the log itself.
+  if (isWindows) {
+    const quoted = value => `'${value.replace(/'/g, "''")}'`;
+    const command = `Start-Process -WindowStyle Hidden -FilePath ${quoted(process.execPath)} -ArgumentList ${quoted(`"${cli}" daemon --log`)}`;
+    const started = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { stdio: 'ignore', windowsHide: true });
+    if (started.status === 0) return;
+  }
+  const log = fs.openSync(paths.logFile, 'a');
+  // On Windows a process that's let go would open a window of its own, which this keeps shut.
+  spawn(process.execPath, [cli, 'daemon'], { detached: true, stdio: ['ignore', log, log], windowsHide: true }).unref();
+}
+
+// What the helper says goes to its log, for one started with nothing to write to. A crash is written
+// there too, before it ends.
+function writeToLog() {
+  const log = fs.openSync(paths.logFile, 'a');
+  const write = (chunk, encoding, done) => {
+    fs.writeSync(log, chunk);
+    (typeof encoding === 'function' ? encoding : done)?.();
+    return true;
+  };
+  process.stdout.write = write;
+  process.stderr.write = write;
+  for (const event of ['uncaughtException', 'unhandledRejection']) {
+    process.on(event, error => {
+      write(`${error?.stack ?? error}\n`);
+      process.exit(1);
+    });
+  }
+}
+
 async function ensureRunning() {
   if (await isRunning()) return;
   fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
-  const log = fs.openSync(paths.logFile, 'a');
-  // On Windows a process that's let go would open a window of its own, which this keeps shut.
-  spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon'], { detached: true, stdio: ['ignore', log, log], windowsHide: true }).unref();
+  letHelperGo();
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await isRunning()) return;
@@ -144,7 +179,8 @@ const commands = {
     if (running && isNewer(VERSION, running.version) && running.quiet !== false) await stopRunningHelper();
     await ensureRunning();
   },
-  async daemon() {
+  async daemon(args = []) {
+    if (args.includes('--log')) writeToLog();
     const daemon = await startDaemon(paths);
     for (const signal of ['SIGINT', 'SIGTERM']) {
       process.on(signal, () => {

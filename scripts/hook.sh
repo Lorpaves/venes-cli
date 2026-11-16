@@ -14,7 +14,8 @@ find_node() {
 
 # On Windows the helper is reached through a named pipe, which curl can't open, so Node does all of
 # this there. Git Bash runs this script, and says so in a variable of its own, which costs nothing to
-# look at anywhere else.
+# look at anywhere else. (Where there's no Git Bash, PowerShell is given the hook's line, can't run its
+# `exec` of this script, and goes on to the Node script named after it.)
 case "${OSTYPE:-}" in
   msys*|cygwin*|win32*)
     node=$(find_node)

@@ -67,16 +67,43 @@ test('only PermissionRequest waits, and every hook runs the bundled script', () 
   const { hooks } = readJson('hooks/hooks.json');
   for (const [event, groups] of Object.entries(hooks)) {
     const { command, timeout } = groups[0].hooks[0];
-    assert.ok(command.startsWith('"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" '), event);
-    assert.equal(command.endsWith(' hold'), event === 'PermissionRequest', event);
+    const mode = command.match(/hook\.sh" ([a-z-]+);/)?.[1];
+    assert.equal(command, hookLine(mode), event);
+    assert.equal(mode === 'hold', event === 'PermissionRequest', event);
     assert.ok(timeout > 0, event);
   }
   assert.ok(fs.statSync(hookScript).mode & 0o100);
 });
 
+// One line for three shells. sh and Git Bash become the script and never read on. PowerShell, which
+// Claude Code gives the line to on Windows with no Git Bash, has no `exec`, says so, and runs the Node
+// script. A hook that fails there stops the tool it was told of, so the line ends well whatever happened.
+const hookLine = mode => `exec "\${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" ${mode}; node "\${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs" ${mode}; exit 0`;
+
+function runHookLine(dir, { script }) {
+  const plugin = path.join(dir, 'plugin');
+  const ran = path.join(dir, 'ran');
+  fs.mkdirSync(path.join(plugin, 'scripts'), { recursive: true });
+  if (script) fs.writeFileSync(path.join(plugin, 'scripts/hook.sh'), `#!/bin/sh\necho "sh $1" >> '${ran}'\nexit 3\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(plugin, 'scripts/hook.cjs'), `require('node:fs').appendFileSync('${ran}', 'node\\n');\n`);
+  const result = spawnSync('/bin/sh', ['-c', hookLine('fast')], { input: '{}', env: { PATH: process.env.PATH, CLAUDE_PLUGIN_ROOT: plugin }, encoding: 'utf8' });
+  return { status: result.status, ran: fs.existsSync(ran) ? fs.readFileSync(ran, 'utf8').trim().split('\n') : [] };
+}
+
+test('sh becomes the script, whose word is the hook\'s, and never starts Node', { skip: process.platform === 'win32' }, () => {
+  withTempDir(dir => assert.deepEqual(runHookLine(dir, { script: true }), { status: 3, ran: ['sh fast'] }));
+});
+
+test('with no script to become, sh stops there', { skip: process.platform === 'win32' }, () => {
+  withTempDir(dir => {
+    const { status, ran } = runHookLine(dir, { script: false });
+    assert.deepEqual([status !== 0, ran], [true, []]);
+  });
+});
+
 test('a model switch is heard, without waiting on the helper for long', () => {
   const { hooks } = readJson('hooks/hooks.json');
-  assert.ok(hooks.PostModelSwitch[0].hooks[0].command.endsWith(' fast'));
+  assert.equal(hooks.PostModelSwitch[0].hooks[0].command, hookLine('fast'));
 });
 
 test('the marketplace lists this plugin from the repository root', () => {

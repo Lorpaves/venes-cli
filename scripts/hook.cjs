@@ -1,7 +1,8 @@
 // Forwards one Claude Code hook event to the Venes helper, on Windows, where the helper is reached
-// through a named pipe that curl can't open. Git Bash runs hook.sh, which hands over to this. It does
-// what that script does elsewhere: with no helper running it prints nothing, so Claude Code carries on
-// as normal, and it always ends well.
+// through a named pipe that curl can't open. With Git for Windows there, Git Bash runs hook.sh, which
+// hands over to this. Without it Claude Code gives the hook's line to PowerShell, which runs this itself.
+// It does what that script does elsewhere: with no helper running it prints nothing, so Claude Code
+// carries on as normal, and it always ends well.
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -37,8 +38,13 @@ process.stdin.on('end', () => {
     },
   }, response => {
     // Only what the helper says when all is well is passed on.
-    if (response.statusCode === 200) response.pipe(process.stdout);
-    else response.resume();
+    if (response.statusCode !== 200) return response.resume();
+    const said = [];
+    response.on('data', chunk => said.push(chunk));
+    // It's JSON, where a letter outside ASCII can be written as its number. That way it reads the same
+    // whatever code page a shell between this and Claude Code, as PowerShell is, takes it to be in.
+    response.on('end', () => process.stdout.write(Buffer.concat(said).toString('utf8')
+      .replace(/[\u0080-\uffff]/g, letter => `\\u${letter.charCodeAt(0).toString(16).padStart(4, '0')}`)));
   });
   request.on('timeout', () => request.destroy());
   // No helper, or one that went: nothing to say.

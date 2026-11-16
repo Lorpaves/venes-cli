@@ -29,6 +29,9 @@ const FIELDS = {
 // Written to a cache to stay an hour or longer, where a maker charges more for that: `_above_1hr`, `_above_12hr`.
 const LONG_WRITE = /^cache_creation_input_token_cost_above_\d+hr$/;
 const OVER = /^input_cost_per_token_above_(\d+)k_tokens$/;
+// The service tiers a maker charges apart for, by the name an agent writes down: Codex's fast modes are
+// `priority` and `ultrafast`.
+const TIERS = ['priority', 'flex', 'ultrafast'];
 
 // `suffix` is what the list ends a price's name with for requests over a size.
 function ratesOf(entry, suffix = '') {
@@ -52,6 +55,15 @@ export function reduced(list) {
     if (!(rates.input >= 0) || !(rates.output >= 0)) continue;
     const size = Object.keys(entry).map(key => OVER.exec(key)?.[1]).find(Boolean);
     if (size) rates.over = { tokens: Number(size) * 1000, ...ratesOf(entry, `_above_${size}k_tokens`) };
+    // A tier's prices, each over the same size where the maker charges more from it.
+    const tiers = {};
+    for (const tier of TIERS) {
+      const own = ratesOf(entry, `_${tier}`);
+      if (!(own.input >= 0) && !(own.output >= 0)) continue;
+      const over = size ? ratesOf(entry, `_above_${size}k_tokens_${tier}`) : {};
+      tiers[tier] = Object.keys(over).length ? { ...own, over: { tokens: Number(size) * 1000, ...over } } : own;
+    }
+    if (Object.keys(tiers).length) rates.tiers = tiers;
     // A name with its maker before it is the model's own for the lookup, unless the list has that too.
     const name = listed.includes('/') ? listed.slice(listed.lastIndexOf('/') + 1) : listed;
     if (name === listed || !(name in prices)) prices[name.toLowerCase()] = rates;
@@ -77,11 +89,15 @@ export function priceFor(prices, model) {
 
 // What one request cost, in dollars: `input` that came from no cache, `cacheRead` that was read from
 // one, `cacheWrite` written to one for minutes and `cacheWriteLong` for an hour or more, and `output`
-// with the reasoning in it, or beside it as `reasoning` where an agent counts that apart. A request of the size at which a maker charges more is charged so whole.
-export function costOf(price, { input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, cacheWriteLong = 0 } = {}) {
+// with the reasoning in it, or beside it as `reasoning` where an agent counts that apart. A request of
+// the size at which a maker charges more is charged so whole. One run at a service `tier` the maker
+// charges apart for is charged at that tier's prices, and at the usual ones where it lists none.
+export function costOf(price, { input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, cacheWriteLong = 0 } = {}, tier = undefined) {
   if (!price) return undefined;
-  const isOver = price.over && input + cacheRead + cacheWrite + cacheWriteLong > price.over.tokens;
-  const rates = isOver ? { ...price, ...price.over } : price;
+  const own = tier ? price.tiers?.[tier] : undefined;
+  const base = own ? { ...price, ...own, over: own.over } : price;
+  const isOver = base.over && input + cacheRead + cacheWrite + cacheWriteLong > base.over.tokens;
+  const rates = isOver ? { ...base, ...base.over } : base;
   const write = rates.cacheWrite ?? rates.input;
   return input * rates.input + output * rates.output + reasoning * (rates.reasoning ?? rates.output) + cacheRead * (rates.cacheRead ?? rates.input)
     + cacheWrite * write + cacheWriteLong * (rates.cacheWriteLong ?? write);

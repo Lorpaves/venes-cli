@@ -369,9 +369,10 @@ T('discovery_and_stream', {}, async r => {
     usage = await r.client.request('usage', {});
     today = usage.agents.find(agent => agent.agent === 'claude');
   }
-  assert.deepEqual([usage.days.length, usage.days.at(-1), usage.scanning], [30, dayOf(Date.now()), false]);
+  assert.deepEqual([usage.days.length, usage.days.at(-1), usage.hours.length, usage.scanning], [90, dayOf(Date.now()), 24, false]);
   assert.ok(today.tokens.output.at(-1) > 0 && today.cost.at(-1) > 0, 'today has the reply, and what it would cost');
-  assert.equal(today.tokens.input.length, 30);
+  assert.ok(today.hourly.tokens.output.slice(-2).some(used => used > 0), 'and so has this hour, or the one before');
+  assert.deepEqual([today.tokens.input.length, today.hourly.cost.length], [90, 24]);
 });
 
 T('approve_from_client', {}, async r => {

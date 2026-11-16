@@ -21,8 +21,10 @@ const WORKER = fileURLToPath(new URL('usage-worker.mjs', import.meta.url));
 const WORKER_TIMEOUT_MS = 60_000;
 const WORKER_BUFFER_BYTES = 8 << 20;
 
-export const DAYS = 30;
-const VERSION = 1;
+export const DAYS = 90;
+export const HOURS = 24;
+const VERSION = 3;
+const HOUR_MS = 60 * 60_000;
 const CHUNK_BYTES = 1 << 20;
 // How many of a transcript's last requests are remembered, to count once one that's written on several
 // lines, which follow each other closely.
@@ -35,6 +37,22 @@ const pad = number => `${number}`.padStart(2, '0');
 export function dayOf(ms) {
   const date = new Date(ms);
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// The hour a moment falls in where this computer is, as YYYY-MM-DDTHH.
+export function hourOf(ms) {
+  return `${dayOf(ms)}T${pad(new Date(ms).getHours())}`;
+}
+
+// The last `count` hours, this one last. On the night the clocks go back there's one fewer, since an
+// hour comes twice by its name.
+export function lastHours(count, now = Date.now()) {
+  const hours = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const hour = hourOf(now - i * HOUR_MS);
+    if (hours.at(-1) !== hour) hours.push(hour);
+  }
+  return hours;
 }
 
 // The last `count` days, today last.
@@ -82,18 +100,27 @@ export function codexTokens(usage = {}) {
   };
 }
 
-// A day's tally for a model: [input, output, cache read, cache written, dollars, tokens with no price].
+// A day's tally for a model, or an hour's: [input, output, cache read, cache written, dollars, tokens
+// with no price].
 const blank = () => [0, 0, 0, 0, 0, 0];
 
-function tally(days, day, model, tokens, prices, sign = 1) {
-  const sum = ((days[day] ??= {})[model] ??= blank());
-  const cost = costOf(priceFor(prices, model), tokens);
-  sum[0] += sign * tokens.input;
-  sum[1] += sign * (tokens.output + (tokens.reasoning ?? 0));
-  sum[2] += sign * tokens.cacheRead;
-  sum[3] += sign * (tokens.cacheWrite + tokens.cacheWriteLong);
-  if (cost === undefined) sum[5] += sign * (tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cacheRead + tokens.cacheWrite + tokens.cacheWriteLong);
-  else sum[4] += sign * cost;
+// Adds what a request used at `at` to `into`: to its day among `days`, and to its hour among `hours`
+// where that's no longer ago than `hoursFrom`, which is as far back as hours are told. `tier` is the
+// service tier it was run at, where the maker charges apart for one.
+function tally(into, at, model, tokens, prices, sign = 1, tier = undefined) {
+  const cost = costOf(priceFor(prices, model), tokens, tier);
+  const all = tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cacheRead + tokens.cacheWrite + tokens.cacheWriteLong;
+  const slots = [(into.days[dayOf(at)] ??= {})];
+  if (at >= into.hoursFrom) slots.push((into.hours[hourOf(at)] ??= {}));
+  for (const slot of slots) {
+    const sum = (slot[model] ??= blank());
+    sum[0] += sign * tokens.input;
+    sum[1] += sign * (tokens.output + (tokens.reasoning ?? 0));
+    sum[2] += sign * tokens.cacheRead;
+    sum[3] += sign * (tokens.cacheWrite + tokens.cacheWriteLong);
+    if (cost === undefined) sum[5] += sign * all;
+    else sum[4] += sign * cost;
+  }
 }
 
 // Calls `visit` with each whole line of `file` from `from` on, and gives where the last whole line
@@ -139,23 +166,28 @@ const ASSISTANT = Buffer.from('"assistant"');
 
 // Reads on in one of Claude Code's transcripts. A request is counted once, by its last word on what it
 // used, however many lines repeat it.
-function readClaude(file, entry, prices, goesOn) {
+function readClaude(file, entry, { prices, goesOn, hoursFrom }) {
   const recent = new Map(entry.recent ?? []);
+  const into = { days: entry.days, hours: (entry.hours ??= {}), hoursFrom };
   entry.offset = eachLine(file, entry.offset, line => {
     if (!line.includes(USAGE) || !line.includes(ASSISTANT)) return;
     const found = claudeEntry(parsed(line));
     if (!found) return;
     const before = found.key && recent.get(found.key);
+    let { tokens } = found;
     if (before) {
-      const [day, model, input, output, cacheRead, cacheWrite, cacheWriteLong] = before;
-      tally(entry.days, day, model, { input, output, cacheRead, cacheWrite, cacheWriteLong }, prices, -1);
+      const [at, model, input, output, cacheRead, cacheWrite, cacheWriteLong] = before;
+      tally(into, at, model, { input, output, cacheRead, cacheWrite, cacheWriteLong }, prices, -1);
       recent.delete(found.key);
+      // Each kind of its tokens comes to the most any of its lines says, as a reply still being
+      // written says less on its first lines than on its last.
+      const said = { input, output, cacheRead, cacheWrite, cacheWriteLong };
+      tokens = Object.fromEntries(Object.entries(tokens).map(([kind, count]) => [kind, Math.max(count, said[kind] ?? 0)]));
     }
-    const day = dayOf(found.at);
-    const { input, output, cacheRead, cacheWrite, cacheWriteLong } = found.tokens;
-    tally(entry.days, day, found.model, found.tokens, prices);
+    const { input, output, cacheRead, cacheWrite, cacheWriteLong } = tokens;
+    tally(into, found.at, found.model, tokens, prices);
     if (found.key) {
-      recent.set(found.key, [day, found.model, input, output, cacheRead, cacheWrite, cacheWriteLong]);
+      recent.set(found.key, [found.at, found.model, input, output, cacheRead, cacheWrite, cacheWriteLong]);
       if (recent.size > RECENT) recent.delete(recent.keys().next().value);
     }
   }, goesOn);
@@ -163,17 +195,20 @@ function readClaude(file, entry, prices, goesOn) {
 }
 
 const RECORD = Buffer.from('"token_usage_record"');
+const SETTINGS = Buffer.from('"thread_settings_applied"');
 const COUNT = Buffer.from('"token_count"');
 const CONTEXT = Buffer.from('"turn_context"');
 
 // Reads on in one of Codex's rollouts. A response's own record of what it used is what counts. A
 // rollout from before Codex wrote those has its running count instead, said again whenever it's asked
-// for, so there a count that hasn't grown is the one before.
-function readCodex(file, entry, prices, goesOn) {
-  entry.counted ??= {};
+// for, so there a count that hasn't grown is the one before. What's used is charged at the service
+// tier the thread was last set to, as its fast modes are: `priority`, `ultrafast`.
+function readCodex(file, entry, { prices, goesOn, hoursFrom }) {
+  const own = { days: entry.days, hours: (entry.hours ??= {}), hoursFrom };
+  const counted = { days: (entry.counted ??= {}), hours: (entry.countedHours ??= {}), hoursFrom };
   entry.offset = eachLine(file, entry.offset, line => {
     const isRecord = line.includes(RECORD);
-    if (!isRecord && !line.includes(COUNT) && !line.includes(CONTEXT)) return;
+    if (!isRecord && !line.includes(COUNT) && !line.includes(CONTEXT) && !line.includes(SETTINGS)) return;
     const record = parsed(line);
     const payload = record?.payload;
     if (!payload || typeof payload !== 'object') return;
@@ -181,19 +216,25 @@ function readCodex(file, entry, prices, goesOn) {
       if (typeof payload.model === 'string') entry.model = payload.model;
       return;
     }
+    if (payload.type === 'thread_settings_applied') {
+      const settings = payload.thread_settings ?? payload.threadSettings;
+      const tier = settings?.service_tier ?? settings?.serviceTier;
+      if (typeof tier === 'string') entry.tier = tier;
+      return;
+    }
     const at = Date.parse(record.timestamp);
     if (!Number.isFinite(at)) return;
     const model = entry.model ?? 'unknown';
     if (record.type === 'token_usage_record' && payload.usage) {
       entry.hasRecords = true;
-      tally(entry.days, dayOf(at), model, codexTokens(payload.usage), prices);
+      tally(own, at, model, codexTokens(payload.usage), prices, 1, entry.tier);
     } else if (record.type === 'event_msg' && payload.type === 'token_count') {
       // The account's limits as Codex last heard them, which come with the count.
       if (payload.rate_limits && (payload.rate_limits.primary || payload.rate_limits.secondary)) entry.limits = { at, ...payload.rate_limits };
       const total = payload.info?.total_token_usage?.total_tokens;
       if (payload.info?.last_token_usage && Number.isFinite(total) && total !== entry.total) {
         entry.total = total;
-        tally(entry.counted, dayOf(at), model, codexTokens(payload.info.last_token_usage), prices);
+        tally(counted, at, model, codexTokens(payload.info.last_token_usage), prices, 1, entry.tier);
       }
     }
   }, goesOn);
@@ -300,14 +341,15 @@ function rowsOf(file, query) {
 // Counts one of Antigravity's conversations, which is a database with a row for each of the model's
 // responses and a row for each step, where the time is. It's small, and a row of it can change, so
 // it's counted whole each time it has changed.
-function readAntigravity(file, entry, prices) {
+function readAntigravity(file, entry, { prices, hoursFrom }) {
   const times = new Map(rowsOf(file, 'select idx, hex(metadata) from steps order by idx').map(antigravityStep).filter(Boolean).map(step => [step.id, step.at]));
-  const days = {};
+  const into = { days: {}, hours: {}, hoursFrom };
   for (const turn of rowsOf(file, 'select idx, hex(data) from gen_metadata order by idx').map(antigravityTurn)) {
     const at = turn && times.get(turn.step);
-    if (at) tally(days, dayOf(at), turn.model ?? 'unknown', turn.tokens, prices);
+    if (at) tally(into, at, turn.model ?? 'unknown', turn.tokens, prices);
   }
-  entry.days = days;
+  entry.days = into.days;
+  entry.hours = into.hours;
 }
 
 function filesUnder(folder, matches, found = []) {
@@ -374,17 +416,20 @@ function stampOf(file, beside) {
 }
 
 // Reads what has been written since the last time, for as long as `budgetMs` allows, and gives each
-// agent's days: `days` are the last thirty, today last, and for each agent `tokens` of each kind and
-// `cost` in dollars are a number a day, with `unpriced`, how many tokens the price list had no model
-// for. `scanning` says there's more to read, which the next call goes on with. `codexLimits` are the
-// limits Codex last wrote down, with `at`, when. A chat that's deleted is still counted, for the days
-// it was used on.
+// agent's count: `days` are the last ninety, today last, and `hours` the last twenty-four, this one
+// last. For each agent `tokens` of each kind and `cost` in dollars are a number a day, and under
+// `hourly` a number an hour, with `unpriced`, how many tokens the price list had no model for.
+// `scanning` says there's more to read, which the next call goes on with. `codexLimits` are the limits
+// Codex last wrote down, with `at`, when. A chat that's deleted is still counted, for the days it was
+// used on.
 export function readUsage({ file, folders = chatFolders(), prices = {}, now = Date.now(), days: count = DAYS, budgetMs = Infinity, clock = Date.now } = {}) {
   const started = clock();
   const goesOn = () => clock() - started < budgetMs;
   const days = lastDays(count, now);
-  const index = new Map(days.map((day, at) => [day, at]));
+  const hours = lastHours(HOURS, now);
   const since = new Date(`${days[0]}T00:00:00`).getTime();
+  // What's as old as the first of the hours told, to the hour.
+  const hoursFrom = Math.floor((now - (HOURS - 1) * HOUR_MS) / HOUR_MS) * HOUR_MS;
   const kept = (file && readKept(file)) || { version: VERSION, files: {} };
   const files = {};
   const waiting = [];
@@ -406,9 +451,18 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
       if (entry.stamp !== found.stamp && (!kind.grows || entry.offset < found.size)) waiting.push({ chat, entry, found });
     }
   }
+  // What's told of is what's no longer ago than the first day and the first hour. The rest is let go.
+  const tallies = entry => [[entry.days, days[0]], [entry.counted, days[0]], [entry.hours, hours[0]], [entry.countedHours, hours[0]]];
+  const prune = entry => {
+    for (const [slots, first] of tallies(entry)) {
+      for (const slot of Object.keys(slots ?? {})) if (slot < first) delete slots[slot];
+    }
+  };
   // What was counted of a chat that's gone since is kept, for as long as it has a day among those shown.
   for (const [chat, entry] of Object.entries(kept.files)) {
-    if (!files[chat] && !fs.existsSync(chat) && Object.keys(entry.days ?? {}).concat(Object.keys(entry.counted ?? {})).some(day => index.has(day))) files[chat] = entry;
+    if (files[chat] || fs.existsSync(chat)) continue;
+    prune(entry);
+    if (Object.keys(entry.days ?? {}).length || Object.keys(entry.counted ?? {}).length) files[chat] = entry;
   }
   // The newest first, which have the days a reader looks at first.
   waiting.sort((a, b) => b.found.at - a.found.at);
@@ -419,7 +473,7 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
       break;
     }
     try {
-      KINDS[entry.agent].read(chat, entry, prices, goesOn);
+      KINDS[entry.agent].read(chat, entry, { prices, goesOn, hoursFrom });
     } catch (error) {
       console.error(`usage: ${chat}: ${error.message}`);
       continue;
@@ -428,6 +482,7 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
     if (goesOn() || !KINDS[entry.agent].grows) entry.stamp = found.stamp;
     else scanning = true;
   }
+  for (const entry of Object.values(files)) prune(entry);
   if (file) {
     try {
       keep(file, { version: VERSION, files });
@@ -436,34 +491,47 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
     }
   }
 
-  const agents = {};
-  let codexLimits;
-  for (const entry of Object.values(files)) {
-    const counted = entry.agent === 'codex' && !entry.hasRecords ? entry.counted ?? {} : entry.days;
-    if (!Object.keys(counted).length && !agents[entry.agent]) {
-      if (entry.limits && (!codexLimits || entry.limits.at > codexLimits.at)) codexLimits = entry.limits;
-      continue;
-    }
-    const sums = (agents[entry.agent] ??= {
-      tokens: { input: days.map(() => 0), output: days.map(() => 0), cacheRead: days.map(() => 0), cacheWrite: days.map(() => 0) },
-      cost: days.map(() => 0), unpriced: 0,
-    });
-    for (const [day, models] of Object.entries(counted)) {
-      const at = index.get(day);
+  const blankSums = slots => ({
+    tokens: { input: slots.map(() => 0), output: slots.map(() => 0), cacheRead: slots.map(() => 0), cacheWrite: slots.map(() => 0) },
+    cost: slots.map(() => 0),
+  });
+  const dayAt = new Map(days.map((day, at) => [day, at]));
+  const hourAt = new Map(hours.map((hour, at) => [hour, at]));
+  // Adds what was counted in each of `counted`'s slots to `sums`, and gives the tokens with no price.
+  const add = (sums, counted, places) => {
+    let unpriced = 0;
+    for (const [slot, models] of Object.entries(counted ?? {})) {
+      const at = places.get(slot);
       if (at === undefined) continue;
-      for (const [input, output, cacheRead, cacheWrite, cost, unpriced] of Object.values(models)) {
+      for (const [input, output, cacheRead, cacheWrite, cost, without] of Object.values(models)) {
         sums.tokens.input[at] += input;
         sums.tokens.output[at] += output;
         sums.tokens.cacheRead[at] += cacheRead;
         sums.tokens.cacheWrite[at] += cacheWrite;
         sums.cost[at] += cost;
-        sums.unpriced += unpriced;
+        unpriced += without;
       }
     }
+    return unpriced;
+  };
+  const rounded = costs => costs.map(cost => Math.round(cost * 10000) / 10000);
+  const agents = {};
+  let codexLimits;
+  for (const entry of Object.values(files)) {
     if (entry.limits && (!codexLimits || entry.limits.at > codexLimits.at)) codexLimits = entry.limits;
+    // A rollout from before Codex wrote a record with each response is counted by its running count.
+    const isCounted = entry.agent === 'codex' && !entry.hasRecords;
+    const byDay = isCounted ? entry.counted : entry.days;
+    if (!Object.keys(byDay ?? {}).length && !agents[entry.agent]) continue;
+    const sums = (agents[entry.agent] ??= { ...blankSums(days), unpriced: 0, hourly: blankSums(hours) });
+    sums.unpriced += add(sums, byDay, dayAt);
+    add(sums.hourly, isCounted ? entry.countedHours : entry.hours, hourAt);
   }
-  for (const sums of Object.values(agents)) sums.cost = sums.cost.map(cost => Math.round(cost * 10000) / 10000);
-  return { days, agents, scanning, ...(codexLimits && { codexLimits }) };
+  for (const sums of Object.values(agents)) {
+    sums.cost = rounded(sums.cost);
+    sums.hourly.cost = rounded(sums.hourly.cost);
+  }
+  return { days, hours, agents, scanning, ...(codexLimits && { codexLimits }) };
 }
 
 const WINDOWS = { 300: 'fiveHour', 10080: 'sevenDay' };
@@ -485,8 +553,9 @@ export function limitsFromRollout(found, now = Date.now()) {
 
 const AGENTS = ['claude', 'codex', 'antigravity'];
 
-// What a client is told: the days, and each agent that has anything to show with its tokens and cost
-// by day, where it keeps count, and its account's `limits`, where it has them. `shown` says which
+// What a client is told: the days and the hours, and each agent that has anything to show with its
+// tokens and cost by day, and under `hourly` by hour, where it keeps count, and its account's `limits`,
+// where it has them. `shown` says which
 // agents the client takes. `limits` are each agent's as it says them now: `{ limits, plan, credits,
 // updatedAt, reading }`.
 export function usageReply({ read, limits = {}, shown = () => true, now = Date.now() }) {
@@ -496,7 +565,7 @@ export function usageReply({ read, limits = {}, shown = () => true, now = Date.n
     if (!used && !said?.limits?.length) return [];
     return [{
       agent,
-      ...(used && { tokens: used.tokens, cost: used.cost, ...(used.unpriced > 0 && { unpriced: used.unpriced }) }),
+      ...(used && { tokens: used.tokens, cost: used.cost, ...(used.hourly && { hourly: used.hourly }), ...(used.unpriced > 0 && { unpriced: used.unpriced }) }),
       ...(said?.limits?.length && { limits: said.limits }),
       ...(said?.plan && { plan: said.plan }),
       ...(said?.credits && { credits: said.credits }),
@@ -504,7 +573,7 @@ export function usageReply({ read, limits = {}, shown = () => true, now = Date.n
     }];
   });
   const isReading = AGENTS.some(agent => limits[agent]?.reading);
-  return { days: read.days, agents, scanning: Boolean(read.scanning || isReading), updatedAt: Math.floor(now / 1000) };
+  return { days: read.days, ...(read.hours && { hours: read.hours }), agents, scanning: Boolean(read.scanning || isReading), updatedAt: Math.floor(now / 1000) };
 }
 
 // How long a read may take before it answers with what it has. The next goes on from there.

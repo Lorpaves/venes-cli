@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dropParentSession, restoreSessions } from '../../src/daemon.mjs';
 import { writeRegistry } from '../../src/registry.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
-import { Library, joinedStatus, libraryPage, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
+import { Library, joinedStatus, libraryPage, readAccountLimits, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -317,6 +317,31 @@ test('the account\'s per-model limits come from a session that runs no hooks, on
   process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits_available: false, rate_limits: null });
   assert.deepEqual(await library.modelLimits(180_000), []);
   assert.equal(opened().length, 2);
+});
+
+test('all the account\'s limits are read the same way, for a list of what\'s used', async t => {
+  const now = Date.parse('2026-11-14T12:00:00Z');
+  const said = {
+    five_hour: { utilization: 24, resets_at: '2026-11-14T18:19:59.992712+00:00' }, seven_day: { utilization: 55.55, resets_at: null },
+    model_scoped: [{ display_name: 'Fable', utilization: 67.26, resets_at: '2026-11-19T06:59:59Z' }, { display_name: 'Old', utilization: 90, resets_at: '2026-11-14T11:59:59Z' }],
+  };
+  assert.deepEqual(readAccountLimits(said, now), [
+    { window: 'fiveHour', percent: 24, resetsAt: Math.floor(Date.parse('2026-11-14T18:19:59.992712+00:00') / 1000) }, { window: 'sevenDay', percent: 55.6 },
+    { name: 'Fable', window: 'sevenDay', percent: 67.3, resetsAt: Math.floor(Date.parse('2026-11-19T06:59:59Z') / 1000) }, { name: 'Old', window: 'sevenDay', percent: 0 },
+  ]);
+  assert.deepEqual(readAccountLimits({ five_hour: { utilization: 3, resets_at: '2026-11-14T11:00:00Z' }, seven_day: { utilization: null } }, now), [{ window: 'fiveHour', percent: 0 }]);
+  for (const none of [undefined, null, {}, 'limits']) assert.deepEqual(readAccountLimits(none, now), []);
+
+  // From the same read as the status sheet's, which one asking soon after shares.
+  const { library, opened } = fakeSdk(t);
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits_available: true, rate_limits: said });
+  const found = await library.accountLimits(now);
+  assert.deepEqual([found.limits.length, found.limits[0].percent, found.updatedAt], [4, 24, Math.floor(now / 1000)]);
+  assert.deepEqual(await library.modelLimits(now + 1000), [{ name: 'Fable', percent: 67.3, resetsAt: Math.floor(Date.parse('2026-11-19T06:59:59Z') / 1000) }, { name: 'Old', percent: 0 }]);
+  assert.equal(opened().length, 1);
+  // An account with none has nothing to say.
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits_available: false, rate_limits: null });
+  assert.equal(await library.accountLimits(now + 200_000), undefined);
 });
 
 test('with an SDK that has no such call, or that fails, there are none, and it isn\'t asked again at once', async t => {

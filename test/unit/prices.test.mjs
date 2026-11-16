@@ -24,7 +24,9 @@ const LIST = {
     cache_creation_input_token_cost: 1.25e-5, cache_creation_input_token_cost_above_12hr: 2.5e-5,
     input_cost_per_token_above_272k_tokens: 2e-5, output_cost_per_token_above_272k_tokens: 7.5e-5, cache_read_input_token_cost_above_272k_tokens: 2e-6,
     cache_creation_input_token_cost_above_272k_tokens: 2.5e-5, cache_creation_input_token_cost_above_12hr_above_272k_tokens: 5e-5,
-    input_cost_per_token_priority: 2e-5,
+    input_cost_per_token_priority: 2e-5, output_cost_per_token_priority: 1e-4, cache_read_input_token_cost_priority: 2e-6,
+    input_cost_per_token_above_272k_tokens_priority: 4e-5, output_cost_per_token_above_272k_tokens_priority: 1.5e-4,
+    input_cost_per_token_ultrafast: 6e-5, output_cost_per_token_ultrafast: 3e-4, cache_creation_input_token_cost_above_12hr_ultrafast: 1.5e-4,
   },
   'gemini/gemini-4-carbon': { litellm_provider: 'gemini', mode: 'chat', input_cost_per_token: 2e-6, output_cost_per_token: 1e-5, cache_read_input_token_cost: 1e-7 },
   'gemini-4-carbon': { litellm_provider: 'vertex_ai-language-models', mode: 'chat', input_cost_per_token: 3e-6, output_cost_per_token: 1e-5 },
@@ -41,6 +43,12 @@ test('the list is kept as each model\'s price for each kind of token, for the ma
   // A request over the size a maker charges more from has every price of its own.
   assert.deepEqual(prices['gpt-6-astra'].over, { tokens: 272000, input: 2e-5, output: 7.5e-5, cacheRead: 2e-6, cacheWrite: 2.5e-5, cacheWriteLong: 5e-5 });
   assert.equal(prices['gpt-6-astra'].cacheWriteLong, 2.5e-5);
+  // A service tier's prices are its own, over the same size where the maker charges more from it.
+  assert.deepEqual(prices['gpt-6-astra'].tiers, {
+    priority: { input: 2e-5, output: 1e-4, cacheRead: 2e-6, over: { tokens: 272000, input: 4e-5, output: 1.5e-4 } },
+    ultrafast: { input: 6e-5, output: 3e-4, cacheWriteLong: 1.5e-4 },
+  });
+  assert.equal(prices['claude-opus-5-5'].tiers, undefined);
   // A name listed bare stands, whatever comes with its maker before it. One listed only so is found bare.
   assert.equal(prices['gemini-4-carbon'].input, 3e-6);
   assert.equal(prices['gemini-4-argon'].input, 1e-6);
@@ -65,6 +73,13 @@ test('a request costs what each kind of its tokens does, and more whole once it 
   // A maker that lists no price for a cache charges as for any input.
   near(costOf(prices['gemini-4-argon'], { input: 1e6, cacheRead: 1e6, cacheWrite: 1e6, cacheWriteLong: 1e6 }), 4);
   near(costOf(prices['claude-opus-5-5']), 0);
+  // A request at a service tier is charged at the tier's prices, and over the size at the tier's prices for that.
+  near(costOf(prices['gpt-6-astra'], { input: 100_000, cacheRead: 100_000, output: 1000 }, 'priority'), 2 + 0.2 + 0.1);
+  near(costOf(prices['gpt-6-astra'], { input: 300_000, output: 1000 }, 'priority'), 12 + 0.15);
+  near(costOf(prices['gpt-6-astra'], { input: 100_000, output: 1000 }, 'ultrafast'), 6 + 0.3);
+  // One the maker lists no prices for, as the usual tier, is charged as usual.
+  for (const tier of ['default', 'flex', undefined]) near(costOf(prices['gpt-6-astra'], { input: 100_000, output: 1000 }, tier), 1 + 0.05);
+  near(costOf(prices['claude-opus-5-5'], { input: 1e6 }, 'priority'), 4);
   // Reasoning counted apart from what was said is charged as it, unless the maker has a price for it.
   near(costOf(prices['claude-opus-5-5'], { output: 1e6, reasoning: 1e6 }), 40);
   near(costOf(prices['gemini-4-argon'], { output: 1e6, reasoning: 1e6 }), 4 + 3);

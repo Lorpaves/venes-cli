@@ -6,8 +6,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  UsageBook, antigravityStep, antigravityTurn, chatFolders, claudeEntry, codexTokens, dayOf, eachLine, lastDays, limitsFromRollout, protoFields, readUsage,
-  usageReply,
+  UsageBook, antigravityStep, antigravityTurn, chatFolders, claudeEntry, codexTokens, dayOf, eachLine, hourOf, lastDays, lastHours, limitsFromRollout,
+  protoFields, readUsage, usageReply,
 } from '../../src/usage.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/usage-worker.mjs', import.meta.url));
@@ -36,8 +36,8 @@ const PRICES = {
 
 // A reply in Claude Code's transcript, as it writes one: on a line for each part of it, each with the
 // request's whole count.
-const reply = ({ id, request = `req_${id}`, daysAgo = 0, model = 'claude-opus-5-5', usage, sidechain = false }) => JSON.stringify({
-  type: 'assistant', uuid: `${id}-${Math.random()}`, timestamp: stamp(daysAgo), requestId: request, isSidechain: sidechain,
+const reply = ({ id, request = `req_${id}`, daysAgo = 0, at = undefined, model = 'claude-opus-5-5', usage, sidechain = false }) => JSON.stringify({
+  type: 'assistant', uuid: `${id}-${Math.random()}`, timestamp: at === undefined ? stamp(daysAgo) : new Date(at).toISOString(), requestId: request, isSidechain: sidechain,
   message: { id, model, role: 'assistant', content: [{ type: 'text', text: 'a "usage" in words is no count' }], usage },
 });
 const said = text => JSON.stringify({ type: 'user', timestamp: stamp(0), message: { role: 'user', content: `${text} "usage" "assistant"` } });
@@ -118,6 +118,11 @@ test('a moment is on the day it falls where the computer is, and the last days e
   assert.deepEqual([days[0], days.at(-2), days.at(-1)], ['2026-02-02', '2026-03-02', '2026-03-03']);
   assert.equal(new Set(days).size, 30);
   assert.deepEqual(lastDays(1, new Date(2026, 10, 16, 23, 59).getTime()), ['2026-11-16']);
+  // An hour is told by its day and its number, and the last of them is this one.
+  assert.equal(hourOf(new Date(2026, 10, 16, 9, 59, 59).getTime()), '2026-11-16T09');
+  const hours = lastHours(24, new Date(2026, 10, 16, 15, 30).getTime());
+  assert.deepEqual([hours.length, hours[0], hours.at(-2), hours.at(-1)], [24, '2026-11-15T16', '2026-11-16T14', '2026-11-16T15']);
+  assert.deepEqual(lastHours(3, new Date(2026, 0, 1, 1, 5).getTime()), ['2025-12-31T23', '2026-01-01T00', '2026-01-01T01']);
 });
 
 test('a reply in a transcript says what its request used, by the kinds a price is listed for', () => {
@@ -174,7 +179,7 @@ test('each agent\'s chats are counted by day, a request once, and costed by the 
     // What Claude Code writes for a reply that's none of a model's.
     reply({ id: 'msg_3', model: '<synthetic>', usage: { input_tokens: 0, output_tokens: 0 } }),
     'not json at all "usage" "assistant"',
-    reply({ id: 'msg_4', daysAgo: 45, usage: { input_tokens: 7, output_tokens: 7 } }),
+    reply({ id: 'msg_4', daysAgo: 100, usage: { input_tokens: 7, output_tokens: 7 } }),
   ]);
   // A subagent's replies are in a file of its own, and nowhere else.
   write(path.join(folders.claude[0], '-code-demo', 'aaaa', 'subagents', 'agent-1.jsonl'), [reply({ id: 'msg_s', usage: { input_tokens: 5, output_tokens: 5 }, sidechain: true })]);
@@ -197,7 +202,7 @@ test('each agent\'s chats are counted by day, a request once, and costed by the 
 
   const found = read();
   assert.equal(found.scanning, false);
-  assert.deepEqual([found.days.length, found.days.at(-1)], [30, dayOf(NOW)]);
+  assert.deepEqual([found.days.length, found.days.at(-1), found.hours.length, found.hours.at(-1)], [90, dayOf(NOW), 24, hourOf(NOW)]);
   const { claude, codex } = found.agents;
   assert.deepEqual(Object.keys(found.agents).sort(), ['claude', 'codex']);
   assert.deepEqual([claude.tokens.input.at(-1), claude.tokens.output.at(-1), claude.tokens.cacheRead.at(-1), claude.tokens.cacheWrite.at(-1)], [10 + 5 + 40, 200 + 5 + 2, 3000, 500]);
@@ -222,10 +227,14 @@ test('each agent\'s chats are counted by day, a request once, and costed by the 
   fs.chmodSync(session, chmod);
   assert.equal(errors.mock.callCount(), 0);
 
+  // A reply whose lines say less of a kind of token later than earlier is counted by the most they say.
+  write(session, [reply({ id: 'msg_6', usage: { input_tokens: 50, output_tokens: 0, cache_read_input_tokens: 900 } }), reply({ id: 'msg_6', usage: { input_tokens: 0, output_tokens: 20 } })], { append: true });
+  const merged = read();
+  assert.deepEqual([merged.agents.claude.tokens.input.at(-1), merged.agents.claude.tokens.output.at(-1), merged.agents.claude.tokens.cacheRead.at(-1)], [55 + 50, 207 + 20, 3000 + 900]);
   // What's written since is added, and the reply that was on its last lines is still counted once.
   write(session, [reply({ id: 'msg_4', usage: { input_tokens: 7, output_tokens: 7 } }), reply({ id: 'msg_5', usage: { input_tokens: 100, output_tokens: 0 } }), reply({ id: 'msg_5', usage: { input_tokens: 100, output_tokens: 30 } })], { append: true });
   const later = read();
-  assert.deepEqual([later.agents.claude.tokens.input.at(-1), later.agents.claude.tokens.output.at(-1)], [55 + 7 + 100, 207 + 7 + 30], 'its last word on what it used is what counts');
+  assert.deepEqual([later.agents.claude.tokens.input.at(-1), later.agents.claude.tokens.output.at(-1)], [55 + 50 + 7 + 100, 207 + 20 + 7 + 30], 'its last word on what it used is what counts');
   assert.deepEqual(later.agents.codex, found.agents.codex);
 
   // Written anew and shorter, a chat is counted from its start.
@@ -238,7 +247,7 @@ test('each agent\'s chats are counted by day, a request once, and costed by the 
   assert.equal(sum(read().agents.claude.tokens.input), 46);
   assert.equal(sum(read().agents.claude.tokens.input), 46);
   // Until its days are all longer ago than those shown.
-  assert.equal(sum(read({ now: NOW + 40 * 24 * 60 * 60 * 1000 }).agents.claude?.tokens.input ?? []), 0);
+  assert.equal(sum(read({ now: NOW + 100 * 24 * 60 * 60 * 1000 }).agents.claude?.tokens.input ?? []), 0);
 });
 
 test('a message of Antigravity\'s is read field by field, and one that isn\'t a message is no count', () => {
@@ -293,13 +302,54 @@ test('Antigravity\'s conversations are counted from their databases, each respon
   assert.equal(errors.mock.callCount(), 1);
 });
 
+test('Codex\'s fast modes are charged at their own prices, from when the thread was set to one', t => {
+  const { folders, write, read } = setup(t);
+  const tiered = { ...PRICES, 'gpt-6-astra': { ...PRICES['gpt-6-astra'], tiers: { priority: { input: 2e-5, output: 1e-4, cacheRead: 2e-6 }, ultrafast: { input: 6e-5, output: 3e-4, cacheRead: 6e-6 } } } };
+  const settings = (tier, key = 'service_tier') => JSON.stringify({ type: 'event_msg', timestamp: stamp(0), payload: { type: 'thread_settings_applied', thread_id: 't', thread_settings: { [key]: tier, model: 'gpt-6-astra' } } });
+  const rollout = path.join(folders.codex[0], 'rollout-a.jsonl');
+  write(rollout, [context(), record(SPENT), settings('priority'), record(SPENT), JSON.stringify({ type: 'event_msg', timestamp: stamp(0), payload: { type: 'thread_settings_applied', thread_settings: { model: 'gpt-6-astra' } } }), record(SPENT)]);
+  const usual = 400 * 1e-5 + 600 * 1e-6 + 50 * 5e-5;
+  const priority = 400 * 2e-5 + 600 * 2e-6 + 50 * 1e-4;
+  near(read({ prices: tiered }).agents.codex.cost.at(-1), usual + 2 * priority, 'a setting that says nothing of the tier leaves it as it was');
+  // The tier holds for what's written later, read where the last read left off.
+  write(rollout, [settings('ultrafast'), record(SPENT), settings('default'), record(SPENT)], { append: true });
+  near(read({ prices: tiered }).agents.codex.cost.at(-1), 2 * usual + 2 * priority + (400 * 6e-5 + 600 * 6e-6 + 50 * 3e-4));
+});
+
 test('a chat nobody has written to since before the days shown is left unread', t => {
   const { folders, write, read } = setup(t);
-  const old = write(path.join(folders.claude[0], '-code', 'old.jsonl'), [reply({ id: 'msg_1', daysAgo: 40, usage: USED })]);
-  const then = noon(40);
+  const old = write(path.join(folders.claude[0], '-code', 'old.jsonl'), [reply({ id: 'msg_1', daysAgo: 100, usage: USED })]);
+  const then = noon(100);
   fs.utimesSync(old, then, then);
-  assert.deepEqual(read(), { days: lastDays(30, NOW), agents: {}, scanning: false });
+  assert.deepEqual(read(), { days: lastDays(90, NOW), hours: lastHours(24, NOW), agents: {}, scanning: false });
   assert.deepEqual(readUsage({ folders: { claude: [path.join(folders.claude[0], 'nowhere')] }, now: NOW }).agents, {});
+});
+
+test('what was used in the last day is counted by the hour too', t => {
+  const { folders, write, read } = setup(t);
+  const hour = 60 * 60 * 1000;
+  const session = write(path.join(folders.claude[0], '-code', 'a.jsonl'), [
+    reply({ id: 'msg_1', at: NOW - 2 * hour, usage: { input_tokens: 5, output_tokens: 50 } }),
+    // One reply on two lines, and one from the day before the hours told, which is in its day alone.
+    reply({ id: 'msg_2', at: NOW - 1000, usage: { input_tokens: 1, output_tokens: 10 } }), reply({ id: 'msg_2', at: NOW - 1000, usage: { input_tokens: 1, output_tokens: 10 } }),
+    reply({ id: 'msg_3', at: NOW - 30 * hour, usage: { input_tokens: 1000, output_tokens: 0 } }),
+  ]);
+  write(path.join(folders.codex[0], 'rollout-a.jsonl'), [context(), JSON.stringify({ type: 'token_usage_record', timestamp: new Date(NOW - 2 * hour).toISOString(), payload: { usage: SPENT } })]);
+  const found = read();
+  const { claude, codex } = found.agents;
+  assert.equal(found.hours.at(-1), hourOf(NOW));
+  const at = hours => found.hours.indexOf(hourOf(NOW - hours * hour));
+  assert.deepEqual([claude.hourly.tokens.input[at(2)], claude.hourly.tokens.output[at(2)]], [5, 50]);
+  assert.deepEqual([claude.hourly.tokens.input[at(0)], claude.hourly.tokens.output[at(0)]], [1, 10]);
+  assert.deepEqual([sum(claude.hourly.tokens.input), sum(claude.tokens.input)], [6, 1006]);
+  near(claude.hourly.cost[at(2)], 5 * 4e-6 + 50 * 2e-5, 'two hours ago');
+  assert.deepEqual([codex.hourly.tokens.input[at(2)], codex.hourly.tokens.cacheRead[at(2)], sum(codex.hourly.cost) > 0], [400, 600, true]);
+  assert.equal(claude.hourly.cost.length, found.hours.length);
+
+  // An hour that's a day old by the next read is told no more, and what was used in it stays in its day.
+  const later = read({ now: NOW + 23 * hour });
+  assert.deepEqual([sum(later.agents.claude.hourly.tokens.input), sum(later.agents.claude.tokens.input)], [1, 1006]);
+  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(path.dirname(folders.claude[0]), '..', 'helper', 'usage.json'), 'utf8')).files[session].hours), [hourOf(NOW - 1000)]);
 });
 
 test('a read stops when its time is up, says so, and the next goes on from there', t => {
@@ -368,6 +418,10 @@ test('a client is told of each agent it takes that has anything to show', () => 
   // A client from before the other agents is told of Claude Code alone, and an agent with nothing isn't told of.
   assert.deepEqual(usageReply({ read, now, shown: agent => agent === 'claude' }).agents.map(agent => agent.agent), ['claude']);
   assert.deepEqual(usageReply({ read: { days, agents: {}, scanning: false }, now, limits: { antigravity: { limits: [], reading: false } } }).agents, []);
+  // The hours are told as the days are, where the read has them.
+  const hourly = { tokens: used.tokens, cost: used.cost };
+  const byHour = usageReply({ read: { days, hours: ['2026-11-16T14', '2026-11-16T15'], agents: { claude: { ...used, hourly } }, scanning: false }, now });
+  assert.deepEqual([byHour.hours, byHour.agents[0].hourly], [['2026-11-16T14', '2026-11-16T15'], hourly]);
   // More is to come while the chats are still being read, or a limit is still being asked for.
   assert.equal(usageReply({ read: { ...read, scanning: true }, now }).scanning, true);
   assert.equal(usageReply({ read, now, limits: { antigravity: { limits: [], reading: true } } }).scanning, true);

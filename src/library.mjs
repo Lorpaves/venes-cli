@@ -83,6 +83,22 @@ export function readModelLimits(limits, now = Date.now()) {
   });
 }
 
+// All the account's limits from what /usage is told, for a list of what's used: the five hours' and the
+// week's, then each model's week by its name, each with its share in tenths and when it resets. None
+// for an account with none, as an API's.
+export function readAccountLimits(limits, now = Date.now()) {
+  const windowOf = (window, said) => {
+    if (!isNumber(said?.utilization)) return [];
+    const at = typeof said.resets_at === 'string' ? Date.parse(said.resets_at) : NaN;
+    if (Number.isFinite(at) && at <= now) return [{ window, percent: 0 }];
+    return [{ window, percent: Math.round(said.utilization * 10) / 10, ...(Number.isFinite(at) && { resetsAt: Math.floor(at / 1000) }) }];
+  };
+  return [
+    ...windowOf('fiveHour', limits?.five_hour), ...windowOf('sevenDay', limits?.seven_day),
+    ...readModelLimits(limits, now).map(({ name, ...limit }) => ({ name, window: 'sevenDay', ...limit })),
+  ];
+}
+
 // npm, which on Windows is a command file that can't be started as a program is. The script it runs
 // is beside Node there, and Node runs that itself.
 function runNpm(args, options) {
@@ -215,19 +231,31 @@ export class Library {
     return reply;
   }
 
-  async #readModelLimits() {
+  async #readLimits() {
     const claude = findOnPath('claude');
-    if (!claude) return [];
-    return readModelLimits((await this.#read({ op: 'usage', sdk: await this.prepare(), claude })).limits);
+    if (!claude) return null;
+    return (await this.#read({ op: 'usage', sdk: await this.prepare(), claude })).limits ?? null;
   }
 
-  // The week's limits that are for one model, which an account has or hasn't. Read once for a few
-  // minutes, with sheets opening together sharing the read. One that can't be read is none, kept as
-  // long, so that a status asked for every few seconds doesn't start Claude Code each time.
-  modelLimits(now = Date.now()) {
+  // What /usage is told of the account's limits. Read once for a few minutes, with sheets and lists
+  // asking together sharing the read. One that can't be read is none, kept as long, so that a status
+  // asked for every few seconds doesn't start Claude Code each time.
+  #limits(now) {
     if (this.#usage && now - this.#usage.at < USAGE_LIFETIME_MS) return this.#usage.reply;
-    const reply = this.#readModelLimits().catch(() => []);
+    const reply = this.#readLimits().catch(() => null);
     this.#usage = { at: now, reply };
     return reply;
+  }
+
+  // The week's limits that are for one model, which an account has or hasn't.
+  async modelLimits(now = Date.now()) {
+    return readModelLimits(await this.#limits(now), now);
+  }
+
+  // All of them, for a list of what's used, with when they were read: nothing for an account with none,
+  // or where Claude Code can't be asked.
+  async accountLimits(now = Date.now()) {
+    const limits = readAccountLimits(await this.#limits(now), now);
+    return limits.length ? { limits, updatedAt: Math.floor((this.#usage?.at ?? now) / 1000) } : undefined;
   }
 }

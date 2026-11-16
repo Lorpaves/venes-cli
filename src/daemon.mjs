@@ -682,10 +682,18 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     usage: async (msg, socket) => {
       if (!usage) throw new HelperError('unsupported', 'This helper keeps no count of what is used.');
       const said = other => (other && shows(socket, other.name) ? other.limits().catch(() => undefined) : undefined);
-      const [read, ofCodex, ofAntigravity] = await Promise.all([usage.read(), said(codex), said(antigravity)]);
+      // Claude Code's are asked of it, as /usage is, and waited for only a moment: until they come,
+      // they're as its status line was last told them, and more is said to be on its way.
+      const ofClaude = async () => {
+        const late = new Promise(resolve => { setTimeout(resolve, MODEL_LIMITS_WAIT_MS, 'late').unref(); });
+        const asked = await Promise.race([library.accountLimits().catch(() => undefined), late]);
+        if (asked === 'late') return { ...accountLimits(statusDir), reading: true };
+        return asked ?? accountLimits(statusDir);
+      };
+      const [read, ofCodex, ofAntigravity, ofClaudeCode] = await Promise.all([usage.read(), said(codex), said(antigravity), ofClaude()]);
       return usageReply({
         read, shown: agent => agent === 'claude' || shows(socket, agent),
-        limits: { claude: accountLimits(statusDir), codex: ofCodex, antigravity: ofAntigravity },
+        limits: { claude: ofClaudeCode, codex: ofCodex, antigravity: ofAntigravity },
       });
     },
     statusLine: async ({ sessionId }) => {

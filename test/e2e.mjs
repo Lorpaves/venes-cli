@@ -164,7 +164,10 @@ async function startCodexServer() {
 async function forgetCodexThreads() {
   const link = await CodexLink.connect(CODEX_SOCKET, { name: 'venes-e2e', title: 'Venes e2e', version: VERSION });
   try {
-    for (const archived of [false, true]) {
+    // A fork goes before the chat it was made from, which Codex keeps while the fork is kept. One that
+    // nothing was said in is in no list of Codex's, so the case that makes one names it here.
+    for (const threadId of codexForks.splice(0)) await link.request('thread/delete', { threadId }).catch(() => {});
+    for (const archived of [true, false]) {
       const { data = [] } = await link.request('thread/list', { limit: 100, archived, cwd: fs.realpathSync(WS), sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'] });
       for (const thread of data) await link.request('thread/delete', { threadId: thread.id }).catch(() => {});
     }
@@ -172,6 +175,7 @@ async function forgetCodexThreads() {
     link.close();
   }
 }
+const codexForks = [];
 // Codex's server writes its trust of the workspace into this Mac's own Codex config, once a thread may
 // write there. That's taken back out, unless it was there before the run.
 const CODEX_CONFIG = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
@@ -2141,7 +2145,7 @@ async function startCodex(r) {
   await assert.rejects(r.client.request('start', { cwd, agent: 'codex' }), { code: 'needs_trust' });
   const { sessionId } = await r.client.request('start', { cwd, agent: 'codex', trust: true });
   const { models, commands } = await r.client.request('capabilities', { sessionId });
-  assert.deepEqual(commands.map(command => command.name), ['compact', 'review', 'init', 'rename']);
+  assert.deepEqual(commands.map(command => command.name), ['compact', 'review', 'init', 'rename', 'fork', 'archive']);
   // Whatever skills this Mac's Codex has on, each says its name and what it's for.
   const { skills } = await r.client.request('capabilities', { sessionId });
   assert.ok(Array.isArray(skills) && skills.every(skill => skill.name && typeof skill.description === 'string' && !('path' in skill)), JSON.stringify(skills).slice(0, 300));
@@ -2210,6 +2214,24 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   assert.equal(title, 'E2E renamed');
   await assert.rejects(r.client.request('send', { sessionId, text: '/rename' }), { code: 'command_failed' });
 
+  // Two more of them, which cost nothing either: the chat forked is another in the list, and put away, it
+  // leaves it.
+  const sessionsBefore = (await r.client.request('sessions')).sessions.map(session => session.id);
+  await r.client.request('send', { sessionId, text: '/fork', clientId: 'c-fork' });
+  let forked;
+  for (const deadline = Date.now() + 8000; Date.now() < deadline && !forked; await delay(300)) {
+    forked = (await r.client.request('sessions')).sessions.find(session => session.agent === 'codex' && !sessionsBefore.includes(session.id));
+  }
+  assert.ok(forked, 'the fork is in the list');
+  codexForks.push(forked.id);
+  await r.client.request('send', { sessionId: forked.id, text: '/archive', clientId: 'c-archive' });
+  let isListed = true;
+  for (const deadline = Date.now() + 8000; Date.now() < deadline && isListed; await delay(300)) {
+    isListed = (await r.client.request('sessions')).sessions.some(session => session.id === forked.id && session.status !== 'ended')
+      || (await r.client.request('library', { limit: 100 })).items.some(item => item.id === forked.id);
+  }
+  assert.equal(isListed, false, 'the fork that was put away has left the list');
+
   // A line run with ! is the reader's own, and Codex has nothing to say to it. The turn before it has
   // been over long enough by then to be history.
   await delay(2200);
@@ -2224,7 +2246,8 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   assert.deepEqual(during.turn.map(event => event.kind), ['message.user', 'message.output']);
   assert.deepEqual(during.items.map(item => item.role), ['user', 'assistant', 'turn_end']);
   await delay(2500);
-  assert.ok(!r.events.some(event => event.kind === 'turn.end' || event.kind === 'session.status'), 'no turn, and nothing at work');
+  const stray = r.events.filter(event => event.kind === 'turn.end' || event.kind === 'session.status');
+  assert.deepEqual(stray.map(event => `${event.kind} of ${event.sessionId === sessionId ? 'the session' : 'another'}: ${event.status ?? event.reason ?? ''}`), [], 'no turn, and nothing at work');
 
   const joined = await r.client.request('join', { sessionId });
   assert.deepEqual(joined.turn, []);
@@ -2252,6 +2275,13 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   assert.equal((await r.kind('session.started', 30000)).source, 'resume');
   assert.match((await r.turnEnd(90000)).lastMessage, /AGAIN/);
 
+  // Codex keeps a chat while a fork of it is kept, as the one put away above still is, and the helper
+  // says so in words a reader can act on. Asked, Codex has closed the chat all the same.
+  await assert.rejects(r.client.request('delete', { sessionId }), { code: 'session_forked' });
+  {
+    const link = await CodexLink.connect(CODEX_SOCKET, { name: 'venes-e2e', title: 'Venes e2e', version: VERSION });
+    try { await link.request('thread/delete', { threadId: forked.id }); } finally { link.close(); }
+  }
   r.mark();
   await r.client.request('delete', { sessionId });
   await r.kind('session.deleted', 10000);

@@ -313,6 +313,8 @@ export const COMMANDS = [
   { name: 'review', description: 'review my current changes and find issues', argumentHint: '[instructions]' },
   { name: 'init', description: 'create an AGENTS.md file with instructions for Codex', argumentHint: '' },
   { name: 'rename', description: 'rename the current thread', argumentHint: '<name>' },
+  { name: 'fork', description: 'fork the current chat', argumentHint: '' },
+  { name: 'archive', description: 'archive this session', argumentHint: '' },
 ];
 
 // What the terminal sends Codex for /init, word for word (codex-rs/tui/prompt_for_init_command.md).
@@ -639,6 +641,7 @@ export class Codex {
   #link;
   #opening;
   #threads = new Map();
+  #toldStarted = new Set();
   // Where each session's pictures are, by the ids its pages were given for them.
   #pictures = new Map();
   // Whether an id is a thread of Codex's, for the sessions the helper hasn't heard from.
@@ -727,6 +730,18 @@ export class Codex {
   // Whether Codex itself has said it has no such thread. A Codex that couldn't be asked hasn't said so.
   denies(sessionId) {
     return this.#owned.get(sessionId) === false;
+  }
+
+  // A thread that has started, which is a session from then. It's said once, though Codex can tell of
+  // one twice: in its answer to what made it, and again unasked.
+  #started(thread) {
+    if (!thread?.id || !isListed(thread)) return;
+    this.#adopt(thread);
+    if (this.#toldStarted.has(thread.id)) return;
+    this.#toldStarted.add(thread.id);
+    this.#store.report(thread.id, 'session.started', { source: 'startup', model: thread.model, cwd: thread.cwd });
+    // One loaded from what's stored can be joined now. A new one can't until its first turn.
+    if (this.#link) this.#subscribe(this.#link, thread.id).catch(() => {});
   }
 
   // The connection to the daemon, made when it's first wanted. `start` starts the daemon if it isn't
@@ -923,12 +938,7 @@ export class Codex {
     }
     const threadId = params.threadId ?? params.thread?.id;
     if (method === 'thread/started') {
-      if (isListed(params.thread)) {
-        this.#adopt(params.thread);
-        this.#store.report(threadId, 'session.started', { source: 'startup', model: params.thread.model, cwd: params.thread.cwd });
-        // One loaded from what's stored can be joined now. A new one can't until its first turn.
-        if (this.#link) this.#subscribe(this.#link, threadId).catch(() => {});
-      }
+      this.#started(params.thread);
       return;
     }
     const thread = this.#threads.get(threadId);
@@ -1245,6 +1255,7 @@ export class Codex {
 
   #forget(threadId) {
     this.#threads.delete(threadId);
+    this.#toldStarted.delete(threadId);
     this.#pictures.delete(threadId);
     this.#chosen.delete(threadId);
     this.#access.delete(threadId);
@@ -1498,6 +1509,14 @@ export class Codex {
         // Codex opens a review with a message of its own, which is the reader's line to whoever sent it.
         thread.reviewOf = clientId;
         await link.request('review/start', { threadId, target: argument ? { type: 'custom', instructions: argument } : { type: 'uncommittedChanges' } });
+      } else if (name === 'fork') {
+        // The chat that comes of it is a session from now, as any thread that starts is: by what Codex
+        // answers, whether or not it says so again.
+        this.#started((await link.request('thread/fork', { threadId })).thread);
+      } else if (name === 'archive') {
+        await link.request('thread/archive', { threadId });
+        // Put away, it's gone from here, whether or not Codex says so again.
+        if (this.#threads.has(threadId)) this.#forget(threadId);
       } else await link.request('thread/name/set', { threadId, name: argument });
     } catch (error) {
       thread.compactsByHand = false;
@@ -1532,6 +1551,8 @@ export class Codex {
     try {
       await link.request('thread/delete', { threadId: sessionId });
     } catch (error) {
+      // Codex keeps a chat that another was forked from, for as long as the fork is kept.
+      if (/forked history/i.test(error.message)) throw new HelperError('session_forked', 'Codex keeps this chat while a fork of it is kept. Delete the fork first.');
       throw new HelperError('session_running', `Codex wouldn't delete this session: ${error.message}`);
     }
     this.#forget(sessionId);

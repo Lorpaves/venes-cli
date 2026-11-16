@@ -64,7 +64,10 @@ function fakeCodex() {
       return { thread, model: thread.model, reasoningEffort: thread.reasoningEffort };
     },
     'thread/list': () => ({ data: [...server.threads.values()] }),
-    'thread/delete': ({ threadId }) => { server.threads.delete(threadId); server.loaded.delete(threadId); return {}; },
+    'thread/delete': ({ threadId }) => {
+      if (server.fails.delete) throw rpcError(`cannot delete thread ${threadId}: forked history still references it`);
+      server.threads.delete(threadId); server.loaded.delete(threadId); return {};
+    },
     'thread/turns/list': ({ threadId, limit, cursor }) => {
       const newestFirst = [...(server.turns.get(threadId) ?? [])].reverse();
       const from = cursor ? Number(cursor) : 0;
@@ -82,6 +85,8 @@ function fakeCodex() {
     'thread/compact/start': () => { if (server.fails.compact) throw rpcError('nothing to compact'); return {}; },
     'review/start': ({ threadId }) => ({ reviewThreadId: threadId, turn: { id: 'review', status: 'inProgress', items: [] } }),
     'thread/name/set': ({ threadId, name }) => { server.threads.get(threadId).name = name; return {}; },
+    'thread/fork': ({ threadId }) => ({ thread: stored(`fork-of-${threadId}`) }),
+    'thread/archive': () => ({}),
     'turn/interrupt': () => ({}),
     'model/list': () => ({ data: server.models }),
     'skills/list': ({ cwds = [] }) => {
@@ -686,7 +691,7 @@ test('a session runs on what the reader chose from its next turn', async () => {
   const { codex, store, server, events, last } = setup();
   const { sessionId } = await codex.start({ cwd: FOLDER });
   assert.deepEqual((await codex.capabilities()).models.map(model => model.value), ['gpt-6', 'gpt-5']);
-  assert.deepEqual((await codex.capabilities()).commands.map(command => command.name), ['compact', 'review', 'init', 'rename']);
+  assert.deepEqual((await codex.capabilities()).commands.map(command => command.name), ['compact', 'review', 'init', 'rename', 'fork', 'archive']);
   assert.equal(server.called('model/list').length, 1);
   await assert.rejects(codex.configure({ sessionId, model: 'gpt-9' }), error => error.code === 'bad_model');
   await assert.rejects(codex.configure({ sessionId, model: 'gpt-5', effort: 'high' }), error => error.code === 'bad_effort');
@@ -713,13 +718,13 @@ test('a line is a command when it starts with one the helper carries out, and a 
   assert.deepEqual(commandOf('/rename My thread'), { name: 'rename', argument: 'My thread' });
   assert.deepEqual(commandOf('/init'), { name: 'init', argument: '' });
   for (const message of ['/tmp/a.txt is what?', '/model', '/compactor', '/Compact', 'please /compact', '/', '', undefined, '/rename-it x']) assert.equal(commandOf(message), undefined, `${message}`);
-  assert.deepEqual(COMMANDS.map(command => command.name), ['compact', 'review', 'init', 'rename']);
+  assert.deepEqual(COMMANDS.map(command => command.name), ['compact', 'review', 'init', 'rename', 'fork', 'archive']);
 });
 
 test('the commands on offer are carried out as Codex\'s terminal would, and aren\'t messages', async () => {
   const { codex, server, events, last } = setup();
   const { sessionId } = await codex.start({ cwd: FOLDER });
-  assert.deepEqual((await codex.capabilities()).commands.map(command => [command.name, command.argumentHint]), [['compact', ''], ['review', '[instructions]'], ['init', ''], ['rename', '<name>']]);
+  assert.deepEqual((await codex.capabilities()).commands.map(command => [command.name, command.argumentHint]), [['compact', ''], ['review', '[instructions]'], ['init', ''], ['rename', '<name>'], ['fork', ''], ['archive', '']]);
 
   await codex.send({ sessionId, text: '/compact', clientId: 'c1' });
   assert.deepEqual(server.called('thread/compact/start'), [{ threadId: sessionId }]);
@@ -830,7 +835,7 @@ test('a server that lists no skills leaves a message as it is, and the rest of w
   server.fails.skills = true;
   const { sessionId } = await codex.start({ cwd: FOLDER });
   const offered = await codex.capabilities({ sessionId });
-  assert.deepEqual([offered.skills, offered.commands.length, offered.models.length], [[], 4, 2]);
+  assert.deepEqual([offered.skills, offered.commands.length, offered.models.length], [[], 6, 2]);
   await codex.send({ sessionId, text: 'Use $rex' });
   assert.deepEqual(server.called('turn/start')[0].input, [{ type: 'text', text: 'Use $rex', text_elements: [] }]);
 });
@@ -1529,3 +1534,19 @@ test('a turn\'s pictures are told as they come, and each is had by its id', asyn
   assert.equal(events.filter(event => event.kind === 'message.images').length, before);
 });
 
+test('a chat forked is a session from then, and one put away is gone', async () => {
+  const { codex, server, store } = setup();
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  // Asked of Codex in its own words for it, and no message to it. What Codex answers is the new session.
+  await codex.send({ sessionId, text: '/fork' });
+  assert.deepEqual(server.called('thread/fork'), [{ threadId: sessionId }]);
+  assert.equal(store.find(`fork-of-${sessionId}`)?.agent, 'codex');
+  // Codex keeps a chat while a fork of it is kept, and the reader is told what to do about it.
+  server.fails.delete = true;
+  await assert.rejects(codex.remove({ sessionId }), error => error.code === 'session_forked' && /Delete the fork first/.test(error.message));
+  server.fails.delete = false;
+  assert.equal(store.find(sessionId)?.id, sessionId, 'refused, it stays');
+  await codex.send({ sessionId, text: '/archive' });
+  assert.deepEqual(server.called('thread/archive'), [{ threadId: sessionId }]);
+  assert.equal(store.find(sessionId), undefined, 'put away, it has left the list here');
+});

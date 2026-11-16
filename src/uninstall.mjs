@@ -15,6 +15,9 @@ import { removeStatusLine } from './status.mjs';
 const exec = promisify(execFile);
 export const PLUGIN_ID = 'venes@venes';
 export const MARKETPLACE = 'venes';
+// The same plugin as the marketplace lists it for Windows, where its hooks start Node themselves.
+export const WINDOWS_PLUGIN_ID = 'venes-windows@venes';
+export const PLUGIN_IDS = [PLUGIN_ID, WINDOWS_PLUGIN_ID];
 const CLAUDE_TIMEOUT_MS = 60_000;
 
 export function claudeConfigDir(env = process.env) {
@@ -37,9 +40,28 @@ export function isPluginInstalled({ configDir, pluginRoot }) {
   if (!realPath(pluginRoot).startsWith(cache)) return true;
   try {
     const record = JSON.parse(fs.readFileSync(path.join(configDir, 'plugins', 'installed_plugins.json'), 'utf8'));
-    return (record.plugins?.[PLUGIN_ID] ?? []).length > 0;
+    return PLUGIN_IDS.some(id => (record.plugins?.[id] ?? []).length > 0);
   } catch {
     return true;
+  }
+}
+
+// The name this plugin is installed under, which is in where Claude Code keeps it:
+// `cache/<marketplace>/<plugin>/<version>`. Run from anywhere else, it's the first.
+export function pluginIdAt(pluginRoot) {
+  const plugin = path.dirname(realPath(pluginRoot));
+  if (path.basename(path.dirname(plugin)) !== MARKETPLACE) return PLUGIN_ID;
+  return PLUGIN_IDS.find(id => id === `${path.basename(plugin)}@${MARKETPLACE}`) ?? PLUGIN_ID;
+}
+
+// The names it's installed under, by Claude Code's own record. The first, when there's no record to read.
+export function installedPluginIds(configDir) {
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(configDir, 'plugins', 'installed_plugins.json'), 'utf8'));
+    const found = PLUGIN_IDS.filter(id => (record.plugins?.[id] ?? []).length > 0);
+    return found.length > 0 ? found : [PLUGIN_ID];
+  } catch {
+    return [PLUGIN_ID];
   }
 }
 
@@ -65,7 +87,7 @@ export function removeCommandLink(paths, link = path.join(os.homedir(), '.local'
 }
 
 // Each step goes on whatever the ones before it did, and says how it went: `{ name, ok, detail }`.
-export async function uninstall({ paths, authorizedKeys, stopHelper, run = runClaude, commandLink }) {
+export async function uninstall({ paths, authorizedKeys, stopHelper, run = runClaude, commandLink, pluginIds = installedPluginIds(claudeConfigDir()) }) {
   const steps = [];
   const step = async (name, action) => {
     try {
@@ -75,7 +97,9 @@ export async function uninstall({ paths, authorizedKeys, stopHelper, run = runCl
     }
   };
   // The plugin goes first, so that no session starting meanwhile sets the helper up again.
-  await step('plugin', () => run(['plugin', 'uninstall', PLUGIN_ID]));
+  await step('plugin', async () => {
+    for (const id of pluginIds) await run(['plugin', 'uninstall', id]);
+  });
   await step('marketplace', () => run(['plugin', 'marketplace', 'remove', MARKETPLACE]));
   await step('statusLine', () => {
     fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 }); // where it notes that it's off, until the folder goes

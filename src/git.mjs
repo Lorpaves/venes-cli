@@ -170,7 +170,9 @@ const notARepository = () => new HelperError('no_repository', 'This folder isn\'
 export async function repositoryOf(cwd) {
   if (!cwd) return undefined;
   try {
-    return (await git(cwd, ['rev-parse', '--show-toplevel'])).trim() || undefined;
+    // As this system writes a path: on Windows git says C:/work, where everything else says C:\work.
+    const top = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim();
+    return top ? path.resolve(top) : undefined;
   } catch {
     return undefined;
   }
@@ -221,7 +223,7 @@ function repositoryPath(root, file) {
   if (typeof file !== 'string' || !file || file.length > 4096) throw new HelperError('bad_path', 'That isn\'t a file.');
   const resolved = path.resolve(root, file);
   if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new HelperError('bad_path', 'That file isn\'t in this repository.');
-  return path.relative(root, resolved);
+  return path.relative(root, resolved).split(path.sep).join('/');
 }
 
 function checkedCommit(hash) {

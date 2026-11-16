@@ -196,3 +196,9 @@ test('a session that ended blocks nothing', () => {
   hook(store, 'a', 'SessionEnd', { reason: 'other' });
   assert.equal(store.isQuiet(), true);
 });
+
+test('a copy installed under the name for Windows looks for its own updates', async () => {
+  const windows = JSON.stringify([{ id: 'venes@venes', version: '0.0.1' }, { id: 'venes-windows@venes', version: '1000.0.0', installPath: '/cache/w' }]);
+  assert.equal(newerInstall(windows, 'venes-windows@venes').installPath, '/cache/w');
+  assert.equal(newerInstall(windows, 'venes@venes'), undefined);
+});

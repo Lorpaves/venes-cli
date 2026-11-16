@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { helperPaths } from '../../src/paths.mjs';
 import { removePhoneKeys } from '../../src/pairing.mjs';
-import { isPluginInstalled, removeCommandLink, uninstall } from '../../src/uninstall.mjs';
+import { installedPluginIds, isPluginInstalled, pluginIdAt, removeCommandLink, uninstall } from '../../src/uninstall.mjs';
 
 function folder(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-uninstall-'));
@@ -163,4 +163,36 @@ test('the command linked on Linux goes if it still leads to this helper, and any
   removeCommandLink(paths, link);
   assert.equal(fs.existsSync(link), false);
   assert.throws(() => fs.readlinkSync(link));
+});
+
+test('the plugin is this one under either name the marketplace lists it by', t => {
+  const config = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-ids-'));
+  t.after(() => fs.rmSync(config, { recursive: true }));
+  const at = name => path.join(config, 'plugins', 'cache', 'venes', name, '0.28.0');
+  for (const name of ['venes', 'venes-windows', 'other']) fs.mkdirSync(at(name), { recursive: true });
+  assert.equal(pluginIdAt(at('venes')), 'venes@venes');
+  assert.equal(pluginIdAt(at('venes-windows')), 'venes-windows@venes');
+  assert.equal(pluginIdAt(at('other')), 'venes@venes', 'no name of this plugin\'s');
+  // A copy run from a folder that only happens to be in one called venes isn't in Claude Code's cache.
+  const elsewhere = path.join(config, 'venes', 'venes-windows');
+  fs.mkdirSync(elsewhere, { recursive: true });
+  assert.equal(pluginIdAt(elsewhere), 'venes@venes');
+
+  const record = plugins => fs.writeFileSync(path.join(config, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins }));
+  assert.deepEqual(installedPluginIds(config), ['venes@venes'], 'no record to read');
+  record({ 'venes-windows@venes': [{ scope: 'user', installPath: at('venes-windows') }] });
+  assert.deepEqual(installedPluginIds(config), ['venes-windows@venes']);
+  assert.equal(isPluginInstalled({ configDir: config, pluginRoot: at('venes-windows') }), true);
+  record({ 'venes-windows@venes': [] });
+  assert.equal(isPluginInstalled({ configDir: config, pluginRoot: at('venes-windows') }), false, 'uninstalled');
+});
+
+test('uninstalling takes out the name it\'s installed under', async t => {
+  const { paths, keys } = installed(t);
+  const ran = [];
+  const steps = await uninstall({
+    paths, authorizedKeys: keys, stopHelper: async () => {}, run: async args => { ran.push(args.join(' ')); }, pluginIds: ['venes-windows@venes'],
+  });
+  assert.deepEqual(ran, ['plugin uninstall venes-windows@venes', 'plugin marketplace remove venes']);
+  assert.equal(steps.every(each => each.ok), true);
 });

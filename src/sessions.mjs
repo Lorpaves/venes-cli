@@ -47,7 +47,9 @@ const writtenAt = timestamp => {
 
 // Only Rex and tmux can be typed into, and a session started before the plugin was installed sends
 // no hooks to say where it is, so a restart is the way out of both.
-export const notTypable = () => new HelperError('no_pane', 'This session can\'t be typed into from here. Restart it in Rex or tmux.');
+export const notTypable = () => new HelperError('no_pane', process.platform === 'win32'
+  ? 'Venes can\'t type into a session on Windows yet. Type at the computer, and follow and answer it here.'
+  : 'This session can\'t be typed into from here. Restart it in Rex or tmux.');
 
 function permissionDecision(decision) {
   return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };

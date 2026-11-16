@@ -70,7 +70,11 @@ export async function startSession({ name, cwd, command, env }) {
     const output = await tmux(tmuxSocket, ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', name, ...size, '-c', cwd, ...variables, '--', ...command]);
     return { pane: output.trim(), tmuxSocket };
   } catch (error) {
-    if (error.code === 'ENOENT') throw new HelperError('no_tmux', `Install tmux or Rex on your ${computer} to continue this session.`);
+    if (error.code === 'ENOENT') {
+      throw new HelperError('no_tmux', process.platform === 'win32'
+        ? 'Venes can\'t start or continue a session on Windows yet. Start Claude Code at the computer, and it shows up here.'
+        : `Install tmux or Rex on your ${computer} to continue this session.`);
+    }
     throw error;
   }
 }

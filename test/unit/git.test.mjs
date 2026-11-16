@@ -274,7 +274,8 @@ test('with every branch asked for, the commits of the others come too, a merge w
   assert.deepEqual((await commit(root, { commit: bySubject['Merge side'].hash })).commit.refs, [{ name: 'main', kind: 'head' }, { name: 'v1', kind: 'tag' }]);
 });
 
-test('files are staged and taken back out, by name or all at once', async t => {
+// One of its files has a * in its name, which Windows doesn't allow in one.
+test('files are staged and taken back out, by name or all at once', { skip: process.platform === 'win32' }, async t => {
   const { root, git, write } = committed(t);
   write('README.md', '# Venes\n\nchanged\n');
   write('notes/a *.md', 'new\n');

@@ -47,6 +47,7 @@ import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
 import { computer, isWindows } from './platform.mjs';
+import { WIRE_ROOT, fromWire, toWire, windowsDrives } from './wirepaths.mjs';
 
 export const PROTOCOL_VERSION = 1;
 // What Claude Code sets for its own child processes, and the session that happened to start the
@@ -187,7 +188,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const clients = new Set();
   const devices = new PushDevices(pushFile);
   const isConnected = deviceId => [...clients].some(socket => socket.pushDevice === deviceId);
-  const write = (socket, message) => socket.write(lineOf(message));
+  // From Windows a path is said the way a client takes one apart: see wirepaths.mjs.
+  const write = (socket, message) => socket.write(lineOf(isWindows ? toWire(message) : message));
 
   // A session that isn't Claude Code's, as a Codex one, is only told to a client that says it can show
   // one: with `agents` on any command, which holds for its connection. An app from before them would
@@ -472,6 +474,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const config = readClaudeConfig();
       const home = homeFolder();
       const named = where => ({ path: where, name: path.basename(where) || where, trusted: isTrusted(where, { config, home }) });
+      // Above a drive there's nothing on Windows but the drives.
+      if (isWindows && folder === WIRE_ROOT) return { path: WIRE_ROOT, name: os.hostname(), trusted: false, entries: windowsDrives(), truncated: false };
       if (folder !== undefined && folder !== null) {
         const checked = checkedFolder(folder);
         return { ...named(checked), ...subfolders(checked, undefined, { hidden: hidden === true }) };
@@ -755,6 +759,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       let msg;
       try {
         msg = JSON.parse(line);
+        if (isWindows) msg = fromWire(msg);
         const command = commands[msg.cmd];
         if (!command) throw new HelperError('unknown_command', `Unknown command: ${msg.cmd}`);
         noteAgents(socket, msg.agents);

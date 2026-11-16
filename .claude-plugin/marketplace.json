@@ -8,6 +8,283 @@
       "name": "venes",
       "source": "./",
       "description": "Streams Claude Code sessions as structured events to a local helper, so the Venes app can show and answer them over SSH."
+    },
+    {
+      "name": "venes-windows",
+      "source": "./",
+      "description": "Venes for Claude Code on Windows: the same plugin, with hooks that start Node themselves instead of going through a shell.",
+      "hooks": {
+        "SessionStart": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "session-start"
+                ],
+                "timeout": 10
+              }
+            ]
+          }
+        ],
+        "SessionEnd": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PostModelSwitch": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "UserPromptSubmit": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PreToolUse": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PostToolUse": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PostToolUseFailure": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "Stop": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "StopFailure": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "SubagentStart": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "SubagentStop": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "TaskCreated": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "TaskCompleted": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "Notification": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "MessageDisplay": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PreCompact": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PostCompact": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "fast"
+                ],
+                "timeout": 5
+              }
+            ]
+          }
+        ],
+        "PermissionRequest": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node",
+                "args": [
+                  "${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs",
+                  "hold"
+                ],
+                "timeout": 86400
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

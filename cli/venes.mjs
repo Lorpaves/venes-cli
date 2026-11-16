@@ -10,7 +10,7 @@ import { helperPaths } from '../src/paths.mjs';
 import { computer, isMac, isWindows } from '../src/platform.mjs';
 import { writeLauncher } from '../src/setup.mjs';
 import { installStatusLine, removeStatusLine, runStatusLine, switchOnStatusLine } from '../src/status.mjs';
-import { MARKETPLACE, PLUGIN_ID, claudeConfigDir, isPluginInstalled, uninstall as uninstallVenes } from '../src/uninstall.mjs';
+import { MARKETPLACE, claudeConfigDir, isPluginInstalled, pluginIdAt, uninstall as uninstallVenes } from '../src/uninstall.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
@@ -79,15 +79,29 @@ function isRunning() {
 // Starts the helper to run on its own, writing to its log.
 function letHelperGo() {
   const cli = fileURLToPath(import.meta.url);
-  // On Windows a process started the usual way is handed every handle this one was given, which Node
-  // always asks for there. A helper started in an SSH session would hold that session's pipes, and the
-  // session could never end. What PowerShell's Start-Process starts is handed none. It has nowhere to
-  // write either, so it's told to open the log itself.
+  // On Windows a helper started the usual way belongs to whatever started it, in two ways that end it or
+  // hang its starter. It's handed every handle this process was given, which Node always asks for there,
+  // so one started in an SSH session held that session's pipes and the session never ended. And sshd ends
+  // everything a session started when the session closes, so a helper started by a phone's connection
+  // went when the phone did, and with it what it knew of the sessions at the computer. Windows' own
+  // management service is asked to start it instead: what that starts is no one's child, is handed
+  // nothing, and has only the environment it's given, which is this one's. It has nowhere to write, so
+  // it's told to open the log itself. Where that's refused, PowerShell starts it, which at least hands
+  // it no handles.
   if (isWindows) {
+    const line = `"${process.execPath}" "${cli}" daemon --log`;
+    const asked = `$variables = [string[]]@([Environment]::GetEnvironmentVariables().GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }); `
+      + '$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ EnvironmentVariables = $variables; ShowWindow = [uint16]0 }; '
+      + '$made = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments '
+      + '@{ CommandLine = $env:VENES_DAEMON_LINE; CurrentDirectory = $env:USERPROFILE; ProcessStartupInformation = $startup }; '
+      + 'if ($made.ReturnValue -ne 0) { exit 1 }';
     const quoted = value => `'${value.replace(/'/g, "''")}'`;
-    const command = `Start-Process -WindowStyle Hidden -FilePath ${quoted(process.execPath)} -ArgumentList ${quoted(`"${cli}" daemon --log`)}`;
-    const started = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { stdio: 'ignore', windowsHide: true });
-    if (started.status === 0) return;
+    const plain = `Start-Process -WindowStyle Hidden -FilePath ${quoted(process.execPath)} -ArgumentList ${quoted(`"${cli}" daemon --log`)}`;
+    for (const script of [asked, plain]) {
+      const started = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+        { stdio: 'ignore', windowsHide: true, env: { ...process.env, VENES_DAEMON_LINE: line } });
+      if (started.status === 0) return;
+    }
   }
   const log = fs.openSync(paths.logFile, 'a');
   // On Windows a process that's let go would open a window of its own, which this keeps shut.
@@ -240,7 +254,7 @@ const commands = {
       folder: `Deleted ${paths.home}.`,
     };
     const failed = {
-      plugin: `Run \`claude plugin uninstall ${PLUGIN_ID}\` yourself, or a new session sets the helper up again.`,
+      plugin: `Run \`claude plugin uninstall ${pluginIdAt(PLUGIN_ROOT)}\` yourself, or a new session sets the helper up again.`,
       marketplace: `Run \`claude plugin marketplace remove ${MARKETPLACE}\` yourself.`,
     };
     for (const { name, ok, detail } of steps) {

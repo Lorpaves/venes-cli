@@ -113,5 +113,21 @@ test('a model switch is heard, without waiting on the helper for long', () => {
 test('the marketplace lists this plugin from the repository root', () => {
   const plugin = readJson('.claude-plugin/plugin.json');
   const { plugins } = readJson('.claude-plugin/marketplace.json');
-  assert.deepEqual(plugins.map(p => [p.name, p.source]), [[plugin.name, './']]);
+  assert.deepEqual(plugins.map(p => [p.name, p.source]), [[plugin.name, './'], ['venes-windows', './']]);
+  assert.equal(plugins[0].hooks, undefined, 'the plugin\'s own hooks are its file\'s');
+});
+
+// On Windows a hook that goes through a shell takes a fifth of a second in Git Bash and a second in
+// PowerShell, and Node started by Claude Code itself takes a fifteenth. hooks.json is the same file on
+// every system, so the marketplace lists the plugin once more for Windows, with hooks of its own, which
+// Claude Code runs in place of the file's, event by event.
+test('for Windows the marketplace gives every event a hook that starts Node itself, as the file\'s would', () => {
+  const { hooks } = readJson('hooks/hooks.json');
+  const entry = readJson('.claude-plugin/marketplace.json').plugins[1].hooks;
+  assert.deepEqual(Object.keys(entry), Object.keys(hooks), 'an event left out would run the file\'s hook, through a shell');
+  for (const [event, groups] of Object.entries(hooks)) {
+    const { command, timeout } = groups[0].hooks[0];
+    const mode = command.match(/hook\.sh" ([a-z-]+);/)[1];
+    assert.deepEqual(entry[event], [{ hooks: [{ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/scripts/hook.cjs', mode], timeout }] }], event);
+  }
 });

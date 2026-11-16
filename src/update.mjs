@@ -6,11 +6,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { MARKETPLACE, pluginIdAt } from './uninstall.mjs';
 import { VERSION, isNewer } from './version.mjs';
 
 const exec = promisify(execFile);
-const MARKETPLACE = 'venes';
-const PLUGIN_ID = 'venes@venes';
+// The name this copy is installed under: the plugin's own, or the one the marketplace lists for Windows.
+const PLUGIN_ID = pluginIdAt(fileURLToPath(new URL('..', import.meta.url)));
 const CLAUDE_TIMEOUT_MS = 150_000;
 const FIRST_CHECK_MS = 5 * 60_000;
 const CHECK_MS = 6 * 60 * 60_000;
@@ -32,12 +34,14 @@ export function autoUpdateEnabled(paths, env = process.env) {
   return !(env.DISABLE_UPDATES || env.DISABLE_AUTOUPDATER || env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC);
 }
 
-export function newerInstall(listing) {
-  const install = JSON.parse(listing).find(plugin => plugin.id === PLUGIN_ID);
+export function newerInstall(listing, pluginId = PLUGIN_ID) {
+  const install = JSON.parse(listing).find(plugin => plugin.id === pluginId);
   return install && isNewer(install.version, VERSION) ? install : undefined;
 }
 
-export function startAutoUpdate(store, paths, { run = runClaude, launch = launchSetup, firstCheckMs = FIRST_CHECK_MS, env = process.env } = {}) {
+export function startAutoUpdate(store, paths, {
+  run = runClaude, launch = launchSetup, firstCheckMs = FIRST_CHECK_MS, env = process.env, pluginId = PLUGIN_ID,
+} = {}) {
   let found;
   let checking;
 
@@ -61,11 +65,11 @@ export function startAutoUpdate(store, paths, { run = runClaude, launch = launch
   const check = async () => {
     // plugin update alone doesn't refresh the marketplace, so it would never see a release.
     await attempt(['plugin', 'marketplace', 'update', MARKETPLACE]);
-    await attempt(['plugin', 'update', PLUGIN_ID, '--json']);
+    await attempt(['plugin', 'update', pluginId, '--json']);
     // Read back rather than trust the update's result: the newer copy may have come
     // from /plugin, or from Claude Code's auto-update if the user turned it on.
     const listing = await attempt(['plugin', 'list', '--json']);
-    if (listing) found = newerInstall(listing) ?? found;
+    if (listing) found = newerInstall(listing, pluginId) ?? found;
     const available = found?.version;
     switchWhenQuiet();
     return available;

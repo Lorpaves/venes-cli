@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import { HelperError } from './errors.mjs';
 import { changedPaths } from './git.mjs';
 import { computer, isMac } from './platform.mjs';
+import { moveToRecycleBin } from './winbin.mjs';
 
 // A folder with more in it than this lists the first ones, and says so.
 export const FILE_ENTRIES = 2000;
@@ -167,6 +168,10 @@ export async function moveToTrash(target, { command = TRASH_COMMAND, instead = p
     fs.renameSync(target, path.join(instead, `${Date.now()}-${path.basename(target)}`));
     return;
   }
+  if (process.platform === 'win32') {
+    moveToRecycleBin(target);
+    return;
+  }
   if (!mac) {
     moveToLinuxTrash(target);
     return;
@@ -242,10 +247,11 @@ function entryOf(folder, entry) {
 // What happened to an entry, as git tells it: a file by its own change, and a folder by having any inside it.
 function changeOf(entry, git) {
   if (!git) return undefined;
-  const relative = path.relative(git.root, entry.path);
+  // As git names a path, with slashes on every system.
+  const relative = path.relative(git.root, entry.path).split(path.sep).join('/');
   if (relative.startsWith('..')) return undefined;
   if (entry.kind === 'file') return git.changed.get(relative);
-  const under = `${relative}${path.sep}`;
+  const under = `${relative}/`;
   for (const changed of git.changed.keys()) if (changed.startsWith(under)) return 'changed';
   return undefined;
 }

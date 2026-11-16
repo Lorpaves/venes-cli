@@ -23,7 +23,7 @@ import { readMode, switchMode } from './mode.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession } from './remove.mjs';
-import { resumeSession } from './resume.mjs';
+import { askAgain, dialogLeft, resumeSession } from './resume.mjs';
 import { startNewSession } from './start.mjs';
 import { PushDevices, notify, titleFor } from './push.mjs';
 import { RECENT_SESSIONS, checkedFolder, createFile, createFolder, homeFolder, recentFolders, runningIn, subfolders } from './folders.mjs';
@@ -697,6 +697,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       await resuming.get(msg.sessionId)?.catch(() => {});
       const known = store.find(msg.sessionId);
       if (!known || known.status === 'ended') return resume({ ...msg, text, attachments });
+      // A resume that stopped at a dialog left it with no terminal: the dialog is still what's in the way,
+      // or its terminal has closed and the session is resumed again.
+      const left = await dialogLeft({ store, terminal: resumeTerminal() }, known);
+      if (left === 'open') askAgain({ store, terminal: resumeTerminal() }, known);
+      if (left === 'gone') return resume({ ...msg, text, attachments });
       const session = sessionWithPane(msg.sessionId);
       const message = { clientId: msg.clientId, text, lane: msg.lane ?? 'next', attachments };
       if (store.mustHold(session, msg.lane)) {

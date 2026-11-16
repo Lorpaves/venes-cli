@@ -153,3 +153,69 @@ test('trust is the folder\'s, or a folder\'s above it, but not past the top of i
   assert.equal(isTrusted(plain, { config: {}, home }), false);
   assert.equal(isTrusted(top, { config: trusted(top), home: top }), false, 'the home folder is asked about every time');
 });
+
+// Claude Code's question about Code Mode as 2.1.325 draws it, with `pointed` of its two options marked.
+const OPTIONS = ['No, start without it', 'Yes, turn on Code Mode'];
+const codeMode = (pointed = 0) => [
+  '────────────────────────────────────────────────────────────────────────────────', '  Code Mode (experimental)', '',
+  '  In Code Mode, Claude works by writing and running JavaScript that calls its', '  tools, instead of calling them one at a time.', '',
+  ...OPTIONS.map((option, index) => `  ${index === pointed ? '❯' : ' '} ${option}`), '', '  Tell us how it goes with /feedback', '',
+  '  Enter to confirm · Esc to start without it', '',
+].join('\n');
+const ASKED = {
+  title: 'Code Mode (experimental)', options: OPTIONS,
+  text: 'In Code Mode, Claude works by writing and running JavaScript that calls its tools, instead of calling them one at a time.',
+};
+
+test('what Claude Code asks before a session starts is given to the client to ask, and nothing is pressed', async t => {
+  const { deps, keys, started } = setUp({ screens: [codeMode()], startsAfter: 99 });
+  await assert.rejects(startNewSession(deps, { cwd: folder(t) }), error => {
+    assert.equal(error.code, 'needs_choice');
+    assert.match(error.message, /^Claude Code asks about Code Mode \(experimental\) before it starts\. Answer it in the terminal on your /);
+    assert.deepEqual(error.details, ASKED);
+    return true;
+  });
+  assert.deepEqual([keys, started.length], [[], 1]);
+});
+
+test('the reader\'s answer is pressed in the terminal that\'s waiting, and the session starts there', async t => {
+  const where = folder(t);
+  const { deps, keys, started } = setUp({ screens: [codeMode(0), codeMode(1), ''], startsAfter: 2 });
+  await assert.rejects(startNewSession(deps, { cwd: where }), { code: 'needs_choice' });
+  assert.deepEqual(await startNewSession(deps, { cwd: where, choice: 'Yes, turn on Code Mode' }), { sessionId: ID });
+  assert.deepEqual([keys, started.length], [['Down', 'Enter'], 1], 'no second terminal');
+});
+
+test('asked to start there again with no answer, it asks again, in the same terminal', async t => {
+  const where = folder(t);
+  const { deps, keys, started } = setUp({ screens: [codeMode()], startsAfter: 99 });
+  await assert.rejects(startNewSession(deps, { cwd: where }), { code: 'needs_choice' });
+  await assert.rejects(startNewSession(deps, { cwd: where }), error => error.code === 'needs_choice' && error.details.title === ASKED.title);
+  assert.deepEqual([keys, started.length], [[], 1]);
+});
+
+test('an answer that isn\'t one it offers presses nothing', async t => {
+  const where = folder(t);
+  const { deps, keys } = setUp({ screens: [codeMode()], startsAfter: 99 });
+  await assert.rejects(startNewSession(deps, { cwd: where }), { code: 'needs_choice' });
+  await assert.rejects(startNewSession(deps, { cwd: where, choice: 'Whatever' }), { code: 'choice_gone' });
+  assert.deepEqual(keys, []);
+});
+
+test('once the waiting terminal has closed, a start there begins anew', async t => {
+  const where = folder(t);
+  let isOpen = true;
+  const { deps, started } = setUp({ screens: [codeMode()], startsAfter: 99, open: () => isOpen });
+  await assert.rejects(startNewSession(deps, { cwd: where }), { code: 'needs_choice' });
+  isOpen = false;
+  await assert.rejects(startNewSession(deps, { cwd: where, choice: 'Yes, turn on Code Mode' }), { code: 'start_failed' });
+  assert.equal(started.length, 2, 'a new terminal, in which nothing was pressed for an answer to the old one');
+});
+
+test('a folder\'s own question still comes after it, and is answered as it would have been', async t => {
+  const where = folder(t);
+  const { deps, keys } = setUp({ screens: [codeMode(0), QUESTION, ANSWERED, ''], startsAfter: 3, trusts: () => false });
+  await assert.rejects(startNewSession(deps, { cwd: where, trust: true }), { code: 'needs_choice' });
+  assert.deepEqual(await startNewSession(deps, { cwd: where, trust: true, choice: 'No, start without it' }), { sessionId: ID });
+  assert.deepEqual(keys, ['Enter', 'Down', 'Enter']);
+});

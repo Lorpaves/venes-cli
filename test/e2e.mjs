@@ -1299,6 +1299,60 @@ async function forgetSessions() {
   return { client, run };
 }
 
+// Claude Code asks about Code Mode at every start of whoever has turned it on, with
+// CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1, and not yet said yes to it at a terminal. These two run only
+// with that variable set, by themselves: the cases around them have the helper start and resume
+// sessions with nobody to answer, and are run without it.
+const ASKS_CODE_MODE = process.env.CLAUDE_CODE_EXPERIMENTAL_CODE_MODE === '1';
+const NO_CODE_MODE = 'No, start without it';
+
+if (ASKS_CODE_MODE) T('a_question_before_a_resumed_session_is_asked_of_the_reader', { mode: 'bypassPermissions' }, async r => {
+  await r.type('Reply with only the word STORED.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  tmux('kill-session', '-t', 'run');
+  await delay(1500);
+  const { client, run } = await forgetSessions();
+  try {
+    const reply = await client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.', clientId: 'first' });
+    assert.equal(reply.resumed, true, 'the message is taken');
+    const { request } = await run.wait(e => e.kind === 'request.opened' && e.sessionId === id, 20000, 'request.opened');
+    const [question] = request.input.questions;
+    assert.deepEqual([request.kind, request.toolName, question.header, question.options.map(option => option.label)],
+      ['question', 'AskUserQuestion', 'Code Mode (experimental)', [NO_CODE_MODE, 'Yes, turn on Code Mode']]);
+    assert.match(question.question, /^In Code Mode, Claude works by writing and running JavaScript/);
+    // Nothing is answered for the reader: the session isn't back, and another message is told why.
+    await delay(3000);
+    assert.equal((await client.request('sessions')).sessions.find(s => s.id === id).pane, null);
+    await assert.rejects(client.request('send', { sessionId: id, text: 'and this' }), { code: 'dialog_open' });
+    await client.request('respond', { requestId: request.id, decision: 'allow', answers: { [question.question]: NO_CODE_MODE } });
+    const said = await run.wait(e => e.kind === 'message.user' && e.sessionId === id, 20000, 'message.user');
+    assert.equal(said.clientId, 'first');
+    await run.wait(e => e.kind === 'turn.end' && e.sessionId === id && /AGAIN/.test(e.lastMessage), 30000, 'turn.end AGAIN');
+    assert.ok((await client.request('sessions')).sessions.find(s => s.id === id).pane, 'back in a terminal of its own');
+  } finally {
+    try { tmux('kill-session', '-t', `venes-${id.slice(0, 8)}`); } catch { /* never started */ }
+    client.close();
+  }
+});
+
+if (ASKS_CODE_MODE) T('a_question_before_a_new_session_is_given_to_the_client_to_ask', {}, async r => {
+  const workspace = fs.realpathSync(WS);
+  const asked = await r.client.request('start', { cwd: workspace }).then(() => undefined, error => error);
+  assert.equal(asked?.code, 'needs_choice', `start said: ${asked?.message}`);
+  assert.deepEqual([asked.details.title, asked.details.options], ['Code Mode (experimental)', [NO_CODE_MODE, 'Yes, turn on Code Mode']]);
+  // Asked again with no answer, it's the same question in the same terminal, with nothing started.
+  const again = await r.client.request('start', { cwd: workspace }).then(() => undefined, error => error);
+  assert.equal(again?.code, 'needs_choice');
+  const { sessionId } = await r.client.request('start', { cwd: workspace, choice: NO_CODE_MODE });
+  try {
+    const { sessions } = await r.client.request('sessions');
+    assert.ok(sessions.find(s => s.id === sessionId)?.pane, 'the session is there, in the terminal that asked');
+  } finally {
+    for (const name of tmux('ls', '-F', '#{session_name}').split('\n').filter(name => name.startsWith('venes-new-'))) tmux('kill-session', '-t', name);
+  }
+});
+
 T('a_stored_session_can_be_listed_read_and_continued', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word STORED.');
   await r.turnEnd();

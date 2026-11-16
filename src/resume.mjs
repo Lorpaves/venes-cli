@@ -5,6 +5,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import { HelperError, notTypable } from './sessions.mjs';
+import { pickChoice, readChoice } from './terminal.mjs';
 import { referenceTo } from './uploads.mjs';
 
 const START_LIMIT_MS = 20_000;
@@ -39,23 +40,133 @@ function heardFrom(store, sessionId) {
   return { prompted, stopListening };
 }
 
-async function waitForPrompt({ prompted, terminal, name, target, limit, check }) {
-  let isPrompted = false;
-  prompted.then(() => { isPrompted = true; });
+const dialogOpen = () => new HelperError('dialog_open', 'A dialog is open in the terminal.');
+// While a question's card waits for its answer, how often the terminal is looked at for an answer given there.
+const ASKED_CHECK_MS = 2000;
+
+// What's on the terminal when it asks something with a list to pick from, or nothing. A terminal that
+// can't be read asks nothing that can be shown.
+const choiceAt = async (terminal, target) => (terminal.readScreen ? readChoice(await terminal.readScreen(target).catch(() => '')) : undefined);
+
+// Waits for the session to be back, which its first prompt says. Claude Code can ask something first,
+// before there's a session for it to ask through, as it asks about Code Mode of whoever has turned
+// that on and not said yes to it yet: that comes back as what's asked, for the reader to answer. It's
+// taken for a question only when two looks in a row find the same one, since the old conversation
+// is drawn on the way and can have the same words in it.
+async function waitForPrompt({ state, terminal, name, target, limit, check }) {
+  let seen;
   const deadline = Date.now() + limit;
   while (Date.now() < deadline) {
     await delay(check);
-    if (isPrompted) return;
+    if (state.isPrompted) return undefined;
     if (!(await terminal.isSessionOpen(name, target))) throw new HelperError('resume_failed', 'Claude Code quit without resuming this session.');
+    const choice = await choiceAt(terminal, target);
+    if (choice && JSON.stringify(choice) === seen) return choice;
+    seen = choice && JSON.stringify(choice);
   }
   // Only now: until then the screen shows the end of the old conversation, which could say anything.
-  if (await terminal.hasOpenDialog(target)) throw new HelperError('dialog_open', 'A dialog is open in the terminal.');
+  if (await terminal.hasOpenDialog(target)) throw dialogOpen();
   throw new HelperError('resume_failed', 'Claude Code took too long to resume this session.');
+}
+
+// The card for a question the terminal asks: its words and its options are the terminal's own, as a
+// question Claude asks in a session is shown, so a client needs nothing new to show it.
+function cardFor(choice) {
+  const question = choice.text || choice.title;
+  const fields = {
+    kind: 'question', toolName: 'AskUserQuestion',
+    input: { questions: [{ question, header: choice.title, options: choice.options.map(label => ({ label })), multiSelect: false }] },
+  };
+  const decide = ({ decision, answers }) => {
+    // Left unanswered from here. It's still on the terminal, for someone there or for the next message.
+    if (decision === 'deny') return { isLeft: true };
+    if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
+    const option = answers?.[question];
+    if (!choice.options.includes(option)) throw new HelperError('missing_answers', 'Every question needs an answer.', { missing: [question] });
+    return { option };
+  };
+  return { fields, decide };
+}
+
+// Asks the reader what the terminal asks, and gives their answer: an option, that they left it, or
+// nothing when it was answered at the terminal meanwhile or the session went.
+async function ask({ store, terminal, session, name, target, state, check }, choice) {
+  const { fields, decide } = cardFor(choice);
+  const { request, decision } = store.ask(session.id, fields, decide);
+  let answer;
+  let isAnswered = false;
+  decision.then(value => { answer = value; isAnswered = true; });
+  while (!isAnswered) {
+    await delay(check);
+    if (isAnswered) break;
+    const isOpen = await terminal.isSessionOpen(name, target).catch(() => false);
+    if (!state.isPrompted && isOpen && (await choiceAt(terminal, target))) continue;
+    store.settle(request.id, { decision: 'unknown', by: 'terminal' });
+    break;
+  }
+  return answer;
+}
+
+// Goes on from a question: asks it, presses what was answered, and sees what comes of that, which can
+// be another question. It ends with the session back, with its terminal closed, which ends the
+// session, or with a question left unanswered, which stays where it is.
+async function follow(deps, first) {
+  const { store, terminal, session, name, target, state, limit, check } = deps;
+  let choice = first;
+  while (choice) {
+    const answer = await ask({ ...deps, check: deps.askedCheck }, choice);
+    // A request that closes leaves its session as one at work, which this one isn't: no turn has begun,
+    // and the prompt that begins one would be taken for a message typed during a turn.
+    if (!state.isPrompted && session.status === 'running') store.report(session.id, 'session.status', { status: 'idle' });
+    if (state.isPrompted || session.status === 'ended' || answer?.isLeft) return;
+    if (answer?.option) await pickChoice(terminal, target, answer.option).catch(() => {});
+    choice = undefined;
+    try {
+      choice = await waitForPrompt({ state, terminal, name, target, limit, check });
+    } catch (error) {
+      // A dialog that can't be shown is left for someone at the terminal. Anything else is the end of it.
+      if (error.code !== 'dialog_open') store.abandon(session);
+      return;
+    }
+  }
+}
+
+// What became of a resume that stopped at something the terminal asks, for the next message to the
+// session: nothing while there was none, `open` while its terminal is still there, and `gone` once
+// that has closed with the session never back, which ends the wait so that the message resumes it
+// anew. Without this the session had no terminal and wasn't over, and a message to it was told that
+// it couldn't be typed into, which sent the reader looking for a terminal to restart it in.
+export async function dialogLeft({ store, terminal }, session) {
+  const waiting = session?.waitingAt;
+  if (!waiting || session.pane || session.status === 'ended') return undefined;
+  if (await terminal.isSessionOpen(waiting.name, waiting.target).catch(() => false)) return 'open';
+  store.abandon(session);
+  return 'gone';
+}
+
+// A message for a session whose resume stands at a question: the question is asked again if nothing is
+// asking it now, and the message is refused, since the one that resumed the session is still the first
+// it will hear.
+export function askAgain({ store, terminal, limit = START_LIMIT_MS, check = CHECK_MS, askedCheck = ASKED_CHECK_MS }, session) {
+  const { name, target } = session.waitingAt;
+  if (!session.asking) {
+    session.asking = true;
+    const { prompted, stopListening } = heardFrom(store, session.id);
+    const state = { isPrompted: false };
+    prompted.then(() => { state.isPrompted = true; });
+    choiceAt(terminal, target)
+      .then(choice => follow({ store, terminal, session, name, target, state, limit, check, askedCheck }, choice))
+      .catch(error => console.error(`resume: ${error.message}`))
+      .finally(() => { session.asking = false; stopListening(); });
+  }
+  throw new HelperError('dialog_open', 'Claude Code is asking something first. Answer it, then send this again.');
 }
 
 // A session running anywhere else can't be resumed here: the two would write into one transcript.
 // The first message's attachments can't be pasted, so each is a reference, pictures too.
-export async function resumeSession({ store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS }, sessionId, { clientId, text, attachments = [] }, chosen) {
+export async function resumeSession({
+  store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS, askedCheck = ASKED_CHECK_MS,
+}, sessionId, { clientId, text, attachments = [] }, chosen) {
   const prompt = [...attachments.map(referenceTo), text].filter(Boolean).join(' ');
   if (Buffer.byteLength(prompt) > FIRST_MESSAGE_LIMIT_BYTES) throw new HelperError('message_too_long', 'Send something shorter first, to start this session.');
   const running = await library.running();
@@ -66,17 +177,33 @@ export async function resumeSession({ store, library, terminal, env = process.en
   if (clientId) store.expectEcho(session, clientId, text);
   const name = `${SESSION_PREFIX}${sessionId.slice(0, SHORT_ID_LENGTH)}`;
   const { prompted, stopListening } = heardFrom(store, sessionId);
+  const state = { isPrompted: false };
+  prompted.then(() => { state.isPrompted = true; });
+  let target;
+  let isFollowed = false;
   try {
     const variables = Object.fromEntries(PASSED_ENV.filter(key => env[key]).map(key => [key, env[key]]));
-    const target = await terminal.startSession({ name, cwd: workingDirectory(info.cwd), command: resumeCommand(sessionId, prompt, env, chosen), env: variables });
-    await waitForPrompt({ prompted, terminal, name, target, limit, check });
+    target = await terminal.startSession({ name, cwd: workingDirectory(info.cwd), command: resumeCommand(sessionId, prompt, env, chosen), env: variables });
+    const choice = await waitForPrompt({ state, terminal, name, target, limit, check });
+    if (choice) {
+      // Claude Code asks something before the session is back. That's the reader's to answer: it's
+      // asked on the session, whose first message waits on the command line for what they say.
+      session.waitingAt = { name, target };
+      session.asking = true;
+      isFollowed = true;
+      follow({ store, terminal, session, name, target, state, limit, check, askedCheck }, choice)
+        .catch(error => console.error(`resume: ${error.message}`))
+        .finally(() => { session.asking = false; stopListening(); });
+    }
     return { queued: false, resumed: true };
   } catch (error) {
     if (clientId) store.forgetEcho(session, clientId);
-    // The terminal stays open for a dialog: someone at the Mac can still answer it.
-    if (error.code !== 'dialog_open') store.abandon(session);
+    // The terminal stays open for a dialog: someone at the Mac can still answer it. Where it is, is
+    // kept with the session, for what a later message is told.
+    if (error.code === 'dialog_open') session.waitingAt = { name, target };
+    else store.abandon(session);
     throw error;
   } finally {
-    stopListening();
+    if (!isFollowed) stopListening();
   }
 }

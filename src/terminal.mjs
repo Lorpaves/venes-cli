@@ -64,6 +64,64 @@ export async function hasOpenDialog(session) {
   return showsDialog(await readScreen(session));
 }
 
+// A question the terminal asks before a session is there to ask through its hooks, with a list to pick
+// from: as Claude Code asks about Code Mode of whoever has turned that on and not yet said yes to it,
+// at every start. What it says and offers is read off the screen, for a client to show and the reader to
+// answer, which is theirs to do. It's told by being the last thing on the screen, down to the line that
+// says what Enter does, with one of its options pointed at. Nothing for anything else.
+const CHOICE_FOOTER = /\bEnter to (?:confirm|select)\b/;
+const CHOICE_MARK = '❯';
+const RULE = /^[─━]{8,}$/;
+
+export function readChoice(screen) {
+  const lines = String(screen ?? '').split('\n').map(line => line.trimEnd());
+  let end = lines.length - 1;
+  while (end >= 0 && !lines[end].trim()) end -= 1;
+  if (end < 0 || !CHOICE_FOOTER.test(lines[end])) return undefined;
+  const pointed = lines.slice(0, end).findLastIndex(line => line.trimStart().startsWith(`${CHOICE_MARK} `));
+  if (pointed < 0) return undefined;
+  // An option's words start two along from the mark, on its line and on the others'.
+  const column = lines[pointed].indexOf(CHOICE_MARK) + 2;
+  const isOption = line => line.length > column && line[column] !== ' ' && !line.slice(0, column).replace(CHOICE_MARK, ' ').trim();
+  let first = pointed;
+  while (first > 0 && isOption(lines[first - 1])) first -= 1;
+  let last = pointed;
+  while (last + 1 < end && isOption(lines[last + 1])) last += 1;
+  const options = lines.slice(first, last + 1).map(line => line.slice(column).trim().replace(/^\d+\.\s+/, ''));
+  if (options.length < 2 || new Set(options).size !== options.length) return undefined;
+  // What it asks is above them, from the line that sets it off: its name on the first line, then what
+  // it says, a paragraph to each run of lines.
+  let top = first - 1;
+  while (top >= 0 && !RULE.test(lines[top].trim())) top -= 1;
+  const said = lines.slice(top + 1, first).map(line => line.trim());
+  const named = said.findIndex(Boolean);
+  if (named < 0) return undefined;
+  const title = said[named];
+  const rest = said.slice(named + 1).join('\n').split(/\n{2,}/).map(run => run.split('\n').filter(Boolean).join(' ')).filter(Boolean);
+  return { title, text: rest.join('\n\n'), options, pointed: pointed - first };
+}
+
+const CHOICE_SETTLE_MS = 150;
+const CHOICE_MOVES = 12;
+
+// Presses the option a reader picked, as someone at the terminal would: down or up to it, then Enter.
+// The screen is read again before each key, so a question that has gone, or isn't the one that was
+// answered, gets none.
+export async function pickChoice(terminal, target, option, { settle = CHOICE_SETTLE_MS } = {}) {
+  for (let move = 0; move < CHOICE_MOVES; move++) {
+    const now = readChoice(await terminal.readScreen(target));
+    const at = now?.options.indexOf(option) ?? -1;
+    if (at < 0) throw new HelperError('choice_gone', 'That question isn\'t on the terminal any more.');
+    if (now.pointed === at) {
+      await terminal.pressKey(target, 'Enter');
+      return;
+    }
+    await terminal.pressKey(target, now.pointed < at ? 'Down' : 'Up');
+    await pause(settle);
+  }
+  throw new HelperError('choice_gone', 'The terminal didn\'t move to that answer.');
+}
+
 export function refuseIfRequested(isBlocked) {
   const pending = isBlocked();
   if (pending) throw new HelperError('request_pending', 'Answer the open request first.', { requestId: pending.id });

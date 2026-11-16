@@ -320,6 +320,8 @@ export class SessionStore extends EventEmitter {
     s.tmuxSocket = undefined;
     s.rexSession = undefined;
     s.rexServer = undefined;
+    s.waitingAt = undefined;
+    s.asking = false;
     s.lastEventAt = Date.now();
     return s;
   }
@@ -635,6 +637,8 @@ export class SessionStore extends EventEmitter {
   // /clear and /resume start a new session id in the same pane, which retires the old one.
   #claimPane(s, { pane, socket, rexSession, rexServer }) {
     if (s.pane === pane && s.tmuxSocket === socket) return;
+    // It's back in a terminal, so it's no longer waiting on a dialog in one.
+    s.waitingAt = undefined;
     s.pane = pane;
     s.tmuxSocket = socket;
     s.rexSession = rexSession;

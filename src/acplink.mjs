@@ -16,6 +16,8 @@ export class AcpLink {
   #nextId = 1;
   #waiting = new Map();
   #isOpen = true;
+  // What the agent says unasked goes to this, for whoever wants to hear it: a session's commands come that way.
+  onNotification = undefined;
 
   // Starts the agent, and says who's calling. What the agent says of itself is the link's `agent`.
   static async start(command, args, { cwd, env, clientInfo } = {}) {
@@ -63,7 +65,10 @@ export class AcpLink {
     } catch {
       return; // what an agent prints that isn't a message is nothing to this
     }
-    if (message.method !== undefined) return;
+    if (message.method !== undefined) {
+      this.onNotification?.(message);
+      return;
+    }
     const waiter = this.#waiting.get(message.id);
     if (!waiter) return;
     this.#waiting.delete(message.id);

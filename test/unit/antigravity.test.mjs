@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   AGENT, Antigravity, asksReview, conversationFiles, historyOf, isTrusted, levelFor, libraryItem, limitsFrom, MODE_IDS, modelOf, modelsFrom, pageOf, pictureSourcesOf, picturesOf, readPicture, requestOf,
   resultOf, reviewIn, reviewRequest, runsIn, saidOf, saidPictures, stepsIn, toolOf, transcriptOf, typedText,
+  commandsFrom,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
 
@@ -144,7 +145,13 @@ test('the account\'s limits are every one Antigravity lists, by its group, with 
 
 // An Antigravity with a folder of its own for what it stores, a terminal that shows what a test says
 // it shows, and nothing real started.
-function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE } = {}) {
+const LISTED = [
+  { name: 'compact', description: ' Compact the conversation now. ' },
+  { name: 'schedule', description: 'Run an instruction on a schedule.', input: { hint: '<when> <what>' } },
+  { name: 'two words', description: 'not a command a line can start with' }, { description: 'no name' },
+];
+
+function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined } = {}) {
   const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
   t.after(() => fs.rmSync(data, { recursive: true, force: true }));
   fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ trustedWorkspaces: trusted }));
@@ -163,6 +170,8 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     processOf: async () => { if (terminal.isGone) throw new Error('no such pane'); return { name: terminal.running, pid: 4242 }; },
   };
   const minted = [];
+  // The folders whose commands were asked for.
+  const asked = [];
   // What was moved to the Trash, as the folder's name and what was in it, taken out of Antigravity's lists, and told to go.
   const trashed = [];
   const forgotten = [];
@@ -172,6 +181,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
     usage,
+    commands: commands ?? (async folder => { asked.push(folder); return commandsFrom(LISTED); }),
     trash: async folder => { trashed.push([path.basename(folder), fs.readdirSync(folder).sort()]); },
     forget: async id => { forgotten.push(id); },
     kill: pid => { killed.push(pid); terminal.onKill?.(pid); },
@@ -201,7 +211,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     }
     fs.mkdirSync(path.join(data, 'brain', id), { recursive: true });
   };
-  return { agent, store, events, terminal, minted, data, file, write, hook, kinds, until, trashed, forgotten, killed, stored };
+  return { agent, store, events, terminal, minted, asked, data, file, write, hook, kinds, until, trashed, forgotten, killed, stored };
 }
 
 test('a session at the Mac is followed from its hooks, and a turn told in a Claude Code turn\'s shapes', async t => {
@@ -758,7 +768,12 @@ test('its mode is changed with Shift+Tab, and what it runs on with its own comma
   await assert.rejects(agent.setMode({ sessionId: ID, mode: 'plan' }), { code: 'session_busy' });
   await hook('Stop', { terminationReason: 'NO_TOOL_CALL' });
   const can = await agent.capabilities({ sessionId: ID });
-  assert.deepEqual([can.commands, can.skills, can.models.map(model => model.value)], [[], [], ['gemini-4-hydrogen', 'gemini-3.8-flash']]);
+  assert.deepEqual([can.skills, can.models.map(model => model.value)], [[], ['gemini-4-hydrogen', 'gemini-3.8-flash']]);
+  // Its commands are what Antigravity lists for the session's folder, each with what it does and what it takes.
+  assert.deepEqual(can.commands, [
+    { name: 'compact', description: 'Compact the conversation now.', argumentHint: '' },
+    { name: 'schedule', description: 'Run an instruction on a schedule.', argumentHint: '<when> <what>' },
+  ]);
   assert.deepEqual((await agent.status({ sessionId: ID })).status.project, 'w');
 });
 
@@ -908,4 +923,24 @@ test('with no Antigravity on the Mac there\'s nothing to list or start', async t
   t.after(() => agent.stop());
   assert.deepEqual([agent.isAvailable(), await agent.library(), (await agent.capabilities()).models], [false, [], []]);
   await assert.rejects(agent.start({ cwd: os.tmpdir() }), { code: 'no_antigravity' });
+});
+
+test('a folder\'s commands are asked of Antigravity once and kept, and one that can\'t be asked is asked again', async t => {
+  const { agent, asked } = setup(t);
+  const first = await agent.capabilities();
+  const again = await agent.capabilities();
+  assert.deepEqual(first.commands.map(command => command.name), ['compact', 'schedule']);
+  assert.deepEqual(again.commands, first.commands);
+  assert.deepEqual(asked, [os.homedir()], 'with no session, the home folder\'s, and once');
+  // What Antigravity couldn't say is no commands, with the models still there, and isn't kept as an answer for long.
+  let tries = 0;
+  const failing = setup(t, { commands: async () => { tries += 1; throw new Error('no server'); } });
+  const can = await failing.agent.capabilities();
+  assert.deepEqual([can.commands, can.models.length > 0], [[], true]);
+  assert.equal(tries, 1);
+});
+
+test('what the protocol lists that isn\'t a command by a name is left out', () => {
+  assert.deepEqual(commandsFrom(undefined), []);
+  assert.deepEqual(commandsFrom([{ name: '/slashed' }, { name: '' }, { name: 'plan', description: 7 }]), [{ name: 'plan', description: '7', argumentHint: '' }]);
 });

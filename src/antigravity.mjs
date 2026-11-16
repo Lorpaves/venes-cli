@@ -491,6 +491,42 @@ async function mintWith(folder) {
   }
 }
 
+// The commands a conversation in `folder` can be given, as Antigravity's protocol server lists them for a
+// session made there: it says them unasked once the session is. Nothing is written down here of what they
+// are, and nothing is said to a model. The session is an empty conversation, which is taken away again.
+const COMMANDS_WAIT_MS = 5000;
+const COMMANDS_KEPT_MS = 10 * 60_000;
+const COMMANDS_RETRY_MS = 30_000;
+async function listedCommands(folder, { data, forget, wait = COMMANDS_WAIT_MS }) {
+  const link = await AcpLink.start(COMMAND, ['acp'], { cwd: folder, env: process.env, clientInfo: CLIENT });
+  let sessionId;
+  try {
+    const listed = new Promise(resolve => {
+      link.onNotification = message => {
+        const update = message.params?.update;
+        if (message.method === 'session/update' && update?.sessionUpdate === 'available_commands_update') resolve(update.availableCommands ?? []);
+      };
+    });
+    ({ sessionId } = await link.request('session/new', { cwd: folder, mcpServers: [] }, { timeout: 30_000 }));
+    return commandsFrom(await Promise.race([listed, pause(wait).then(() => [])]));
+  } finally {
+    link.close();
+    if (typeof sessionId === 'string' && SESSION_ID.test(sessionId)) {
+      // Once the server has let go of its files.
+      await pause(300);
+      for (const file of conversationFiles(data, sessionId)) fs.rmSync(file, { recursive: true, force: true });
+      await forget(sessionId).catch(() => {});
+    }
+  }
+}
+
+// A client's list of commands, from the protocol's: each by its name, with what it does and what it takes.
+export function commandsFrom(listed) {
+  return (Array.isArray(listed) ? listed : [])
+    .filter(command => typeof command?.name === 'string' && /^[^\s/]+$/.test(command.name))
+    .map(command => ({ name: command.name, description: String(command.description ?? '').trim(), argumentHint: String(command.input?.hint ?? '').trim() }));
+}
+
 // What `/usage` reports, asked of the command line itself with nothing said to a model: it prints it
 // and quits, in the home folder, which it needn't trust for this.
 async function usageReport() {
@@ -550,6 +586,8 @@ export class Antigravity {
   #modelList = { at: 0, models: [], reading: undefined };
   #timer;
   #isStopped = false;
+  #listCommands;
+  #commands = new Map();
 
   constructor({
     store,
@@ -560,6 +598,8 @@ export class Antigravity {
     data = dataFolder(),
     rows = () => storedRows(data),
     models = listedModels,
+    // The commands a conversation in a folder can be given, asked of Antigravity itself.
+    commands = undefined,
     usage = usageReport,
     // What a deleted conversation's files are moved to the Trash with, what takes it out of Antigravity's
     // own lists, and what tells Antigravity to go.
@@ -575,6 +615,7 @@ export class Antigravity {
     this.#mint = mint;
     this.#rows = rows;
     this.#models = models;
+    this.#listCommands = commands ?? (folder => listedCommands(folder, { data, forget }));
     this.#readUsage = usage;
     this.#trash = trash;
     this.#forget = forget;
@@ -1376,9 +1417,28 @@ export class Antigravity {
     return list.reading;
   }
 
-  // The models on offer. Its commands are its terminal's own, and none is listed.
-  async capabilities() {
-    return { commands: [], models: this.#installed() ? await this.#knownModels() : [], skills: [] };
+  // The models on offer, and the commands a conversation in the session's folder can be given. Both are
+  // asked of Antigravity, and neither is written down here.
+  async capabilities({ sessionId } = {}) {
+    if (!this.#installed()) return { commands: [], models: [], skills: [] };
+    const folder = this.#store.find(sessionId)?.cwd ?? os.homedir();
+    const [commands, models] = await Promise.all([this.#knownCommands(folder), this.#knownModels()]);
+    return { commands, models, skills: [] };
+  }
+
+  // A folder's commands, asked once and kept a while: asking makes a conversation and takes it away again,
+  // which isn't done for every list a client draws. What couldn't be asked is asked again soon.
+  #knownCommands(folder) {
+    const kept = this.#commands.get(folder);
+    if (kept && Date.now() - kept.at < (kept.failed ? COMMANDS_RETRY_MS : COMMANDS_KEPT_MS)) return kept.list;
+    const entry = { at: Date.now(), failed: false };
+    entry.list = Promise.resolve().then(() => this.#listCommands(folder)).catch(error => {
+      console.error(`antigravity commands: ${error.message}`);
+      entry.failed = true;
+      return [];
+    });
+    this.#commands.set(folder, entry);
+    return entry.list;
   }
 
   // The account's limits, as Antigravity last reported them. It's asked again once that's a few minutes

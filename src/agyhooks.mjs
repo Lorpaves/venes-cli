@@ -24,8 +24,10 @@ export function hookScript() {
   return `#!/bin/sh
 # Forwards one Antigravity hook event to the Venes helper, and tells Antigravity to carry on.
 home="\${VENES_HOME:-$HOME/.venes}"
-if [ -S "$home/hook.sock" ]; then
-  /usr/bin/curl -s --max-time 4 --unix-socket "$home/hook.sock" \\
+curl=/usr/bin/curl
+[ -x "$curl" ] || curl=$(command -v curl)
+if [ -S "$home/hook.sock" ] && [ -n "$curl" ]; then
+  "$curl" -s --max-time 4 --unix-socket "$home/hook.sock" \\
     -H 'Content-Type: application/json' -H 'X-Venes-Agent: antigravity' \\
     -H "X-Venes-Pane: \${TMUX_PANE:-}" -H "X-Venes-Tmux: \${TMUX:-}" \\
     -H "X-Venes-Rex-Block: \${REX_BLOCK:-}" -H "X-Venes-Rex-Session: \${REX_SESSION:-}" -H "X-Venes-Rex-Server: \${REX_SERVER:-}" \\

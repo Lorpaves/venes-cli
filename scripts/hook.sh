@@ -7,7 +7,7 @@ root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}"
 
 find_node() {
   command -v node && return
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+  for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node "$HOME/.local/bin/node"; do
     if [ -x "$candidate" ]; then echo "$candidate"; return; fi
   done
 }
@@ -26,7 +26,11 @@ if [ "$1" = session-start ] || [ ! -x "$home/venes" ]; then
   if [ -n "$node" ]; then "$node" "$root/cli/venes.mjs" setup </dev/null >/dev/null 2>&1; fi
 fi
 
-/usr/bin/curl -s --fail --max-time "$limit" --unix-socket "$home/hook.sock" \
+# Where a Mac has curl, or wherever this system does.
+curl=/usr/bin/curl
+[ -x "$curl" ] || curl=$(command -v curl) || exit 0
+
+"$curl" -s --fail --max-time "$limit" --unix-socket "$home/hook.sock" \
   -H 'Content-Type: application/json' \
   -H "X-Venes-Pane: ${TMUX_PANE:-}" -H "X-Venes-Tmux: ${TMUX:-}" \
   -H "X-Venes-Rex-Block: ${REX_BLOCK:-}" -H "X-Venes-Rex-Session: ${REX_SESSION:-}" -H "X-Venes-Rex-Server: ${REX_SERVER:-}" \

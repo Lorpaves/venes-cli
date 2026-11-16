@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeIn } from './files.mjs';
 import { HelperError } from './sessions.mjs';
+import { computer } from './platform.mjs';
 
 // How many recent folders to offer, and how many stored sessions to look through for them.
 export const RECENT_FOLDERS = 20;
@@ -25,7 +26,7 @@ function isFolder(file) {
 export function checkedFolder(folder) {
   if (typeof folder !== 'string' || !path.isAbsolute(folder) || folder.length > 4096) throw new HelperError('bad_folder', 'That isn\'t a folder.');
   const resolved = path.resolve(folder);
-  if (!isFolder(resolved)) throw new HelperError('no_folder', `${resolved} isn't a folder on this Mac.`);
+  if (!isFolder(resolved)) throw new HelperError('no_folder', `${resolved} isn't a folder on this ${computer}.`);
   return resolved;
 }
 

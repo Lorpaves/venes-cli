@@ -18,6 +18,7 @@ import { mediaTypeOf } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
 import { isImage } from './uploads.mjs';
 import { VERSION } from './version.mjs';
+import { computer } from './platform.mjs';
 
 const exec = promisify(execFile);
 
@@ -742,7 +743,7 @@ export class Codex {
         link = await this.#connect(this.#socketPath, CLIENT);
       } catch (failure) {
         const isMissing = failure.code === 'ENOENT';
-        throw new HelperError('no_codex', isMissing ? 'Codex isn\'t installed on this Mac.' : `Codex's server didn't start: ${failure.message}`);
+        throw new HelperError('no_codex', isMissing ? `Codex isn't installed on this ${computer}.` : `Codex's server didn't start: ${failure.message}`);
       }
     }
     link.on('notification', message => {
@@ -1274,7 +1275,7 @@ export class Codex {
       return thread;
     } catch (error) {
       if (/active writer/.test(error.message)) {
-        throw new HelperError('session_elsewhere', 'This session is open in Codex on the Mac. Close it there, or start it with codex --remote unix:// to share it.');
+        throw new HelperError('session_elsewhere', `This session is open in Codex on the ${computer}. Close it there, or start it with codex --remote unix:// to share it.`);
       }
       throw new HelperError('resume_failed', `Codex couldn't open this session: ${error.message}`);
     }

@@ -21,6 +21,8 @@ export PATH
 
 command -v claude >/dev/null 2>&1 || fail "Claude Code is not installed. See https://code.claude.com/docs"
 command -v node >/dev/null 2>&1 || fail "Node.js $MIN_NODE or later is required."
+# What a session's hooks reach the helper with. A Mac always has it.
+command -v curl >/dev/null 2>&1 || fail "curl is required. Install it with your package manager."
 
 node_major=$(node -p 'process.versions.node.split(".")[0]')
 [ "$node_major" -ge "$MIN_NODE" ] || fail "Node.js $MIN_NODE or later is required (found $(node -v))."
@@ -49,7 +51,18 @@ plugin=$(installed)
 # Homebrew puts `venes` on the PATH; otherwise it's the launcher.
 command="~/.venes/venes"
 if [ -n "${HOMEBREW_PATH:-}" ]; then command="venes"; fi
-if [ -n "$plugin" ] && [ -f "$plugin/cli/venes.mjs" ] && node "$plugin/cli/venes.mjs" setup; then
+started=""
+if [ -n "$plugin" ] && [ -f "$plugin/cli/venes.mjs" ] && node "$plugin/cli/venes.mjs" setup; then started=yes; fi
+# On Linux there's no Homebrew to do it, so the command is linked where Claude Code's own is, when
+# that folder is on the PATH and has no other `venes` in it. Uninstalling takes the link away.
+link="$HOME/.local/bin/venes"
+if [ "$(uname -s)" = Linux ] && [ -n "$started" ] && [ -d "$HOME/.local/bin" ]; then
+  if [ ! -e "$link" ] || [ "$(readlink "$link" 2>/dev/null)" = "$HOME/.venes/venes" ]; then
+    ln -sf "$HOME/.venes/venes" "$link"
+    case ":$PATH:" in *":$HOME/.local/bin:"*) command="venes" ;; esac
+  fi
+fi
+if [ -n "$started" ]; then
   ready="Pair the app: $command pair"
 else
   ready="The helper starts with your next Claude Code session. Then pair the app: $command pair"

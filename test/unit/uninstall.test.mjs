@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { helperPaths } from '../../src/paths.mjs';
 import { removePhoneKeys } from '../../src/pairing.mjs';
-import { isPluginInstalled, uninstall } from '../../src/uninstall.mjs';
+import { isPluginInstalled, removeCommandLink, uninstall } from '../../src/uninstall.mjs';
 
 function folder(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-uninstall-'));
@@ -143,4 +143,24 @@ test('an uninstalled copy still run by an open session\'s hooks sets nothing up'
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(home), false, 'no launcher, no helper');
   assert.equal(fs.existsSync(path.join(dir, 'settings.json')), false, 'nor a status line');
+});
+
+test('the command linked on Linux goes if it still leads to this helper, and anything else there is left', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-link-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const paths = helperPaths(path.join(dir, 'home'));
+  const link = path.join(dir, 'venes');
+  removeCommandLink(paths, link);
+  fs.symlinkSync(path.join(dir, 'someone-elses'), link);
+  removeCommandLink(paths, link);
+  assert.equal(fs.readlinkSync(link), path.join(dir, 'someone-elses'));
+  fs.rmSync(link);
+  fs.writeFileSync(link, 'a command of the same name');
+  removeCommandLink(paths, link);
+  assert.equal(fs.readFileSync(link, 'utf8'), 'a command of the same name');
+  fs.rmSync(link);
+  fs.symlinkSync(paths.launcher, link);
+  removeCommandLink(paths, link);
+  assert.equal(fs.existsSync(link), false);
+  assert.throws(() => fs.readlinkSync(link));
 });

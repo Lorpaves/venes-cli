@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { HelperError } from './errors.mjs';
 import { allowPhone, authorizedKeysFile, isPortOpen, knownHostKey, localHostName } from './pairing.mjs';
+import { isMac } from './platform.mjs';
 import { MAX_UPLOAD_BYTES, tooLarge } from './uploads.mjs';
 
 const SSH_PORT = 22;
@@ -83,8 +84,10 @@ export function displayLayout() {
 // Where this Mac's own Screen Sharing is, for a phone to reach straight over the tailnet with no SSH,
 // so with Remote Login off too: this Mac's address there while its Tailscale is on, whether Screen
 // Sharing answers, the account it signs in, and where its displays are in what it sends.
+// Only a Mac has it: whatever answers at that port on another system isn't Apple's Screen Sharing, which
+// is what a phone would try to sign in to, so it's off there.
 export async function screenAccess({
-  sharingOpen = () => isPortOpen(SCREEN_SHARING_PORT), status = tailscaleStatus, displays = displayLayout,
+  sharingOpen = () => (isMac ? isPortOpen(SCREEN_SHARING_PORT) : false), status = tailscaleStatus, displays = () => (isMac ? displayLayout() : []),
 } = {}) {
   const [on, current, layout] = await Promise.all([sharingOpen(), status(), displays()]);
   return { user: os.userInfo().username, port: SCREEN_SHARING_PORT, on, hosts: [tailnetAddressOf(current)].filter(Boolean), displays: layout };

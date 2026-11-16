@@ -8,9 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  addPairingKey, defaultWay, enrollPhone, findTmux, hasPairingKey, hostKeyFingerprint, makeNonce, makeOneTimeKey, pairingLine, pairingLink, pairingWays,
-  removePairingKey, renderQR, rexPairingLink, wayNote,
+  addPairingKey, defaultWay, enrollPhone, findTmux, hasPairingKey, hostKeyFingerprint, lanAddress, localHostName, makeNonce, makeOneTimeKey, pairingLine,
+  pairingLink, pairingWays, qrModules, removePairingKey, renderQR, rexPairingLink, wayNote,
 } from '../../src/pairing.mjs';
+import { computer, isMac } from '../../src/platform.mjs';
 
 function tempKeys(t, content) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-pair-'));
@@ -237,7 +238,7 @@ test('a way is ready, only switched off, or needs something downloaded first', (
     ['rex', 'ready', 'ready to use, nothing to download'], ['ssh', 'ready', 'ready to use, nothing to download'],
   ]);
   assert.deepEqual(shown(ways({ rexInstalled: true, tmuxInstalled: true })), [
-    ['rex', 'off', 'turn on Serve over Tailscale in Rex first'], ['ssh', 'off', 'turn on Remote Login first'],
+    ['rex', 'off', 'turn on Serve over Tailscale in Rex first'], ['ssh', 'off', isMac ? 'turn on Remote Login first' : 'start the SSH server first'],
   ]);
   assert.deepEqual(shown(ways({ remoteLogin: true })), [['rex', 'missing', 'download Rex first'], ['ssh', 'missing', 'install tmux first']]);
 });
@@ -265,14 +266,24 @@ async function pairInTerminal(t, file, hostKey, env) {
   const sshd = net.createServer().listen(0, '127.0.0.1');
   t.after(() => sshd.close());
   await once(sshd, 'listening');
-  const pair = spawn('/bin/sh', ['-c', 'cat | script -q /dev/null "$0" "$@"', process.execPath, CLI, 'pair'], {
+  // A Mac's `script` takes the command as it's written, and Linux's takes it as one line for a shell.
+  const inTerminal = isMac ? 'cat | script -q /dev/null "$0" "$@"' : 'cat | script -qec "\'$0\' \'$1\' \'$2\'" /dev/null';
+  const pair = spawn('/bin/sh', ['-c', inTerminal, process.execPath, CLI, 'pair'], {
     env: {
       ...process.env, VENES_HOME: path.join(path.dirname(file), 'home'), VENES_AUTHORIZED_KEYS: file, VENES_HOST_KEY: hostKey,
       VENES_SSH_PORT: String(sshd.address().port), ...env,
     },
     stdio: ['pipe', 'pipe', 'ignore'],
+    // In a group of its own, so that everything it started goes with it.
+    detached: true,
   });
-  t.after(() => pair.kill('SIGKILL'));
+  t.after(() => {
+    try {
+      process.kill(-pair.pid, 'SIGKILL');
+    } catch {
+      // All gone already.
+    }
+  });
   let text = '';
   pair.stdout.on('data', chunk => { text += chunk; });
   const plain = () => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
@@ -294,7 +305,7 @@ test('in a terminal, pair asks which way, starting on the one that works, and En
   const file = tempKeys(t, MINE);
   fs.writeFileSync(`${file}.host`, `${PHONE} host\n`);
   const run = await pairInTerminal(t, file, `${file}.host`, { PATH: fakeRex(t, '{"url":"https://mac.tail.ts.net"}') });
-  assert.match(await run.waitFor(/❯ Rex \(ready to use, nothing to download\)/), /How will the Venes app reach this Mac\?/);
+  assert.match(await run.waitFor(/❯ Rex \(ready to use, nothing to download\)/), new RegExp(`How will the Venes app reach this ${computer}\\?`));
   run.type('\r');
   assert.equal(linkIn(await run.waitFor(/venes:\/\/pair\S+/)).searchParams.get('r'), 'https://mac.tail.ts.net');
   assert.equal(await run.end(), 0);
@@ -311,7 +322,37 @@ test('in a terminal, a way that needs something downloaded says how to get it, a
   run.type('1');
   await run.waitFor(/❯ Rex \(download Rex first\)\s*\n\s+tmux, over SSH[^\n]*\n*$/);
   run.type('\r');
-  await run.waitFor(/Download Rex from https:\/\/www\.superlogical\.com\/rex/);
+  await run.waitFor(/(Download|Install) Rex from https:\/\/www\.superlogical\.com\/rex/);
   assert.equal(await run.end(), 1);
   assert.equal(fs.readFileSync(file, 'utf8'), MINE);
+});
+
+test('a QR code is drawn on any system: square, with a light module around it and the three corners in it', () => {
+  const rows = qrModules('venes://pair?r=https%3A%2F%2Fmac.tail.ts.net&n=Linux+Box');
+  assert.equal(rows.every(row => row.length === rows.length && /^[01]+$/.test(row)), true);
+  assert.equal(rows[0], '0'.repeat(rows.length));
+  assert.equal(rows.every(row => row.startsWith('0') && row.endsWith('0')), true);
+  // A corner's outer ring, seven modules long, at the top left and the top right.
+  assert.equal(rows[1].slice(1, 8), '1111111');
+  assert.equal(rows[1].slice(-8, -1), '1111111');
+  assert.equal(rows.at(-2).slice(1, 8), '1111111');
+});
+
+test('a Linux system is called by its name where Avahi answers for it, and by its address where not', () => {
+  const linux = given => localHostName({ platform: 'linux', hostname: 'build-box.lan', ...given });
+  assert.equal(linux({ announced: () => true, address: () => '192.168.1.20' }), 'build-box.local');
+  assert.equal(linux({ announced: () => false, address: () => '192.168.1.20' }), '192.168.1.20');
+  assert.equal(linux({ announced: () => false, address: () => undefined }), 'build-box');
+});
+
+test('its address is the one it goes out by, and never a container\'s or a tunnel\'s when there\'s another', () => {
+  const ip4 = (address, internal = false) => ({ family: 'IPv4', address, internal });
+  const interfaces = {
+    lo: [ip4('127.0.0.1', true)], docker0: [ip4('172.17.0.1')], tailscale0: [ip4('100.64.0.5')],
+    wlan0: [{ family: 'IPv6', address: 'fe80::1', internal: false }, ip4('192.168.1.20')], eth1: [ip4('10.0.0.9')],
+  };
+  assert.equal(lanAddress({ interfaces, outward: 'eth1' }), '10.0.0.9');
+  assert.equal(lanAddress({ interfaces, outward: undefined }), '192.168.1.20');
+  assert.equal(lanAddress({ interfaces: { lo: interfaces.lo, docker0: interfaces.docker0 }, outward: undefined }), '172.17.0.1');
+  assert.equal(lanAddress({ interfaces: { lo: interfaces.lo }, outward: undefined }), undefined);
 });

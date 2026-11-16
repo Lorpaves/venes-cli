@@ -6,18 +6,19 @@ import readlinePromises from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
+import { computer, isMac } from '../src/platform.mjs';
 import { writeLauncher } from '../src/setup.mjs';
 import { installStatusLine, removeStatusLine, runStatusLine, switchOnStatusLine } from '../src/status.mjs';
 import { MARKETPLACE, PLUGIN_ID, claudeConfigDir, isPluginInstalled, uninstall as uninstallVenes } from '../src/uninstall.mjs';
 import { startDaemon } from '../src/daemon.mjs';
 import { HelperClient } from '../src/client.mjs';
 import {
-  WAY_STEPS, addPairingKey, authorizedKeysFile, defaultWay, enrollPhone, findTmux, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName,
+  START_SSH, WAY_STEPS, addPairingKey, authorizedKeysFile, defaultWay, enrollPhone, findTmux, hasPairingKey, isPortOpen, knownHostKey, localHostName, macName,
   makeNonce, makeOneTimeKey, pairingLink, pairingWays, qrModules, readHostKeyFingerprint, removePairingKey, renderQR, rexPairingLink, wayNote,
 } from '../src/pairing.mjs';
 import { choose } from '../src/choice.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, isInstalled as isRexInstalled, tailnetAccount, tailnetAddress } from '../src/rex.mjs';
-import { pairingHost, readUpload, tailscaleStatus } from '../src/ssh.mjs';
+import { pairingHost, readUpload, tailnetAddressOf, tailscaleStatus } from '../src/ssh.mjs';
 import { autoUpdateEnabled } from '../src/update.mjs';
 import { VERSION, isNewer } from '../src/version.mjs';
 
@@ -40,7 +41,7 @@ Helper
   auto-update [on|off]          Show or change automatic updates
   pair [--rex|--ssh]            Show a QR code that pairs the Venes app, asking whether through Rex or tmux over SSH
   statusline [on|off]           Run as Claude Code's status line (set up by setup), or stop or start doing so
-  uninstall [--yes]             Take Venes off this Mac: the plugin, the helper, ~/.venes, and phones' SSH keys
+  uninstall [--yes]             Take Venes off this ${computer}: the plugin, the helper, ~/.venes, and phones' SSH keys
 
 Control
   sessions                      List sessions
@@ -179,7 +180,7 @@ const commands = {
     if (!args.includes('--yes') && !args.includes('-y')) {
       if (!process.stdin.isTTY) throw new Error('Run it with --yes to uninstall without being asked.');
       const prompt = readlinePromises.createInterface({ input: process.stdin, output: process.stdout });
-      const answer = await prompt.question(`This takes Venes off this Mac: its Claude Code plugin, the helper, ${paths.home}, and the SSH keys phones were let in with. Uninstall? [y/N] `);
+      const answer = await prompt.question(`This takes Venes off this ${computer}: its Claude Code plugin, the helper, ${paths.home}, and the SSH keys phones were let in with. Uninstall? [y/N] `);
       prompt.close();
       if (!/^y(es)?$/i.test(answer.trim())) { console.log('Nothing was changed.'); return; }
     }
@@ -205,7 +206,7 @@ const commands = {
       if (ok) console.log(typeof done[name] === 'function' ? done[name](detail) : done[name]);
       else console.log(`${name}: ${detail}. ${failed[name] ?? ''}`.trim());
     }
-    console.log('\nRestart sessions that are open, or run /reload-plugins in them. What the app sent stays in Downloads. Forget this Mac in the app.');
+    console.log(`\nRestart sessions that are open, or run /reload-plugins in them. What the app sent stays in Downloads. Forget this ${computer} in the app.`);
     if (steps.some(s => !s.ok)) process.exitCode = 1;
   },
   async version() {
@@ -319,8 +320,8 @@ function openPipe(input) {
 // Asks which way the phone comes in, starting on one that works now. Undefined when it's stopped.
 async function askWay(ways) {
   const question = ways.every(way => way.state === 'missing')
-    ? 'Neither Rex nor tmux is on this Mac yet. Pick one to see how to set it up.'
-    : 'How will the Venes app reach this Mac?';
+    ? `Neither Rex nor tmux is on this ${computer} yet. Pick one to see how to set it up.`
+    : `How will the Venes app reach this ${computer}?`;
   console.log(`\n${question}\n\x1b[2m↑/↓ to choose · Enter to go on · Esc to stop\x1b[22m\n`);
   const index = await choose({ options: ways.map(way => ({ label: way.label, note: wayNote(way) })), start: ways.indexOf(defaultWay(ways)) });
   console.log('');
@@ -370,15 +371,17 @@ async function pairThroughRex(way, isTerminal) {
 async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
   if (needsTmux && way.state === 'missing') return guide(WAY_STEPS.ssh.missing);
   if (!(await isPortOpen(port))) {
-    if (!isTerminal) throw new Error(`Turn on Remote Login first, in System Settings > General > Sharing.${isRexInstalled() ? ' Or turn on Serve over Tailscale in Rex.' : ''}`);
+    const first = isMac ? 'Turn on Remote Login first, in System Settings > General > Sharing.' : START_SSH;
+    if (!isTerminal) throw new Error(`${first}${isRexInstalled() ? ' Or turn on Serve over Tailscale in Rex.' : ''}`);
     console.log(`${WAY_STEPS.ssh.off} Waiting for it to be on…\n`);
-    openSharingSettings();
-    if (!(await waitFor(() => isPortOpen(port)))) throw new Error('Remote Login is still off. Run this again once it\'s on.');
+    if (isMac) openSharingSettings();
+    if (!(await waitFor(() => isPortOpen(port)))) throw new Error(`${isMac ? 'Remote Login is still off' : 'The SSH server still isn\'t answering'}. Run this again once it's on.`);
   }
   const file = authorizedKeysFile();
   const nonce = makeNonce();
   const { seed, publicKey } = makeOneTimeKey();
-  const host = pairingHost(await tailscaleStatus(), localHostName());
+  const tailscale = await tailscaleStatus();
+  const host = pairingHost(tailscale, localHostName());
   // All of this can fail, so it comes before anything is added to authorized_keys.
   const link = pairingLink({
     host, port, user: os.userInfo().username, hostKey: readHostKeyFingerprint(), seed, name: macName(),
@@ -393,9 +396,9 @@ async function pairOverSSH(way, port, { isTerminal, needsTmux }) {
     process.on(signal, () => { cleanUp(); process.exit(130); });
   }
   // On the tailnet, the phone signs in to Tailscale in the app first, as any account that reaches this Mac.
-  const reach = host.endsWith('.local')
-    ? 'Tailscale is off on this Mac, so the phone can only reach it on this network. Turn Tailscale on to reach it from anywhere.'
-    : 'The phone reaches this Mac on your tailnet: sign in to Tailscale in the app when it asks.';
+  const reach = host === tailnetAddressOf(tailscale)
+    ? `The phone reaches this ${computer} on your tailnet: sign in to Tailscale in the app when it asks.`
+    : `Tailscale is off on this ${computer}, so the phone can only reach it on this network. Turn Tailscale on to reach it from anywhere.`;
   const tmux = needsTmux ? '\n\nRun Claude Code inside tmux, so the app can type into it: tmux new -A -s cc' : '';
   console.log(`\n${code}\n\nScan this in the Venes app, or paste this into it:\n\n${link}\n\nIt works once, for five minutes. ${reach}${tmux}\n`);
   const deadline = Date.now() + PAIRING_LIMIT_MS;

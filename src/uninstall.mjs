@@ -54,8 +54,18 @@ function removeHome(home) {
   fs.rmSync(resolved, { recursive: true, force: true });
 }
 
+// The command as the install script links it on Linux, where Homebrew doesn't put it on the PATH: gone
+// if it's still that link to this helper's launcher, and left alone if it's anything else.
+export function removeCommandLink(paths, link = path.join(os.homedir(), '.local', 'bin', 'venes')) {
+  try {
+    if (fs.readlinkSync(link) === paths.launcher) fs.rmSync(link);
+  } catch {
+    // No link there.
+  }
+}
+
 // Each step goes on whatever the ones before it did, and says how it went: `{ name, ok, detail }`.
-export async function uninstall({ paths, authorizedKeys, stopHelper, run = runClaude }) {
+export async function uninstall({ paths, authorizedKeys, stopHelper, run = runClaude, commandLink }) {
   const steps = [];
   const step = async (name, action) => {
     try {
@@ -75,6 +85,9 @@ export async function uninstall({ paths, authorizedKeys, stopHelper, run = runCl
   await step('antigravity', () => removeHooks(paths.antigravityPlugin));
   await step('helper', () => stopHelper());
   await step('keys', () => removePhoneKeys(authorizedKeys));
-  await step('folder', () => removeHome(paths.home));
+  await step('folder', () => {
+    removeCommandLink(paths, commandLink);
+    removeHome(paths.home);
+  });
   return steps;
 }

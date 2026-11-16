@@ -2,13 +2,13 @@
 
 A Claude Code plugin, and the `venes` command, that turns a session's hooks and transcript into one structured event stream, so you can follow and answer it from another device: messages, status, permission prompts, questions and plans.
 
-It's the Mac side of Venes, an iOS app that is still in development. Until the app ships, you can use everything from the command line.
+It's the computer's side of [Venes](https://venes.lorpaves.com), an app for iPhone and iPad, and runs on macOS and on Linux. Everything can be used from the command line too.
 
 Venes is an independent project, not made by or affiliated with Anthropic.
 
 ## Install
 
-Requires Claude Code, Node.js 22 or later, and either [Rex](https://www.superlogical.com/rex) or tmux to send input to a session. Tested on macOS.
+Requires Claude Code, Node.js 22 or later, and either [Rex](https://www.superlogical.com/rex) or tmux to send input to a session. It runs on macOS and on Linux, where it needs curl too. What's different on Linux is under [Linux](#linux).
 
 ```sh
 brew install lorpaves/venes/venes
@@ -16,11 +16,13 @@ brew install lorpaves/venes/venes
 
 That installs the plugin into Claude Code, starts its background helper, and puts `venes` on your PATH. Sessions that were open before need a restart or `/reload-plugins` to be seen. The plugin then keeps itself up to date through Claude Code, and `brew upgrade` updates it whenever there's a new release.
 
-Without Homebrew, run the install script, which does the same but leaves the command at `~/.venes/venes`:
+Without Homebrew, as on Linux, run the install script, which does the same but leaves the command at `~/.venes/venes`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Lorpaves/venes-cli/main/install.sh | sh
 ```
+
+On Linux it links the command into `~/.local/bin` as well, where Claude Code's own installer puts `claude`, so it's `venes` once that folder is on your PATH.
 
 Or at the prompt of a Claude Code session, `/plugin install venes --marketplace Lorpaves/venes-cli`. The helper then starts with the next session, or with the next message after `/reload-plugins`.
 
@@ -60,7 +62,7 @@ A way that's only switched off is waited for while you turn it on, and Remote Lo
 
 Through Rex, the code holds this Mac's name, its address on your tailnet, and the Tailscale account Rex is signed in with, and no credential: Rex asks Tailscale who's calling and lets in only the account that signed in. To stop a phone reaching this Mac, sign it out of that account or turn Tailscale off in Rex.
 
-Over SSH, the code holds this Mac's name, address and host key, and a one-time key. The address is this Mac's on your tailnet while its Tailscale app is on, so the phone reaches it from anywhere, signed in to Tailscale in the app as any account the tailnet lets reach it. With Tailscale off, it's the Mac's name on the local network. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password. To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
+Over SSH, the code holds this Mac's name, address and host key, and a one-time key. The address is this Mac's on your tailnet while its Tailscale app is on, so the phone reaches it from anywhere, signed in to Tailscale in the app as any account the tailnet lets reach it. With Tailscale off, it's the Mac's name on the local network. On Linux that's the computer's name where Avahi answers for it, and its address on the network where not. That key is added to `~/.ssh/authorized_keys` and can do nothing but hand over the app's own public key. It works once, and it's removed after five minutes either way. The app's private key never leaves the phone, and nothing asks for your password. To unpair a phone, delete its `venes-phone` line from `~/.ssh/authorized_keys`.
 
 ## What it does on your machine
 
@@ -69,8 +71,8 @@ Over SSH, the code holds this Mac's name, address and host key, and a one-time k
 - **It downloads one thing.** The first time it starts, it runs `npm install` for Anthropic's [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), into `~/.venes/sdk`, to list your stored sessions. It leaves out the SDK's Claude Code binary, runs no install scripts, and needs no account: the SDK only reads files on this Mac here. Without it, the app still shows what's running.
 - **It sees your sessions.** Hooks forward prompts, replies, tool inputs and results to the helper, which keeps the last 5000 events in memory and writes none of them to disk. So that a restart doesn't lose track of them, it keeps a list of open sessions in `~/.venes/sessions.json`: their ids, folders and tmux panes, with no conversation text.
 - **It can act for you.** Anyone who can log in to your Mac as you, or get into your Rex, can approve tools, type into sessions and resume stored sessions through it. Use an SSH key, and consider turning password login off.
-- **It changes your files only when you ask.** From the app you can look through a session's folder, and through any folder on this Mac while you choose where a session starts, and there make a file or a folder, edit a text file, and delete one. A file that changed since you opened it isn't written over unless you say so, and what you delete goes to the Trash, where you can put it back from.
-- **It keeps what you attach.** A picture, video or file sent with a message from the app is saved in your Downloads folder, where Claude can read it and you can find it. They stay there when you delete the session. What the helper knows of them is in `~/.venes/uploads`, until the session is deleted, or for 30 days.
+- **It changes your files only when you ask.** From the app you can look through a session's folder, and through any folder on this Mac while you choose where a session starts, and there make a file or a folder, edit a text file, and delete one. A file that changed since you opened it isn't written over unless you say so, and what you delete goes to the Trash, where you can put it back from: on Linux the desktop's own, as its file manager keeps it.
+- **It keeps what you attach.** A picture, video or file sent with a message from the app is saved in your Downloads folder, where Claude can read it and you can find it: on Linux the one your desktop names. They stay there when you delete the session. What the helper knows of them is in `~/.venes/uploads`, until the session is deleted, or for 30 days.
 - **It stands in as your status line.** A plugin can't set Claude Code's status line, and what Claude Code tells a status line is the only place a session's limits are, so the helper sets `statusLine` in `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) to `~/.venes/venes statusline`. That keeps what Claude Code sends in `~/.venes/status`, a file a session for a week, and runs the status line you had with the same input, so your terminal shows what it did. The one you had is kept in `~/.venes/statusline.json`. With none before, it shows nothing, and Claude Code then leaves out the key hints it shows under the box when there's no status line. `~/.venes/venes statusline off` puts yours back and keeps it there; `statusline on` stands in again. A settings file that isn't plain JSON is left alone.
 - **It can let your phone in over SSH.** The app asks to, to send files over SSH, and the helper adds the phone's own public key to `~/.ssh/authorized_keys`, as pairing over SSH does. That only works while Remote Login is on.
 - **It follows Antigravity, if you use it.** On a Mac that has Google's Antigravity (a `~/.gemini` folder), the helper puts a plugin of its own in `~/.gemini/config/plugins/venes`, whose hooks hand what an Antigravity session does to the helper, as the Claude Code plugin's do. No hook of it is asked whether a tool may run, so Antigravity decides that as it would without it, and with no helper running the hooks do nothing. A session you start from the app runs `agy` in Rex or tmux, and `agy acp` once, for a moment, to make the empty conversation. While you look at a session's status it runs `agy -p /usage` every few minutes, for your limits. It reads Antigravity's own list of your conversations and their transcripts, and changes what Antigravity keeps only when you delete a session from the app, which moves that conversation to the Trash. See [Antigravity sessions](#antigravity-sessions).
@@ -121,6 +123,20 @@ It leaves alone:
 
 If `~/.venes/venes` isn't there, the helper never started, and `claude plugin uninstall venes@venes` is all there is to do.
 
+## Linux
+
+The helper does on Linux what it does on a Mac, with what a Linux system has:
+
+- **Installing.** The install script above, since Homebrew's cask is for macOS. It needs `curl`, which a session's hooks reach the helper with.
+- **Pairing over SSH.** Remote Login is the SSH server: `sudo systemctl enable --now ssh` (the service is `sshd` on Fedora and Arch). `venes pair` draws its code itself, with nothing to install for it.
+- **Pairing through Rex.** The Rex server from [its own installer](https://www.superlogical.com/rex/docs/installation), with its Tailscale on: `rex server tailscale login`, then `rex server tailscale on`.
+- **The Trash.** What's deleted from the app goes where a file manager's Move to Trash puts it, by the [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash/latest/): `~/.local/share/Trash` for what's on the home folder's disk, and a `.Trash-<uid>` folder at the top of another disk for what's there. Each thing has its note of where it was, so the file manager can put it back.
+- **Downloads.** The folder the desktop names in `~/.config/user-dirs.dirs`, or `~/Downloads`.
+- **The account's picture.** `~/.face`, or the one the system keeps for the account, if it's a JPEG or a PNG under a megabyte.
+- **No Screen Sharing.** That's a Mac's own. `screen` answers that it's off.
+
+What has been run on Linux: the unit tests, and the helper end to end in an Ubuntu container, installed by its script into Claude Code, paired over sshd, reached as the app reaches it, with files made and trashed, terminals driven through tmux and through Rex, and hooks taken in from both. A whole session with Claude Code signed in has only been run on macOS.
+
 ## How it works
 
 ```
@@ -135,13 +151,13 @@ transcript ───── polled ────────┘     │
 
 A client runs `~/.venes/venes attach` over SSH, or [through Rex](#connecting-through-rex), and speaks newline-delimited JSON on stdin and stdout. SSH handles authentication. The launcher uses absolute paths because a command run over SSH gets a minimal PATH without node or tmux, and the plugin refreshes it at each session start because the plugin's path changes with every version. The helper starts on demand and outlives the connection.
 
-The connection opens with `{"type":"hello","protocol":…,"version":…}`. Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok":true,…}` reply. On failure, `ok` is false and `error` holds `{code, message, details}`. Replies can arrive out of order, so match them by `id`.
+The connection opens with `{"type":"hello","protocol":…,"version":…,"platform":…}`, where `platform` is what the helper runs on, `darwin` or `linux`, as Node names it, which says whether there's a Mac's Screen Sharing to ask for. Every request has an `id` and a `cmd`, and gets a `{"type":"result","id":…,"ok":true,…}` reply. On failure, `ok` is false and `error` holds `{code, message, details}`. Replies can arrive out of order, so match them by `id`.
 
 A line ends at a line feed and nowhere else. JSON leaves a line separator (U+2028) or a paragraph separator (U+2029) in a string as it is, and a reader that takes either for a line's end, as Node's `readline` does, loses any message with one in it, which a message's text or a file's can have. The helper reads a client's lines by the line feed alone (a helper before 0.19.1 didn't), and escapes those two in what it writes, so a client is safe to send them as they are or escaped, and to read with whatever splits lines.
 
 | Command | Fields | Reply or effect |
 |---|---|---|
-| `ping` | | `protocol`, `version`, `quiet` (whether the helper could restart now), and `tailscaleAccount` while Tailscale is on in Rex: the account Rex is signed in with, which a phone reaches this Mac as through Rex |
+| `ping` | | `protocol`, `version`, `platform`, `quiet` (whether the helper could restart now), and `tailscaleAccount` while Tailscale is on in Rex: the account Rex is signed in with, which a phone reaches this Mac as through Rex |
 | `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |

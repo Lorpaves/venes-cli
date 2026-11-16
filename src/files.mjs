@@ -6,10 +6,12 @@
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { HelperError } from './errors.mjs';
 import { changedPaths } from './git.mjs';
+import { computer, isMac } from './platform.mjs';
 
 // A folder with more in it than this lists the first ones, and says so.
 export const FILE_ENTRIES = 2000;
@@ -81,7 +83,7 @@ export function makeIn(parent, name, { folder = false } = {}) {
     else fs.closeSync(fs.openSync(target, 'wx'));
   } catch (error) {
     if (error.code === 'EEXIST') throw new HelperError('name_taken', `${given} is already there.`);
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new HelperError('no_folder', `${parent} isn't a folder on this Mac.`);
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new HelperError('no_folder', `${parent} isn't a folder on this ${computer}.`);
     throw new HelperError('unwritable_folder', `Nothing can be made in ${parent}.`);
   }
   return folder ? { name: given, path: target, kind: 'dir' } : { name: given, path: target, kind: 'file', size: 0 };
@@ -95,18 +97,78 @@ export function createEntry(root, named, { name, folder } = {}) {
   try {
     real = { root: fs.realpathSync(root), parent: fs.realpathSync(parent) };
   } catch {
-    throw new HelperError('no_folder', `${parent} isn't a folder on this Mac.`);
+    throw new HelperError('no_folder', `${parent} isn't a folder on this ${computer}.`);
   }
   if (!isWithin(real.root, real.parent)) throw new HelperError('bad_path', 'That\'s outside this session\'s folder.');
   return makeIn(parent, name, { folder: folder === true });
 }
 
+// The disk a path is on, as the system numbers it.
+const diskOf = file => fs.lstatSync(file).dev;
+
+// The folder a disk is mounted at: the highest one above `folder` that's still on its disk.
+function mountOf(folder) {
+  let top = folder;
+  for (let above = path.dirname(top); above !== top && diskOf(above) === diskOf(folder); above = path.dirname(top)) top = above;
+  return top;
+}
+
+// A path as a trash's note of where something came from has it: each part of it escaped as in a link.
+const escaped = file => file.split('/').map(encodeURIComponent).join('/');
+
+// A time as that note has it: this computer's own, to the second, with no zone.
+function stamp(when) {
+  const two = number => String(number).padStart(2, '0');
+  return `${when.getFullYear()}-${two(when.getMonth() + 1)}-${two(when.getDate())}T${two(when.getHours())}:${two(when.getMinutes())}:${two(when.getSeconds())}`;
+}
+
+// A Linux desktop's Trash, as its file managers keep it (the freedesktop.org Trash specification): what's
+// trashed goes into a folder `files`, with a note beside it in `info` of where it was and when it went,
+// which is what putting it back reads. Something on the home folder's disk goes to the home's trash.
+// Something on another disk goes to a trash at that disk's top, since a move can't cross disks.
+export function moveToLinuxTrash(target, { home = os.homedir(), data = process.env.XDG_DATA_HOME, uid = process.getuid(), now = new Date() } = {}) {
+  const from = path.resolve(target);
+  const onHomeDisk = diskOf(path.dirname(from)) === diskOf(home);
+  const top = onHomeDisk ? undefined : mountOf(path.dirname(from));
+  const trash = onHomeDisk ? path.join(data || path.join(home, '.local', 'share'), 'Trash') : path.join(top, `.Trash-${uid}`);
+  const files = path.join(trash, 'files');
+  const info = path.join(trash, 'info');
+  fs.mkdirSync(files, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(info, { recursive: true, mode: 0o700 });
+  // In the home's trash the note has the whole path. In a disk's own it's from that disk's top.
+  const where = escaped(onHomeDisk ? from : path.relative(top, from));
+  const note = `[Trash Info]\nPath=${where}\nDeletionDate=${stamp(now)}\n`;
+  const base = path.basename(from);
+  for (let count = 1; ; count++) {
+    const name = count === 1 ? base : `${base}.${count}`;
+    const noted = path.join(info, `${name}.trashinfo`);
+    try {
+      // The note is made first and only if there's none of that name, which keeps the name for this one.
+      fs.writeFileSync(noted, note, { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if (error.code === 'EEXIST') continue;
+      throw error;
+    }
+    try {
+      fs.renameSync(from, path.join(files, name));
+      return;
+    } catch (error) {
+      fs.rmSync(noted, { force: true });
+      throw error;
+    }
+  }
+}
+
 // Moves what's at `target` to the Trash, as Finder's Move to Trash does, so that it can be put back. A
 // link goes and what it leads to stays. A test run names a folder of its own in VENES_TRASH, which takes
 // what's moved in the Trash's place.
-export async function moveToTrash(target, { command = TRASH_COMMAND, instead = process.env.VENES_TRASH } = {}) {
+export async function moveToTrash(target, { command = TRASH_COMMAND, instead = process.env.VENES_TRASH, mac = isMac } = {}) {
   if (instead) {
     fs.renameSync(target, path.join(instead, `${Date.now()}-${path.basename(target)}`));
+    return;
+  }
+  if (!mac) {
+    moveToLinuxTrash(target);
     return;
   }
   if (!fs.existsSync(command)) throw new HelperError('no_trash', 'Moving things to the Trash from afar needs macOS 15 or later on this Mac.');
@@ -197,7 +259,7 @@ export async function listFolder(root, named, { limit = FILE_ENTRIES, changes = 
   try {
     entries = fs.readdirSync(folder, { withFileTypes: true });
   } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new HelperError('no_folder', `${folder} isn't a folder on this Mac.`);
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new HelperError('no_folder', `${folder} isn't a folder on this ${computer}.`);
     throw new HelperError('unreadable_folder', `${folder} can't be read.`);
   }
   const listed = entries.filter(entry => !HIDDEN.has(entry.name) && (hidden || !entry.name.startsWith('.'))).map(entry => entryOf(folder, entry)).filter(Boolean);

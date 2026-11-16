@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, isWithin, listAnywhere, listFolder, mediaTypeOf, moveToTrash, readChunk, readFile, trashEntry,
+  CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, isWithin, listAnywhere, listFolder, mediaTypeOf, moveToLinuxTrash, moveToTrash, readChunk, readFile,
+  trashEntry,
   writeFile,
 } from '../../src/files.mjs';
 import { createFile, createFolder } from '../../src/folders.mjs';
@@ -308,8 +309,82 @@ test('a test run\'s own folder takes what\'s moved in the Trash\'s place, and a 
   assert.deepEqual(fs.readdirSync(root), []);
   assert.deepEqual(fs.readdirSync(instead).map(name => name.replace(/^\d+-/, '')).sort(), ['a.txt', 'dir']);
   write('c.txt', 'c');
-  await assert.rejects(moveToTrash(path.join(root, 'c.txt'), { command: path.join(root, 'no-such-command'), instead: undefined }), { code: 'no_trash' });
+  await assert.rejects(moveToTrash(path.join(root, 'c.txt'), { command: path.join(root, 'no-such-command'), instead: undefined, mac: true }), { code: 'no_trash' });
   assert.equal(fs.existsSync(path.join(root, 'c.txt')), true);
+});
+
+// A Linux desktop's Trash, in a folder of the test's own where the home's would be.
+function linuxTrash(t) {
+  const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-data-')));
+  t.after(() => fs.rmSync(data, { recursive: true, force: true }));
+  const at = (...parts) => path.join(data, 'Trash', ...parts);
+  return { data, at, read: (...parts) => fs.readFileSync(at(...parts), 'utf8') };
+}
+
+test('on Linux what\'s trashed goes to the desktop\'s Trash, with a note of where it was and when it went', t => {
+  const { root, write } = folder(t);
+  const { data, at, read } = linuxTrash(t);
+  write('a b.txt', 'a');
+  moveToLinuxTrash(path.join(root, 'a b.txt'), { home: root, data, now: new Date(2026, 10, 16, 9, 5, 7) });
+  assert.deepEqual(fs.readdirSync(root), []);
+  assert.equal(read('files', 'a b.txt'), 'a');
+  assert.equal(read('info', 'a b.txt.trashinfo'), `[Trash Info]\nPath=${root.split('/').map(encodeURIComponent).join('/')}/a%20b.txt\nDeletionDate=2026-11-16T09:05:07\n`);
+  assert.equal(fs.statSync(at('files')).mode & 0o777, 0o700);
+});
+
+test('on Linux a second thing of one name is kept beside the first, and a folder goes whole', t => {
+  const { root, write } = folder(t);
+  const { data, at, read } = linuxTrash(t);
+  for (const text of ['one', 'two']) {
+    write('a.txt', text);
+    moveToLinuxTrash(path.join(root, 'a.txt'), { home: root, data });
+  }
+  write('dir/b.txt', 'b');
+  moveToLinuxTrash(path.join(root, 'dir'), { home: root, data });
+  assert.deepEqual(fs.readdirSync(at('files')).sort(), ['a.txt', 'a.txt.2', 'dir']);
+  assert.deepEqual(fs.readdirSync(at('info')).sort(), ['a.txt.2.trashinfo', 'a.txt.trashinfo', 'dir.trashinfo']);
+  assert.deepEqual([read('files', 'a.txt'), read('files', 'a.txt.2'), read('files', 'dir', 'b.txt')], ['one', 'two', 'b']);
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
+test('on Linux a link goes to the Trash and what it leads to stays', t => {
+  const { root, write } = folder(t);
+  const { data, at } = linuxTrash(t);
+  write('real.txt', 'r');
+  fs.symlinkSync(path.join(root, 'real.txt'), path.join(root, 'link'));
+  moveToLinuxTrash(path.join(root, 'link'), { home: root, data });
+  assert.deepEqual(fs.readdirSync(root), ['real.txt']);
+  assert.equal(fs.lstatSync(at('files', 'link')).isSymbolicLink(), true);
+});
+
+// A second disk to try it on, where the system has one that anyone may write to.
+const OTHER_DISK = '/dev/shm';
+const hasOtherDisk = (() => {
+  try {
+    return fs.statSync(OTHER_DISK).dev !== fs.statSync(os.tmpdir()).dev;
+  } catch {
+    return false;
+  }
+})();
+
+test('on Linux something on another disk goes to a trash at that disk\'s top, noted from there', { skip: !hasOtherDisk }, t => {
+  const { root } = folder(t);
+  const there = fs.mkdtempSync(path.join(OTHER_DISK, 'venes-files-'));
+  const trash = path.join(OTHER_DISK, `.Trash-${process.getuid()}`);
+  const hadTrash = fs.existsSync(trash);
+  t.after(() => {
+    fs.rmSync(there, { recursive: true, force: true });
+    if (hadTrash) {
+      for (const part of [['files', 'far.txt'], ['info', 'far.txt.trashinfo']]) fs.rmSync(path.join(trash, ...part), { force: true });
+    } else {
+      fs.rmSync(trash, { recursive: true, force: true });
+    }
+  });
+  fs.writeFileSync(path.join(there, 'far.txt'), 'f');
+  moveToLinuxTrash(path.join(there, 'far.txt'), { home: root });
+  assert.equal(fs.readFileSync(path.join(trash, 'files', 'far.txt'), 'utf8'), 'f');
+  assert.match(fs.readFileSync(path.join(trash, 'info', 'far.txt.trashinfo'), 'utf8'), new RegExp(`^\\[Trash Info\\]\\nPath=${path.basename(there)}/far\\.txt\\nDeletionDate=`));
+  assert.deepEqual(fs.readdirSync(there), []);
 });
 
 test('a text file takes the text it was edited to, when it\'s still the file that was read', t => {

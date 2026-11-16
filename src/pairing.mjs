@@ -9,6 +9,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { HelperError } from './errors.mjs';
+import { isMac } from './platform.mjs';
+import { qrRows } from './qr.mjs';
 
 const PAIRING_COMMENT = 'venes-pairing';
 const PHONE_COMMENT = 'venes-phone';
@@ -113,17 +115,50 @@ export function readHostKeyFingerprint(file = process.env.VENES_HOST_KEY || HOST
   return hostKeyFingerprint(fs.readFileSync(file, 'utf8'));
 }
 
-export function localHostName() {
+// The interface this computer reaches the rest of the world by, on Linux, which says so itself.
+function defaultInterface() {
   try {
-    return `${execFileSync('scutil', ['--get', 'LocalHostName'], { encoding: 'utf8' }).trim()}.local`;
+    const route = fs.readFileSync('/proc/net/route', 'utf8').split('\n').slice(1).map(line => line.split('\t')).find(fields => fields[1] === '00000000');
+    return route?.[0];
   } catch {
-    return os.hostname();
+    return undefined;
   }
 }
 
-// What the phone calls this Mac.
+// Interfaces that aren't a network a phone could be on: containers', tunnels', virtual machines'.
+const INNER_INTERFACE = /^(docker|br-|veth|virbr|tailscale|tun|tap|wg|zt|lxc|cni|podman)/;
+
+// This computer's own address on its network: the one it goes out by, or else the first it has that
+// isn't a container's or a tunnel's.
+export function lanAddress({ interfaces = os.networkInterfaces(), outward = defaultInterface() } = {}) {
+  const usable = Object.entries(interfaces).flatMap(([name, addresses]) => (addresses ?? [])
+    .filter(each => each.family === 'IPv4' && !each.internal).map(each => ({ name, address: each.address })));
+  const found = usable.find(each => each.name === outward) ?? usable.find(each => !INNER_INTERFACE.test(each.name)) ?? usable[0];
+  return found?.address;
+}
+
+// Whether something on a Linux system answers for its name on the local network, which is Avahi.
+const isAnnounced = () => fs.existsSync('/run/avahi-daemon/socket');
+
+// What this computer answers to on the local network. A Mac has a name for that. A Linux system
+// answers to its name there only where Avahi runs, and is called by its address where it doesn't.
+export function localHostName({ platform = process.platform, hostname = os.hostname(), announced = isAnnounced, address = lanAddress } = {}) {
+  if (platform === 'darwin') {
+    try {
+      return `${execFileSync('scutil', ['--get', 'LocalHostName'], { encoding: 'utf8' }).trim()}.local`;
+    } catch {
+      return hostname;
+    }
+  }
+  const name = hostname.split('.')[0];
+  if (announced()) return `${name}.local`;
+  return address() ?? name;
+}
+
+// What the phone calls this computer.
 export function macName() {
-  return localHostName().replace(/\.local$/, '').replace(/-/g, ' ');
+  const name = isMac ? localHostName().replace(/\.local$/, '') : os.hostname().split('.')[0];
+  return name.replace(/-/g, ' ');
 }
 
 // A Mac that has never had Remote Login on has no host key.
@@ -160,7 +195,7 @@ export function pairingWays({ rexInstalled, rexAddress, tmuxInstalled, remoteLog
 
 const WAY_NOTES = {
   rex: { off: 'turn on Serve over Tailscale in Rex first', missing: 'download Rex first' },
-  ssh: { off: 'turn on Remote Login first', missing: 'install tmux first' },
+  ssh: { off: isMac ? 'turn on Remote Login first' : 'start the SSH server first', missing: 'install tmux first' },
 };
 
 export const wayNote = way => (way.state === 'ready' ? 'ready to use, nothing to download' : WAY_NOTES[way.id][way.state]);
@@ -170,8 +205,25 @@ export function defaultWay(ways) {
   return ways.find(way => way.state === 'ready') ?? ways.find(way => way.state === 'off') ?? ways[0];
 }
 
+// How a Linux system's SSH server is started, which a Mac calls Remote Login.
+export const START_SSH = 'Start the SSH server: `sudo systemctl enable --now ssh` (the service is `sshd` on Fedora and Arch).';
+
+// What to do to use a way that isn't ready, on Linux.
+const LINUX_WAY_STEPS = {
+  rex: {
+    off: 'Turn on Tailscale in Rex: `rex server tailscale login`, then `rex server tailscale on`.',
+    missing: 'Install Rex from https://www.superlogical.com/rex. Turn on its Tailscale with `rex server tailscale login` and '
+      + '`rex server tailscale on`, and run Claude Code in Rex. Then run `~/.venes/venes pair` again.',
+  },
+  ssh: {
+    off: START_SSH,
+    missing: 'Install tmux with your package manager, such as `sudo apt install tmux`. '
+      + `${START_SSH} Run Claude Code inside tmux: \`tmux new -A -s cc\`. Then run \`~/.venes/venes pair\` again.`,
+  },
+};
+
 // What to do to use a way that isn't ready.
-export const WAY_STEPS = {
+export const WAY_STEPS = !isMac ? LINUX_WAY_STEPS : {
   rex: {
     off: 'In Rex\'s settings, turn on Serve over Tailscale.',
     missing: 'Download Rex from https://www.superlogical.com/rex and open it. In its settings, turn on Serve over Tailscale, '
@@ -225,9 +277,15 @@ function run(argv) {
   return rows.join('\\n');
 }`;
 
+// Where Core Image can't be asked, as on Linux, the code is drawn here instead, and reads the same.
 export function qrModules(text) {
-  const output = execFileSync('osascript', ['-l', 'JavaScript', '-e', QR_SCRIPT, text], { encoding: 'utf8' });
-  return output.trim().split('\n');
+  if (!isMac) return qrRows(text);
+  try {
+    const output = execFileSync('osascript', ['-l', 'JavaScript', '-e', QR_SCRIPT, text], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return output.trim().split('\n');
+  } catch {
+    return qrRows(text);
+  }
 }
 
 // Two rows of modules to a line of text. The colours are fixed, because a code on a dark

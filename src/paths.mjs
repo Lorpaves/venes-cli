@@ -1,6 +1,23 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pluginFolder } from './agyhooks.mjs';
+
+// Where things downloaded go. A Mac has one folder for it. A Linux desktop says where its own is, which
+// may be named in the person's language, in a file in the home folder.
+export function downloadsFolder({ home = os.homedir(), platform = process.platform, config = process.env.XDG_CONFIG_HOME } = {}) {
+  if (platform !== 'darwin') {
+    try {
+      const dirs = fs.readFileSync(path.join(config || path.join(home, '.config'), 'user-dirs.dirs'), 'utf8');
+      const named = /^XDG_DOWNLOAD_DIR="(.+)"\s*$/m.exec(dirs)?.[1]?.replace(/^\$HOME/, home);
+      // With none of its own it's given as the home folder itself, which isn't a place for these.
+      if (named && path.isAbsolute(named) && path.resolve(named) !== path.resolve(home)) return named;
+    } catch {
+      // No such file: the usual name.
+    }
+  }
+  return path.join(home, 'Downloads');
+}
 
 export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedir(), '.venes')) {
   return {
@@ -15,7 +32,7 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     // What's known of the files clients attach to messages, by session and then by upload.
     uploads: path.join(home, 'uploads'),
     // Where those files go, so that they're as easy to find as anything else this Mac was sent.
-    downloads: process.env.VENES_DOWNLOADS || path.join(os.homedir(), 'Downloads'),
+    downloads: process.env.VENES_DOWNLOADS || downloadsFolder(),
     // The Rex session the helper starts sessions in, by id, since its label can change.
     rexSession: path.join(home, 'rex-session'),
     sdkDir: process.env.VENES_SDK_DIR || path.join(home, 'sdk'),

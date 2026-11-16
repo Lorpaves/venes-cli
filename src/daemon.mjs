@@ -46,6 +46,7 @@ import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION } from './version.mjs';
+import { computer } from './platform.mjs';
 
 export const PROTOCOL_VERSION = 1;
 // What Claude Code sets for its own child processes, and the session that happened to start the
@@ -434,7 +435,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // The Tailscale account Rex is signed in with, which a phone reaches this Mac as through Rex.
     ping: () => {
       const account = tailscaleAccount();
-      return { protocol: PROTOCOL_VERSION, version: VERSION, quiet: store.isQuiet(), ...(account && { tailscaleAccount: account }) };
+      return { protocol: PROTOCOL_VERSION, version: VERSION, platform: process.platform, quiet: store.isQuiet(), ...(account && { tailscaleAccount: account }) };
     },
     update: async () => ({ version: VERSION, available: (await checkForUpdate()) ?? null }),
     sessions: (msg, socket) => listSessions(socket),
@@ -674,7 +675,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {
       const upload = findUpload(uploads, sessionId, uploadId);
-      if (!upload) throw new HelperError('unknown_file', 'This file is no longer on the Mac.');
+      if (!upload) throw new HelperError('unknown_file', `This file is no longer on the ${computer}.`);
       return { name: upload.name, mediaType: upload.mediaType, data: fs.readFileSync(upload.path).toString('base64') };
     },
     send: async msg => {
@@ -749,7 +750,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       subscribers.delete(socket);
       clients.delete(socket);
     });
-    write(socket, { type: 'hello', protocol: PROTOCOL_VERSION, version: VERSION });
+    write(socket, { type: 'hello', protocol: PROTOCOL_VERSION, version: VERSION, platform: process.platform });
     onLines(socket, async line => {
       let msg;
       try {

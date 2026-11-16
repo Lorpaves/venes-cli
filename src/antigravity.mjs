@@ -34,6 +34,7 @@ import { HelperError } from './errors.mjs';
 import { choicesOf, chooseRow } from './prompt.mjs';
 import { emptyBox } from './terminal.mjs';
 import { VERSION } from './version.mjs';
+import { computer } from './platform.mjs';
 
 export { MODE_IDS };
 export const AGENT = 'antigravity';
@@ -47,7 +48,8 @@ const READ_MARK_BYTES = 64;
 const CLIENT = { name: 'venes', title: 'Venes', version: VERSION };
 const DEFAULT_HISTORY_LIMIT = 50;
 const SESSION_ID = /^[\w-]{8,64}$/;
-const SQLITE = '/usr/bin/sqlite3';
+// A Mac has it there. Elsewhere it's wherever the system put it.
+const SQLITE = fs.existsSync('/usr/bin/sqlite3') ? '/usr/bin/sqlite3' : 'sqlite3';
 const exec = promisify(execFile);
 
 // What a terminal started for a session is called at the Mac, and what it's given of the helper's own surroundings.
@@ -1146,7 +1148,7 @@ export class Antigravity {
   // Opens Antigravity's terminal on a conversation, and waits until it's ready for a message. It asks
   // first about a folder it doesn't trust, and the reader's word, given in the app, answers that here.
   async #open(sessionId, cwd, { trust = false } = {}) {
-    if (!this.#terminal) throw new HelperError('no_tmux', 'Install tmux or Rex on your Mac to run this session.');
+    if (!this.#terminal) throw new HelperError('no_tmux', `Install tmux or Rex on your ${computer} to run this session.`);
     const name = `${TERMINAL_PREFIX}${sessionId.slice(0, TERMINAL_ID_LENGTH)}`;
     const variables = Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
     // The terminal the helper opened on it before may still be there with Antigravity in it, as after the
@@ -1202,8 +1204,8 @@ export class Antigravity {
   // A new conversation in a folder, in a terminal of its own at the Mac.
   async start({ cwd, trust = false }) {
     const folder = checkedFolder(cwd);
-    if (!this.#installed()) throw new HelperError('no_antigravity', 'Antigravity isn\'t on this Mac.');
-    if (!this.#terminal) throw new HelperError('no_tmux', 'Install tmux or Rex on your Mac to run this session.');
+    if (!this.#installed()) throw new HelperError('no_antigravity', `Antigravity isn't on this ${computer}.`);
+    if (!this.#terminal) throw new HelperError('no_tmux', `Install tmux or Rex on your ${computer} to run this session.`);
     if (trust !== true && !isTrusted(folder, this.#data)) throw new HelperError('needs_trust', 'Antigravity asks whether to trust this folder first.');
     // Asked for now, to be there by the time the terminal is up.
     this.#knownModels().catch(() => {});

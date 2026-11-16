@@ -2,6 +2,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { HelperError } from './sessions.mjs';
+import { computer } from './platform.mjs';
 
 const exec = promisify(execFile);
 const COMMAND_TIMEOUT_MS = 5000;
@@ -69,7 +70,7 @@ export async function startSession({ name, cwd, command, env }) {
     const output = await tmux(tmuxSocket, ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', name, ...size, '-c', cwd, ...variables, '--', ...command]);
     return { pane: output.trim(), tmuxSocket };
   } catch (error) {
-    if (error.code === 'ENOENT') throw new HelperError('no_tmux', 'Install tmux or Rex on your Mac to continue this session.');
+    if (error.code === 'ENOENT') throw new HelperError('no_tmux', `Install tmux or Rex on your ${computer} to continue this session.`);
     throw error;
   }
 }

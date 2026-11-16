@@ -128,6 +128,7 @@ If `~/.venes/venes` isn't there, the helper never started, and `claude plugin un
 The helper does on Linux what it does on a Mac, with what a Linux system has:
 
 - **Installing.** The install script above, since Homebrew's cask is for macOS. It needs `curl`, which a session's hooks reach the helper with.
+- **tmux.** 3.2 or later, which is the first that can start a session with the settings the helper gives it. Ubuntu 22.04 and Debian 12 have one, and older systems' own packages don't.
 - **Pairing over SSH.** Remote Login is the SSH server: `sudo systemctl enable --now ssh` (the service is `sshd` on Fedora and Arch). `venes pair` draws its code itself, with nothing to install for it.
 - **Pairing through Rex.** The Rex server from [its own installer](https://www.superlogical.com/rex/docs/installation), with its Tailscale on: `rex server tailscale login`, then `rex server tailscale on`.
 - **The Trash.** What's deleted from the app goes where a file manager's Move to Trash puts it, by the [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash/latest/): `~/.local/share/Trash` for what's on the home folder's disk, and a `.Trash-<uid>` folder at the top of another disk for what's there. Each thing has its note of where it was, so the file manager can put it back.

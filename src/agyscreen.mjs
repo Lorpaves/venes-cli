@@ -20,6 +20,12 @@ const SEARCH_LINES = 80;
 // It writes one of these while it works, and what it's doing after it.
 const SPINNER = /^\s*[⣾⣽⣻⢿⡿⣟⣯⣷]\s+\S/m;
 const TRUST_QUESTION = /Do you trust the contents of this project\?/;
+// The model's own question to the reader: "Question 1/2: Which colour?", then its rows, the last of which
+// opens a line to write on, "Your answer:".
+const QUESTION = /^Question (\d+)\/(\d+):\s*(\S.*)$/;
+const QUESTION_LINES = 6;
+const WRITE_IN = /^Write-in\b/;
+const WRITE_IN_OPEN = /^\s*Your answer:/m;
 const TRUST_PICKED = /^\s*>\s*Yes, I trust this folder/m;
 
 const linesOf = screen => {
@@ -75,11 +81,35 @@ export function readPrompt(screen) {
   if (at < 1 || rows.length < 2 || rows.some((row, index) => row.number !== index + 1)) return undefined;
   up();
   if (at < 0) return undefined;
-  const question = lines[at].trim();
-  if (!question.endsWith('?')) return undefined;
+  let question = lines[at].trim();
+  // What the model asks the reader is headed by which question it is of how many, needs no question
+  // mark, and can run over a line or two.
+  let head = at;
+  for (let back = 0; back < QUESTION_LINES && head >= 0 && !QUESTION.test(lines[head].trim()) && !EDGE.test(lines[head]); back++) head -= 1;
+  if (head >= 0 && QUESTION.test(lines[head].trim())) {
+    question = lines.slice(head, at + 1).map(line => line.trim()).filter(Boolean).join(' ');
+    at = head;
+  } else if (!question.endsWith('?')) {
+    return undefined;
+  }
   const edge = lines.slice(0, at).findLastIndex(line => EDGE.test(line));
   const about = lines.slice(edge + 1, at).map(line => line.trimEnd()).filter(line => line.trim()).join('\n').trim();
   return { question, about, rows };
+}
+
+// A prompt that is the model's question to the reader, and not one that asks whether something may be
+// done: what it asks, which it is of how many, the rows to choose from, and the row that opens a line to
+// write an answer of one's own on, where there is one. Nothing for any other prompt.
+export function questionOf(prompt) {
+  const found = QUESTION.exec(prompt?.question ?? '');
+  if (!found) return undefined;
+  const writeIn = prompt.rows.find(row => WRITE_IN.test(row.label));
+  return { text: found[3].trim(), index: Number(found[1]), count: Number(found[2]), rows: prompt.rows.filter(row => row !== writeIn), writeIn };
+}
+
+// Whether the line to write an answer on is open, under the row that opens it.
+export function asksWriteIn(screen) {
+  return WRITE_IN_OPEN.test(linesOf(screen).slice(-8).join('\n'));
 }
 
 // Whether something is open that Enter would answer: a prompt, a list such as its commands, or the

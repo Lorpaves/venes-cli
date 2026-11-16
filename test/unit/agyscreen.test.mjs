@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog, showsPage } from '../../src/agyscreen.mjs';
+import { asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, questionOf, asksWriteIn, reviewsWaiting, showsDialog, showsPage } from '../../src/agyscreen.mjs';
 import { choicesOf } from '../../src/prompt.mjs';
 
 // Screens as Antigravity's terminal drew them (1.5.8), 110 columns across.
@@ -116,4 +116,32 @@ test('a page a command opened is a list to move in, and neither a prompt nor the
   assert.equal(showsPage(['Do you trust the contents of this project?', '', '> Yes, I trust this folder', '  No, exit', '  ↑/↓ Navigate · enter Confirm', bar('', 'x')].join('\n')), false);
   // Either is something open, which a message mustn't be typed into: the page's line starts "Keyboard:".
   assert.deepEqual([MODEL_PAGE, COMMANDS_LIST, prompt, idle].map(showsDialog), [true, true, true, false]);
+});
+
+// What the model asks the reader, as Antigravity 1.5.8 draws it: with a question mark or without, then with the
+// row that opens a line to write on chosen.
+const asking = (question, rows = ['> 1. Small', '  2. Medium', '  3. Large', '  4. Write-in...'], foot = '  ↑/↓ Navigate · enter Select · esc Skip') => [
+  '? Pick a size', 'Question', RULE, ...question, ...rows, foot, bar('esc to cancel', 'auto · Orchestrator (Argon)'),
+].join('\n');
+
+test('the model\'s question to the reader is read as a question, with its rows and the one to write in', () => {
+  const read = questionOf(readPrompt(asking(['Question 1/1: Pick a size'])));
+  assert.deepEqual([read.text, read.index, read.count], ['Pick a size', 1, 1]);
+  assert.deepEqual(read.rows.map(row => [row.number, row.label, row.marked]), [[1, 'Small', true], [2, 'Medium', false], [3, 'Large', false]]);
+  assert.deepEqual([read.writeIn.number, read.writeIn.label], [4, 'Write-in...']);
+  // One of several, asked over two lines, with nothing to write in.
+  const long = questionOf(readPrompt(asking(['Question 2/3: Which of these colours would you', 'rather have?'], ['  1. Red', '> 2. Green'])));
+  assert.deepEqual([long.text, long.index, long.count, long.rows.length, long.writeIn], ['Which of these colours would you rather have?', 2, 3, 2, undefined]);
+  // A prompt that asks whether something may be done isn't one.
+  const permission = ['Command', RULE, 'Requesting permission for:', '   date', 'Run this command?', '> 1. Yes, run command', '  2. No, cancel',
+    '  ↑/↓ Navigate · tab Amend', bar('esc to cancel', 'x')].join('\n');
+  assert.equal(questionOf(readPrompt(permission)), undefined);
+  assert.equal(questionOf(undefined), undefined);
+  // It's something open, which a message mustn't be typed into, and not a page of the terminal's own.
+  assert.deepEqual([showsDialog(asking(['Question 1/1: Pick a size'])), showsPage(asking(['Question 1/1: Pick a size']))], [true, false]);
+});
+
+test('the line to write an answer on is told from the list it opens under', () => {
+  const open = asking(['Question 1/1: Pick a size'], ['  1. Small', '  2. Medium', '  3. Large', '> 4. Write-in...', '  Your answer:'], '  enter Submit · esc Back');
+  assert.deepEqual([asksWriteIn(open), asksWriteIn(asking(['Question 1/1: Pick a size']))], [true, false]);
 });

@@ -992,3 +992,49 @@ test('a command that only prints something leaves the session waiting, and a fil
   assert.deepEqual(await agent.send({ sessionId: ID, text: 'look', clientId: 'c2', attachments: [{ path: '/tmp/a.png', name: 'a.png' }] }), { queued: false });
   assert.equal(store.find(ID).status, 'running', 'a message waits for its turn');
 });
+
+// What the model asks the reader, as Antigravity 1.5.8 draws it.
+const QUESTION = [
+  '? Pick a size', 'Question', RULE, 'Question 1/1: Pick a size', '> 1. Small', '  2. Medium', '  3. Large', '  4. Write-in...',
+  '  ↑/↓ Navigate · enter Select · esc Skip', bar('esc to cancel'),
+].join('\n');
+const WRITING = QUESTION.replace('  4. Write-in...', '> 4. Write-in...\n  Your answer:').replace('> 1. Small', '  1. Small')
+  .replace('  ↑/↓ Navigate · enter Select · esc Skip', '  enter Submit · esc Back');
+
+async function asked(t) {
+  const made = setup(t);
+  await made.hook('SessionStart');
+  await made.hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: 'ask me' });
+  made.terminal.screen = QUESTION;
+  await made.until(() => made.store.requests().length === 1, 'the question');
+  return { ...made, request: made.store.requests()[0] };
+}
+
+test('what the model asks the reader is a question for them, answered by pressing its row', async t => {
+  const { store, terminal, request, until } = await asked(t);
+  assert.deepEqual([request.kind, request.agent, request.toolName], ['question', AGENT, 'AskUserQuestion']);
+  assert.deepEqual(request.input.questions, [{ question: 'Pick a size', header: 'Question', options: [{ label: 'Small' }, { label: 'Medium' }, { label: 'Large' }], multiSelect: false }]);
+  assert.equal(store.get(ID).status, 'waiting');
+  assert.throws(() => store.respond(request.id, { decision: 'allow' }), { code: 'missing_answers' });
+  assert.throws(() => store.respond(request.id, { decision: 'allow', answers: { 'Pick a size': '  ' } }), { code: 'missing_answers' });
+  terminal.onKey = () => { terminal.screen = BUSY; };
+  store.respond(request.id, { decision: 'allow', answers: { 'Pick a size': 'Medium' } });
+  await until(() => terminal.keys.length === 1, 'a key');
+  assert.deepEqual([terminal.keys, terminal.pasted], [['2'], []]);
+});
+
+test('an answer in the reader\'s own words is written on the line its row opens', async t => {
+  const { store, terminal, request, until } = await asked(t);
+  terminal.onKey = key => { terminal.screen = key === '4' ? WRITING : BUSY; };
+  store.respond(request.id, { decision: 'allow', answers: { 'Pick a size': ' Extra large ' } });
+  await until(() => terminal.keys.includes('Enter'), 'the answer sent');
+  assert.deepEqual([terminal.keys, terminal.pasted], [['4', 'Enter'], ['Extra large']]);
+});
+
+test('a question left unanswered is skipped, as Esc skips it at the terminal', async t => {
+  const { store, terminal, request, until } = await asked(t);
+  terminal.onKey = () => { terminal.screen = BUSY; };
+  store.respond(request.id, { decision: 'deny' });
+  await until(() => terminal.keys.length === 1, 'a key');
+  assert.deepEqual(terminal.keys, ['Escape']);
+});

@@ -25,7 +25,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import {
-  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, reviewsWaiting, showsDialog, showsPage,
+  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, asksWriteIn, hasTrustPicked, hasTyped, isIdle, isUp, readBar, questionOf, readPrompt, readReview, reviewsWaiting, showsDialog, showsPage,
 } from './agyscreen.mjs';
 import { mediaTypeOf, moveToTrash } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
@@ -984,7 +984,9 @@ export class Antigravity {
       return;
     }
     session.goneLooks = 0;
-    const prompt = readPrompt(screen);
+    // While an answer is being written on a question's own line, the question is as good as answered: it
+    // isn't asked again from under whoever is writing, here or at the terminal.
+    const prompt = asksWriteIn(screen) ? undefined : readPrompt(screen);
     const bar = readBar(screen);
     this.#noteBar(id, bar);
     if (session.turn) this.#tell(id, session);
@@ -1019,6 +1021,11 @@ export class Antigravity {
       session.lastPrompt = prompt;
       return;
     }
+    const question = questionOf(prompt);
+    if (question) {
+      this.#askQuestion(id, session, known, prompt, question);
+      return;
+    }
     const rows = prompt.rows;
     if (!/^Yes\b/.test(rows[0].label) || !/^No\b/.test(rows.at(-1).label)) return;
     // It asks about the call under way: the latest, where there are several.
@@ -1046,6 +1053,55 @@ export class Antigravity {
       this.#inLine(id, () => chooseRow(known, answer.row, {
         parse: readPrompt, read: target => this.#terminal.readScreen(target), press: (target, key) => this.#terminal.pressKey(target, key),
       })).catch(() => {});
+    });
+  }
+
+  // What the model asks the reader, with rows to choose from, is asked of them as a question Claude asks
+  // is: the same card, answered by one of its rows or in words of their own. The answer is pressed in the
+  // terminal as a person there would press it: the row's number, or the row that opens a line to write on
+  // and then the words. Left unanswered, it's skipped with Esc, as the terminal's own line offers.
+  #askQuestion(id, session, known, prompt, question) {
+    const header = question.count > 1 ? `Question ${question.index}/${question.count}` : 'Question';
+    const { request, decision } = this.#store.ask(id, {
+      kind: 'question', agent: AGENT, toolName: 'AskUserQuestion',
+      input: { questions: [{ question: question.text, header, options: question.rows.map(row => ({ label: row.label })), multiSelect: false }] },
+    }, ({ decision: answer, answers }) => {
+      if (answer === 'deny') return { skip: true };
+      if (answer !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${answer}`);
+      const said = answers?.[question.text];
+      if (typeof said !== 'string' || !said.trim()) throw new HelperError('missing_answers', 'Choose an answer first.');
+      const row = question.rows.find(found => found.label === said);
+      if (row) return { row };
+      if (!question.writeIn) throw new HelperError('bad_option', 'That choice isn\'t offered for this question. Choose again.');
+      return { row: question.writeIn, text: said.trim() };
+    });
+    session.asked = { requestId: request.id, prompt };
+    decision.then(answer => {
+      if (!answer?.row && !answer?.skip) return;
+      if (session.asked?.requestId === request.id) session.asked = undefined;
+      session.lastPrompt = undefined;
+      const read = target => this.#terminal.readScreen(target);
+      const press = (target, key) => this.#terminal.pressKey(target, key);
+      this.#inLine(id, async () => {
+        if (answer.skip) {
+          if (questionOf(readPrompt(await read(known)))) await press(known, 'Escape');
+          return;
+        }
+        if (answer.text === undefined) {
+          await chooseRow(known, answer.row, { parse: readPrompt, read, press });
+          return;
+        }
+        // Its number opens the line to write on, which is waited for before anything is typed.
+        if (!questionOf(readPrompt(await read(known)))) return;
+        await press(known, String(answer.row.number));
+        for (const end = Date.now() + this.#timing.keyLimit; Date.now() < end; await pause(this.#timing.keyCheck)) {
+          if (asksWriteIn(await read(known).catch(() => ''))) break;
+        }
+        if (!asksWriteIn(await read(known).catch(() => ''))) return;
+        await this.#terminal.paste(known, answer.text);
+        await pause(this.#timing.pasteSettle);
+        await press(known, 'Enter');
+      }).catch(() => {});
     });
   }
 

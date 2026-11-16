@@ -140,20 +140,33 @@ What has been run on Linux: the unit tests, and the helper end to end in an Ubun
 
 ## Windows
 
-Not finished. The helper runs, hooks tell it of a session, and a phone can be paired over SSH to follow sessions and answer what they ask. The app can't type into a session on Windows yet, and **pairing has only been tried by the commands the app sends, not with the app itself.**
+Not finished, and **not yet tried with the app itself**: everything below was run against Windows 11 by the commands the app sends, from another computer. What's there: the helper follows the sessions at the computer, and a phone paired over SSH can read them, answer what they ask, and look through their files and their git. The app can't type into a session on Windows yet, or start one.
 
+**Installing.** Node.js has to be installed, with `node` on the `PATH`: Claude Code's own installer doesn't bring one. Then, in Claude Code:
+
+```
+/plugin marketplace add Lorpaves/venes-cli
+/plugin install venes-windows@venes
+```
+
+`venes-windows` is this plugin with hooks that start Node themselves. A hook takes about 75 ms that way. The plugin under its own name, `venes`, works on Windows too, through a shell: about 0.16 seconds a hook in Git Bash where [Git for Windows](https://git-scm.com/downloads/win) is installed, and about a second in PowerShell where it isn't. Before 0.27.0 a hook failed in PowerShell, which stopped every tool Claude used.
+
+**Pairing.** With Windows' own OpenSSH Server: add it in Settings > System > Optional features, then in a terminal opened as administrator, `Start-Service sshd; Set-Service sshd -StartupType Automatic`. Then `%USERPROFILE%\.venes\venes.cmd pair`.
+
+- **An administrator's keys.** sshd keeps them in `C:\ProgramData\ssh\administrators_authorized_keys`, which only an administrator can change. In a terminal that wasn't opened as one, Windows asks to let Node.js make changes: that's `pair`, adding the one-time key there. Any other account's keys are in its own `.ssh\authorized_keys`, and nothing is asked.
+- **The firewall.** Windows lets SSH in only on a network it calls private, and calls a new network public. `pair` says so when that's in the way, and how to change it.
+- **The phone's key.** sshd on Windows gives a command to `cmd`, which can make nothing of `~/.venes/venes attach`. So the phone's key is tied to `venes.cmd ssh`, which reads what the phone asked for and does it if it's `attach` or `receive`. The key can run nothing else, and can still forward a port.
+- **The address.** The tailnet's when Tailscale is on, and otherwise the computer's address on its network, which a router can change.
+
+**What's different from a Mac.**
+
+- **Paths.** The app takes a path apart at its slashes, so the helper says `C:\Users\ada\work` as `/C:/Users/ada/work` and takes it back the same way. `/` lists the drives.
+- **The helper.** Its launcher is `%USERPROFILE%\.venes\venes.cmd`, and its two sockets are named pipes. Windows' management service starts it, so that it's no session's to end: started any other way, it went when the SSH session that started it closed.
+- **The Recycle Bin.** What's deleted from the app is moved into the bin's own folder on its drive, where Explorer shows it and puts it back. On a drive with no bin for the account, nothing is deleted.
 - **In WSL.** Claude Code inside WSL is on Linux, and so is the helper: the Linux notes above are the ones that apply. That hasn't been run.
-- **Node.js.** The helper needs `node` on the `PATH`. Claude Code's own installer doesn't bring one.
-- **Hooks.** With [Git for Windows](https://git-scm.com/downloads/win) installed, Claude Code runs a hook in Git Bash, which takes about 0.15 seconds. Without it, Claude Code runs the hook in PowerShell, which takes about a second, twice for each tool Claude uses. So install Git for Windows. Either way a hook that fails never stops a tool: before 0.27.0 it did, on Windows with no Git for Windows.
-- **The helper.** It starts when a session starts, as elsewhere. Its launcher is `%USERPROFILE%\.venes\venes.cmd`, and its two sockets are named pipes.
-- **Pairing over SSH.** With Windows' own OpenSSH Server: add it in Settings > System > Optional features, then in a terminal opened as administrator, `Start-Service sshd; Set-Service sshd -StartupType Automatic`. Then `%USERPROFILE%\.venes\venes.cmd pair`.
-  - **An administrator's keys.** sshd keeps them in `C:\ProgramData\ssh\administrators_authorized_keys`, which only an administrator can change. In a terminal that wasn't opened as one, Windows asks to let Node.js make changes: that's `pair`, adding the one-time key there. Any other account's keys are in its own `.ssh\authorized_keys`, and nothing is asked.
-  - **The firewall.** Windows lets SSH in only on a network it calls private, and calls a new network public. `pair` says so when that's in the way, and how to change it.
-  - **The phone's key.** sshd on Windows gives a command to `cmd`, which can make nothing of `~/.venes/venes attach`. So the phone's key is tied to `venes.cmd ssh`, which reads what the phone asked for and does it if it's `attach` or `receive`. The key can run nothing else, and can still forward a port.
-  - **The address.** The tailnet's when Tailscale is on, and otherwise the computer's address on its network, which a router can change.
-- **Not there yet.** Typing into a session (there's no tmux, and Rex's server for Windows isn't used), the Recycle Bin, the status line, Codex and Antigravity.
+- **Not there yet.** Typing into a session and starting one (there's no tmux, and Rex's server for Windows isn't used), the status line, Codex and Antigravity.
 
-What has been run on Windows: the smoke test (`node test/smoke.mjs`) on Windows 11 on Arm and on GitHub's Windows machines; Claude Code 2.1.325 with the plugin on Windows 11, with Git for Windows and without, against a stand-in for the model's API, where sessions were followed and tools ran; and pairing with Windows 11's OpenSSH Server from another computer, in a terminal opened as administrator and in one that wasn't.
+What has been run on Windows: the smoke test (`node test/smoke.mjs`) and the unit tests that hold there, on Windows 11 on Arm and on GitHub's Windows machines; Claude Code 2.1.325 with the plugin under both names on Windows 11, with Git for Windows and without, against a stand-in for the model's API, where sessions were followed and tools ran; and against Windows 11's OpenSSH Server from another computer: pairing in a terminal opened as administrator and in one that wasn't, then folders, files, git, a delete that Explorer put back, and a permission asked and answered.
 
 ## How it works
 

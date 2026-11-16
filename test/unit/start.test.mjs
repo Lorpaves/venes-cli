@@ -63,6 +63,14 @@ test('a session from another terminal isn\'t taken for it', async t => {
   await assert.rejects(startNewSession(deps, { cwd: folder(t) }), { code: 'start_failed' });
 });
 
+test('where nothing can be started, that\'s said before trust is asked about', async t => {
+  const { deps, started } = setUp({ trusts: () => false });
+  deps.terminal.canStart = false;
+  await assert.rejects(startNewSession(deps, { cwd: folder(t) }), { code: 'no_tmux' });
+  await assert.rejects(startNewSession(deps, { cwd: folder(t), trust: true }), { code: 'no_tmux' });
+  assert.equal(started.length, 0);
+});
+
 test('a folder Claude Code doesn\'t trust waits for the reader\'s word, and nothing starts', async t => {
   const { deps, started } = setUp({ trusts: () => false });
   await assert.rejects(startNewSession(deps, { cwd: folder(t) }), { code: 'needs_trust' });
@@ -218,4 +226,18 @@ test('a folder\'s own question still comes after it, and is answered as it would
   await assert.rejects(startNewSession(deps, { cwd: where, trust: true }), { code: 'needs_choice' });
   assert.deepEqual(await startNewSession(deps, { cwd: where, trust: true, choice: 'No, start without it' }), { sessionId: ID });
   assert.deepEqual(keys, ['Enter', 'Down', 'Enter']);
+});
+
+test('a folder is trusted on Windows by the name Claude Code gives it there', () => {
+  // Claude Code writes the folder with the slashes the other way, and Windows takes either case.
+  const config = { projects: { 'C:/Users/venes/wire test': { hasTrustDialogAccepted: true }, 'C:/Users/venes': { hasTrustDialogAccepted: true } } };
+  const windows = { config, home: 'C:\\Users\\venes', paths: path.win32 };
+  assert.equal(isTrusted('C:\\Users\\venes\\wire test', windows), true);
+  assert.equal(isTrusted('c:\\users\\venes\\wire test', windows), true);
+  assert.equal(isTrusted('C:\\Users\\venes\\wire test\\src', windows), true, 'a folder above counts, outside a repository');
+  assert.equal(isTrusted('C:\\Users\\venes', windows), false, 'the home folder is asked about every time');
+  assert.equal(isTrusted('c:\\users\\VENES', windows), false, 'however it is spelled');
+  assert.equal(isTrusted('D:\\work', windows), false);
+  // Where a backslash is a character of a name like any other, nothing is turned around.
+  assert.equal(isTrusted('/tmp/a\\b', { config: { projects: { '/tmp/a/b': { hasTrustDialogAccepted: true } } }, home: '/home/me', paths: path.posix }), false);
 });

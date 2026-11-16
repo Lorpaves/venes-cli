@@ -140,7 +140,7 @@ What has been run on Linux: the unit tests, and the helper end to end in an Ubun
 
 ## Windows
 
-Not finished, and **not yet tried with the app itself**: everything below was run against Windows 11 by the commands the app sends, from another computer. What's there: the helper follows the sessions at the computer, and a phone paired over SSH can read them, answer what they ask, and look through their files and their git. The app can't type into a session on Windows yet, or start one.
+Not finished. What's there: the helper follows the sessions at the computer, and a phone paired over SSH can read them, answer what they ask, and look through their files and their git. The app can't type into a session on Windows yet, or start one, and says so when asked to. It has been tried with the app in an iPhone simulator, and **not yet on a phone**.
 
 **Installing.** Node.js has to be installed, with `node` on the `PATH`: Claude Code's own installer doesn't bring one. Then, in Claude Code:
 
@@ -165,9 +165,9 @@ Not finished, and **not yet tried with the app itself**: everything below was ru
 - **Who starts it.** Claude Code at the computer does, when a session starts. A phone that connects before that, to an administrator's account, is told to start Claude Code there: sshd gives an administrator's session an administrator's full rights, and a helper started with those couldn't be reached by Claude Code, which runs without them. For the same reason a Claude Code run as administrator and one that isn't don't share a helper.
 - **The Recycle Bin.** What's deleted from the app is moved into the bin's own folder on its drive, where Explorer shows it and puts it back. On a drive with no bin for the account, nothing is deleted.
 - **In WSL.** Claude Code inside WSL is on Linux, and so is the helper: the Linux notes above are the ones that apply. That hasn't been run.
-- **Not there yet.** Typing into a session and starting one (there's no tmux, and Rex's server for Windows isn't used), the status line, Codex and Antigravity.
+- **Not there yet.** Typing into a session and starting one (there's no tmux on Windows, and Rex hasn't been tried there), the status line, Codex and Antigravity.
 
-What has been run on Windows: the smoke test (`node test/smoke.mjs`) and the unit tests that hold there, on Windows 11 on Arm and on GitHub's Windows machines; Claude Code 2.1.325 with the plugin under both names on Windows 11, with Git for Windows and without, against a stand-in for the model's API, where sessions were followed and tools ran; and against Windows 11's OpenSSH Server from another computer: pairing in a terminal opened as administrator and in one that wasn't, then folders, files, git, a delete that Explorer put back, and a permission asked and answered.
+What has been run on Windows: the smoke test (`node test/smoke.mjs`) and the unit tests that hold there, on Windows 11 on Arm and on GitHub's Windows machines; Claude Code 2.1.325 with the plugin under both names on Windows 11, with Git for Windows and without, against a stand-in for the model's API, where sessions were followed and tools ran; and against Windows 11's OpenSSH Server from another computer: pairing in a terminal opened as administrator and in one that wasn't, then folders, files, git, a delete that Explorer put back, and a permission asked and answered. And with the app itself, in an iPhone simulator on the computer the Windows machine ran on: paired by the link `pair` prints, it listed the sessions, showed one as it ran, answered a permission Claude Code asked at its terminal (which then ran the command), and showed the folder's files and its git.
 
 ## How it works
 

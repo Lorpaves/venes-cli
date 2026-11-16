@@ -288,6 +288,8 @@ export function resumeTerminal(env = process.env) {
   const useRex = env.VENES_TERMINAL ? env.VENES_TERMINAL === 'rex' : rex.isInstalled();
   const backend = useRex ? rex : tmux;
   return {
+    // Windows has no tmux, so without Rex nothing can be started there, which is known before anything is tried.
+    canStart: useRex || process.platform !== 'win32',
     startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, pressKey,
     paste: (session, text) => backendOf(session).paste(session, text),
     foreground: session => backendOf(session).foreground(session),

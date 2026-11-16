@@ -8,6 +8,7 @@ import { checkedFolder } from './folders.mjs';
 import { HelperError } from './sessions.mjs';
 import { computer } from './platform.mjs';
 import { pickChoice, readChoice } from './terminal.mjs';
+import { noTerminal } from './tmux.mjs';
 import { isTrusted } from './trust.mjs';
 
 // Claude Code was up in under 5s when measured. Answering it and a busy Mac take longer.
@@ -73,6 +74,8 @@ export async function startNewSession(
   { cwd, trust = false, choice },
 ) {
   const folder = checkedFolder(cwd);
+  // Said before trust is asked about: the reader isn't asked a question whose answer leads nowhere.
+  if (terminal.canStart === false) throw noTerminal();
   if (trust !== true && !trusts(folder)) throw needsTrust();
   const waiting = await waitingIn(terminal, folder);
   const name = waiting?.name ?? `${SESSION_PREFIX}${crypto.randomBytes(4).toString('hex')}`;

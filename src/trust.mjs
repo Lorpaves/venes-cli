@@ -19,19 +19,25 @@ export function readClaudeConfig(file = claudeConfigFile()) {
 }
 
 // The folder a .git is in, at or above this one.
-export function gitRoot(folder) {
-  for (let dir = folder; ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, '.git'))) return dir;
-    if (dir === path.dirname(dir)) return undefined;
+export function gitRoot(folder, paths = path) {
+  for (let dir = folder; ; dir = paths.dirname(dir)) {
+    if (fs.existsSync(paths.join(dir, '.git'))) return dir;
+    if (dir === paths.dirname(dir)) return undefined;
   }
 }
 
-export function isTrusted(folder, { config = readClaudeConfig(), home = os.homedir() } = {}) {
-  if (folder === home) return false;
-  const projects = config?.projects ?? {};
-  const root = gitRoot(folder);
-  for (let dir = folder; ; dir = path.dirname(dir)) {
-    if (projects[dir]?.hasTrustDialogAccepted === true) return true;
-    if (dir === root || dir === path.dirname(dir)) return false;
+// How Claude Code names a folder in its config. On Windows it writes `C:/Users/me/work`, with the
+// slashes the other way from the path itself, and a path there is the same in either case.
+const keyOf = (folder, paths) => (paths.sep === '\\' ? folder.replaceAll('\\', '/').toLowerCase() : folder);
+
+// `paths` is the platform's own, and Windows' for a test of its paths run anywhere.
+export function isTrusted(folder, { config = readClaudeConfig(), home = os.homedir(), paths = path } = {}) {
+  if (keyOf(folder, paths) === keyOf(home, paths)) return false;
+  const trusted = new Set(Object.entries(config?.projects ?? {})
+    .filter(([, project]) => project?.hasTrustDialogAccepted === true).map(([name]) => keyOf(name, paths)));
+  const root = gitRoot(folder, paths);
+  for (let dir = folder; ; dir = paths.dirname(dir)) {
+    if (trusted.has(keyOf(dir, paths))) return true;
+    if (dir === root || dir === paths.dirname(dir)) return false;
   }
 }

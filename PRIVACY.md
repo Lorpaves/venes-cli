@@ -14,7 +14,7 @@ The app connects directly to the Venes CLI on your Mac: over your local network,
 
 Files you attach in the app are saved on your Mac, in its Downloads folder. Pictures and files from a session are fetched from your Mac when you open them, and kept on your device only while the app needs them.
 
-The Venes CLI runs on your Mac, reads your sessions there, and checks GitHub for updates.
+The Venes CLI runs on your Mac, reads your sessions there, and checks GitHub for updates. To show what your usage would cost, it also downloads a public list of model prices from GitHub once a day. Nothing about you or your sessions is sent with that request.
 
 ## Notifications
 
@@ -72,7 +72,7 @@ Venes 是一款 iPhone、iPad 和 Mac 应用，配合你在自己 Mac 上安装�
 
 你在应用中附加的文件会保存在你的 Mac 上的「下载」文件夹里。会话中的图片和文件在你打开时从你的 Mac 获取，只在应用需要时保留在你的设备上。
 
-Venes CLI 运行在你的 Mac 上，在本机读取你的会话，并会从 GitHub 检查更新。
+Venes CLI 运行在你的 Mac 上，在本机读取你的会话，并会从 GitHub 检查更新。为了估算用量对应的花费，它每天还会从 GitHub 下载一份公开的模型价格表，请求中不包含任何与你或你的会话有关的信息。
 
 ## 通知
 

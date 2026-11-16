@@ -148,6 +148,11 @@ function limitOf(window, now) {
 // The limits are the account's, so a session that hasn't had a reply yet, and so has none of its
 // own, has those the last session to have them was told.
 function latestLimits(dir, sessionId) {
+  return lastToldLimits(dir, sessionId)?.limits;
+}
+
+// The same, with `at`, when Claude Code said them.
+function lastToldLimits(dir, sessionId) {
   let latest;
   for (const name of fs.readdirSync(dir).filter(file => file.endsWith('.json') && file !== `${sessionId}.json`)) {
     const file = path.join(dir, name);
@@ -156,7 +161,24 @@ function latestLimits(dir, sessionId) {
     const at = fs.statSync(file).mtimeMs;
     if (!latest || at > latest.at) latest = { at, limits };
   }
-  return latest?.limits;
+  return latest;
+}
+
+// The account's two limits as Claude Code last told any session's status line, for a list of what's
+// used: each window by how much of it is used and when it starts over. Nothing without a plan that has
+// them, or before a session has had a reply.
+export function accountLimits(dir, now = Date.now()) {
+  let found;
+  try {
+    found = lastToldLimits(dir, undefined);
+  } catch {
+    return undefined;
+  }
+  const limits = [['fiveHour', found?.limits.five_hour], ['sevenDay', found?.limits.seven_day]].flatMap(([window, said]) => {
+    const limit = limitOf(said, now);
+    return limit ? [{ window, ...limit }] : [];
+  });
+  return limits.length ? { limits, updatedAt: Math.floor(found.at / 1000) } : undefined;
 }
 
 const withoutEmpty = object => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined && value !== null));

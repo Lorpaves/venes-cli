@@ -41,7 +41,9 @@ import {
 } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { screenAccess, sshAccess } from './ssh.mjs';
-import { pruneStatus, readStatus, readWorkspace } from './status.mjs';
+import { accountLimits, pruneStatus, readStatus, readWorkspace } from './status.mjs';
+import { Prices } from './prices.mjs';
+import { UsageBook, usageReply } from './usage.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
@@ -175,7 +177,7 @@ async function reofferPromptRows(store, request) {
   if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined, usage = undefined) {
   // The agents other than Claude Code, each with sessions of its own that it runs through its own server.
   const others = [codex, antigravity].filter(Boolean);
   const named = agent => others.find(other => other.name === agent);
@@ -676,6 +678,16 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     ssh: ({ publicKey }) => sshAccess(publicKey),
     screen: () => screenAccess(),
     // What the session's status line was last told, or null before Claude Code has run it.
+    // What every agent here has used, for the reader's whole account and not one session's: see usage.mjs.
+    usage: async (msg, socket) => {
+      if (!usage) throw new HelperError('unsupported', 'This helper keeps no count of what is used.');
+      const said = other => (other && shows(socket, other.name) ? other.limits().catch(() => undefined) : undefined);
+      const [read, ofCodex, ofAntigravity] = await Promise.all([usage.read(), said(codex), said(antigravity)]);
+      return usageReply({
+        read, shown: agent => agent === 'claude' || shows(socket, agent),
+        limits: { claude: accountLimits(statusDir), codex: ofCodex, antigravity: ofAntigravity },
+      });
+    },
     statusLine: async ({ sessionId }) => {
       // Codex has no status line, and says what one would itself.
       const other = await otherOf(sessionId);
@@ -876,7 +888,9 @@ export async function startDaemon(paths) {
     console.error(`antigravity hooks: ${error.message}`);
   }
   const hookServer = createHookServer(store, antigravity);
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity);
+  // What the agents have used, counted from their own chats and costed by a public list of prices.
+  const usage = new UsageBook({ file: paths.usageFile, pricesFile: paths.pricesFile, prices: new Prices({ file: paths.pricesFile }) });
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity, usage);
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);

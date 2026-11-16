@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  checkedOutBranch, installStatusLine, keepStatus, pruneStatus, readStatus, readWorkspace, removeStatusLine, standInCommand, statusFile, switchOnStatusLine,
+  accountLimits, checkedOutBranch, installStatusLine, keepStatus, pruneStatus, readStatus, readWorkspace, removeStatusLine, standInCommand, statusFile, switchOnStatusLine,
 } from '../../src/status.mjs';
 
 const STATUS = fileURLToPath(new URL('../../src/status.mjs', import.meta.url));
@@ -177,6 +177,20 @@ test('a limit that has reset since starts again from nothing', async t => {
   const later = await readStatus(dir, 'abc-123', 2_000_010_000 * 1000);
   assert.deepEqual(later.fiveHour, { percent: 0 });
   assert.deepEqual(later.sevenDay, { percent: 41.2, resetsAt: 2_000_300_000 });
+});
+
+test('the account\'s limits are those the last status line to have any was told', t => {
+  const dir = tempDir(t);
+  assert.equal(accountLimits(path.join(dir, 'none'), NOW), undefined);
+  assert.equal(accountLimits(dir, NOW), undefined);
+  keepStatus(dir, JSON.stringify(input({ session_id: 'api', rate_limits: undefined })));
+  assert.equal(accountLimits(dir, NOW), undefined, 'an API has none');
+  keepStatus(dir, JSON.stringify(input()));
+  const said = accountLimits(dir, NOW);
+  assert.deepEqual(said.limits, [{ window: 'fiveHour', percent: 23.5, resetsAt: 2_000_007_200 }, { window: 'sevenDay', percent: 41.2, resetsAt: 2_000_300_000 }]);
+  assert.ok(Math.abs(said.updatedAt - Date.now() / 1000) < 10, 'with when Claude Code said them');
+  // One that has started over since is at nothing.
+  assert.deepEqual(accountLimits(dir, 2_000_010_000 * 1000).limits[0], { window: 'fiveHour', percent: 0 });
 });
 
 test('what\'s kept of a session goes a week after it last ran its status line', t => {

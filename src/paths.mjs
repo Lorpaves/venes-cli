@@ -45,6 +45,10 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     statusDir: path.join(home, 'status'),
     // The status line the helper's stands in for, and whether it's switched off.
     statusLineState: path.join(home, 'statusline.json'),
+    // What each agent's chats say was used, by day, as far as they've been read: see usage.mjs.
+    usageFile: path.join(home, 'usage.json'),
+    // The public list of what models' tokens cost, as last read: see prices.mjs.
+    pricesFile: path.join(home, 'prices.json'),
     // The phones to notify while they aren't connected, each with its device token and key.
     pushFile: path.join(home, 'push.json'),
     // The plugin Antigravity runs the helper's hooks from.

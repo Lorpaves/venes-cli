@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { HelperClient } from '../src/client.mjs';
 import { CodexLink } from '../src/codexlink.mjs';
+import { dayOf } from '../src/usage.mjs';
 import { RexControl, openPipe } from './rex-client.mjs';
 import { findClaudePanes } from '../src/tmux.mjs';
 import { VERSION } from '../src/version.mjs';
@@ -359,6 +360,18 @@ T('discovery_and_stream', {}, async r => {
   const delta = await r.kind('message.assistant.delta');
   assert.match(delta.text, /STREAM/);
   assert.equal((await r.session()).status, 'idle');
+
+  // What the reply used is counted from the transcript, for the list of what every agent has used,
+  // and costed by the price list the helper came with.
+  let usage;
+  let today;
+  for (const deadline = Date.now() + 20000; Date.now() < deadline && !(today?.tokens.output.at(-1) > 0 && !usage.scanning); await delay(700)) {
+    usage = await r.client.request('usage', {});
+    today = usage.agents.find(agent => agent.agent === 'claude');
+  }
+  assert.deepEqual([usage.days.length, usage.days.at(-1), usage.scanning], [30, dayOf(Date.now()), false]);
+  assert.ok(today.tokens.output.at(-1) > 0 && today.cost.at(-1) > 0, 'today has the reply, and what it would cost');
+  assert.equal(today.tokens.input.length, 30);
 });
 
 T('approve_from_client', {}, async r => {

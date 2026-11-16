@@ -1342,6 +1342,25 @@ test('a session\'s status has its context after a reply, and the limits asked fo
   assert.deepEqual([apart.fiveHour, apart.limits], [{ percent: 13 }, [{ name: 'Spark', window: 'fiveHour', percent: 2 }]]);
 });
 
+test('the account\'s limits are told for a list of what\'s used, where Codex is running to say', async () => {
+  const { codex, server } = await running();
+  server.limits = { ...server.limits, planType: 'pro', credits: { hasCredits: true, unlimited: false, balance: '12.5' } };
+  const said = await codex.limits();
+  assert.deepEqual(said.limits, [{ window: 'fiveHour', percent: 12, resetsAt: 1_800_000_000 }, { window: 'sevenDay', percent: 31, resetsAt: 1_800_500_000 }]);
+  assert.deepEqual([said.plan, said.credits], ['pro', { unlimited: false, balance: 12.5 }]);
+  assert.ok(Math.abs(said.updatedAt - Date.now() / 1000) < 5);
+  // One metered apart comes after the plan's own, by its name, and what was said a moment ago stands.
+  server.say('account/rateLimits/updated', { rateLimits: { limitId: 'codex_spark', limitName: 'Spark', primary: { usedPercent: 2, windowDurationMins: 300 }, secondary: null } });
+  await new Promise(resolve => { setTimeout(resolve, 5); });
+  assert.deepEqual((await codex.limits()).limits.at(-1), { name: 'Spark', window: 'fiveHour', percent: 2 });
+  assert.equal(server.called('account/rateLimits/read').length, 1);
+
+  // Where it isn't running, it's not started to be asked, and there's nothing to tell.
+  const idle = setup({ isRunning: false });
+  assert.equal(await idle.codex.limits(), undefined);
+  assert.equal(idle.server.isRunning, false);
+});
+
 const shellLine = (fields = {}) => command({ id: 'line-1', command: "/bin/zsh -lc 'ls -la'", source: 'userShell', ...fields });
 
 test('a command line comes apart as a shell would take it', () => {

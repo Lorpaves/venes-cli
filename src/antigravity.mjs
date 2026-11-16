@@ -1597,6 +1597,15 @@ export class Antigravity {
     return kept.limits;
   }
 
+  // The account's limits for a list of what's used, as a status sheet has them, and `reading` while
+  // they're being asked for: the first read takes Antigravity a while, and comes with a later ask.
+  // Nothing where Antigravity isn't installed.
+  async limits() {
+    if (!this.#installed()) return undefined;
+    const limits = (await this.#limits()) ?? [];
+    return { limits, reading: Boolean(this.#usage.reading), ...(limits.length && { updatedAt: Math.floor(this.#usage.at / 1000) }) };
+  }
+
   // What a status sheet shows of a session the helper follows, and nothing for one it doesn't: what it
   // runs on, where, and every limit the account has, as Antigravity's own `/usage` lists them.
   async status({ sessionId }) {

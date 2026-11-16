@@ -151,7 +151,7 @@ const LISTED = [
   { name: 'two words', description: 'not a command a line can start with' }, { description: 'no name' },
 ];
 
-function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined } = {}) {
+function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined, installed = true } = {}) {
   const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
   t.after(() => fs.rmSync(data, { recursive: true, force: true }));
   fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ trustedWorkspaces: trusted }));
@@ -177,7 +177,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
   const forgotten = [];
   const killed = [];
   const agent = new Antigravity({
-    store, terminal, data, installed: () => true, rows: async () => rows,
+    store, terminal, data, installed: () => installed, rows: async () => rows,
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
     usage,
@@ -803,6 +803,29 @@ test('a status has what the session runs on and the account\'s limits, asked for
   const none = setup(t, { timing: { watch: 100_000 }, usage: () => answer() });
   await none.hook('SessionStart');
   assert.equal('limits' in (await none.agent.status({ sessionId: ID })).status, false);
+});
+
+test('the account\'s limits are told for a list of what\'s used, with no session to ask for', async t => {
+  let asked = 0;
+  const { agent } = setup(t, { timing: { watch: 100_000 }, usage: async () => { asked += 1; return USAGE; } });
+  const said = await agent.limits();
+  assert.deepEqual([said.limits, said.reading], [LIMITS, false]);
+  assert.ok(Math.abs(said.updatedAt - Date.now() / 1000) < 5);
+  await agent.limits();
+  assert.equal(asked, 1, 'and kept for the next');
+
+  // Slow to say, the first answer has none yet and says they're being read.
+  let release;
+  const slow = setup(t, { timing: { watch: 100_000, usageWait: 20 }, usage: () => new Promise(resolve => { release = () => resolve(USAGE); }) });
+  assert.deepEqual(await slow.agent.limits(), { limits: [], reading: true });
+  release();
+  await new Promise(resolve => { setTimeout(resolve, 10); });
+  assert.deepEqual((await slow.agent.limits()).limits, LIMITS);
+
+  // Where Antigravity isn't installed there's nothing to tell, and nothing is run to ask.
+  const absent = setup(t, { installed: false, usage: async () => { asked += 100; return USAGE; } });
+  assert.equal(await absent.agent.limits(), undefined);
+  assert.equal(asked, 1);
 });
 
 test('a model picked for a session with nothing said in it keeps how hard its bar says it thinks', async t => {

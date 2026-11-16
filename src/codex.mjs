@@ -1449,15 +1449,38 @@ export class Codex {
     return this.#models.list;
   }
 
+  // The account's limits, asked of Codex again once what it said is a minute old. Only where it's
+  // running: starting it is for someone who asked for Codex.
+  async #readLimits() {
+    if (this.#limits && Date.now() - this.#limits.at <= LIMITS_LIFETIME_MS) return;
+    const link = await this.#open({ start: false }).catch(() => undefined);
+    const read = await link?.request('account/rateLimits/read', {}).catch(() => undefined);
+    if (read?.rateLimits) this.#limits = { at: Date.now(), snapshot: read.rateLimits, others: read.rateLimitsByLimitId ?? {}, resets: read.rateLimitResetCredits ?? undefined };
+  }
+
+  // The account's limits for a list of what's used: the plan's two windows, then those metered apart,
+  // each as a status sheet has them, with the plan's name and the credits past it. Nothing until
+  // Codex has said.
+  async limits() {
+    await this.#readLimits();
+    if (!this.#limits) return undefined;
+    const { snapshot, others, at } = this.#limits;
+    const own = WINDOWS.flatMap(([window, minutes]) => {
+      const limit = limitOf(windowOf(snapshot, minutes));
+      return limit ? [{ window, ...limit }] : [];
+    });
+    const credits = creditsOf(snapshot?.credits);
+    return {
+      limits: [...own, ...otherLimitsOf(others, snapshot?.limitId ?? 'codex')],
+      ...(snapshot?.planType && { plan: snapshot.planType }), ...(credits && { credits }), updatedAt: Math.floor(at / 1000),
+    };
+  }
+
   // What a status sheet shows of a session the helper follows, and nothing for one it doesn't.
   async status({ sessionId }) {
     const session = this.#store.find(sessionId);
     if (!session) return { status: null };
-    if (!this.#limits || Date.now() - this.#limits.at > LIMITS_LIFETIME_MS) {
-      const link = await this.#open({ start: false }).catch(() => undefined);
-      const read = await link?.request('account/rateLimits/read', {}).catch(() => undefined);
-      if (read?.rateLimits) this.#limits = { at: Date.now(), snapshot: read.rateLimits, others: read.rateLimitsByLimitId ?? {}, resets: read.rateLimitResetCredits ?? undefined };
-    }
+    await this.#readLimits();
     const thread = this.#threads.get(sessionId);
     const { snapshot, others, resets } = this.#limits ?? {};
     return { status: statusLineOf({ session, usage: thread?.usage, limits: snapshot, others, resets, branch: thread?.branch }) };

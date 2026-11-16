@@ -6,10 +6,12 @@ launcher="${VENES_HOME:-$HOME/.venes}/venes"
 PATH="$PATH:${HOMEBREW_PATH:-}:$HOME/.local/bin:$HOME/.claude/local"
 export PATH
 
-# The brew command this runs under, from the processes above it.
+# The brew command this runs under, from the processes above it. In full (-ww): Linux's ps cuts a
+# command off at the terminal's width, which is before the word that says what brew is doing, and an
+# upgrade there was taken for an uninstall.
 pid=$PPID
 while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
-  case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+  case "$(ps -ww -o args= -p "$pid" 2>/dev/null)" in
     *brew.rb\ upgrade*|*brew.rb\ reinstall*)
       if [ -x "$launcher" ]; then "$launcher" stop; fi
       exit 0

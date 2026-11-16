@@ -53,6 +53,20 @@ test('an upgrade or a reinstall only stops the helper, so phones stay paired', t
   }
 });
 
+test('an upgrade is known on Linux too, where the brew command is long and ps cuts a line at the terminal\'s width', t => {
+  // As Homebrew on Linux runs: the word that says what it's doing comes after column 80.
+  const ruby = '/home/linuxbrew/.linuxbrew/Homebrew/Library/Homebrew/vendor/portable-ruby/current/bin/ruby -W1 --disable=gems,rubyopt';
+  for (const command of ['upgrade', 'reinstall']) {
+    const run = noting(folder(t));
+    const done = spawnSync('/bin/sh', ['-c', `'${UNINSTALL}'; true`], {
+      argv0: `${ruby} /home/linuxbrew/.linuxbrew/Homebrew/Library/Homebrew/brew.rb ${command} venes`,
+      env: { ...run.env, COLUMNS: '80' }, encoding: 'utf8',
+    });
+    assert.equal(done.status, 0);
+    assert.deepEqual(run.calls(), ['venes stop'], command);
+  }
+});
+
 test('never set up, uninstalling takes the plugin out of Claude Code', t => {
   const run = noting(folder(t), { launcher: false });
   assert.equal(underBrew('uninstall', run.env).status, 0);

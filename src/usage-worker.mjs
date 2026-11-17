@@ -6,8 +6,8 @@ import { readUsage } from './usage.mjs';
 
 let reply;
 try {
-  const { file, pricesFile, budgetMs } = JSON.parse(process.argv[2]);
-  reply = readUsage({ file, prices: new Prices({ file: pricesFile }).current().prices, budgetMs });
+  const { file, zone, pricesFile, budgetMs } = JSON.parse(process.argv[2]);
+  reply = readUsage({ file, zone, prices: new Prices({ file: pricesFile }).current().prices, budgetMs });
 } catch (error) {
   reply = { error: { code: error.code ?? 'internal', message: error.message } };
 }

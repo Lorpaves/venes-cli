@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../src/paths.mjs';
 import { HelperClient } from '../src/client.mjs';
 import { CodexLink } from '../src/codexlink.mjs';
-import { dayOf } from '../src/usage.mjs';
+import { clockOf, dayOf, hourOf } from '../src/usage.mjs';
 import { RexControl, openPipe } from './rex-client.mjs';
 import { findClaudePanes } from '../src/tmux.mjs';
 import { VERSION } from '../src/version.mjs';
@@ -374,6 +374,20 @@ T('discovery_and_stream', {}, async r => {
   assert.ok(today.tokens.output.at(-1) > 0 && today.cost.at(-1) > 0, 'today has the reply, and what it would cost');
   assert.ok(today.hourly.tokens.output.slice(-2).some(used => used > 0), 'and so has this hour, or the one before');
   assert.deepEqual([today.tokens.input.length, today.hourly.cost.length], [90, 24]);
+  assert.equal(usage.zone, clockOf().name);
+
+  // A reader most of a day from here is told the days and the hours of its own clock.
+  const far = clockOf(Math.abs(clockOf().offsetAt(Date.now())) > 6 * 3600_000 ? 'Etc/UTC' : 'Pacific/Kiritimati');
+  let there;
+  for (const deadline = Date.now() + 20000; Date.now() < deadline && !(there && !there.scanning); await delay(700)) {
+    there = await r.client.request('usage', { timeZone: far.name });
+  }
+  assert.deepEqual(
+    [there.zone, there.days.length, there.days.at(-1), there.hours.at(-1), there.scanning],
+    [far.name, 90, dayOf(Date.now(), far.offsetAt), hourOf(Date.now(), far.offsetAt), false],
+  );
+  const reply = there.agents.find(agent => agent.agent === 'claude');
+  assert.ok(reply.hourly.tokens.output.slice(-2).some(used => used > 0), 'with the reply in its last hours there');
 });
 
 T('approve_from_client', {}, async r => {

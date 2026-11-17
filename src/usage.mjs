@@ -23,8 +23,11 @@ const WORKER_BUFFER_BYTES = 8 << 20;
 
 export const DAYS = 90;
 export const HOURS = 24;
-const VERSION = 4;
+const VERSION = 5;
 const HOUR_MS = 60 * 60_000;
+const QUARTER_MS = 15 * 60_000;
+// Another clock's count that nobody has asked for in this long is let go.
+const CLOCK_KEPT_MS = 30 * 24 * HOUR_MS;
 const CHUNK_BYTES = 1 << 20;
 // How many of a transcript's last requests are remembered, to count once one that's written on several
 // lines, which follow each other closely.
@@ -33,38 +36,87 @@ const NEWLINE = 0x0a;
 
 const pad = number => `${number}`.padStart(2, '0');
 
-// The day a moment falls on where this computer is, as YYYY-MM-DD.
-export function dayOf(ms) {
-  const date = new Date(ms);
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+// How far this computer's clock is ahead of UTC at a moment, in milliseconds.
+const here = ms => -new Date(ms).getTimezoneOffset() * 60_000;
+
+// This computer's time zone, by its name.
+const hereName = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// The clock that days and hours are told by. A reader says which time zone it's in by the zone's name,
+// as "Asia/Shanghai", and they're told by the clock there: a day where the reader is isn't a day where
+// this computer is. With none said, or one this computer doesn't know, it's this computer's own.
+// `name` is the zone's, and `offsetAt` how far its clock is ahead of UTC at a moment, which is asked
+// of the system once for each quarter of an hour, since a zone's clock changes on no finer a line.
+export function clockOf(zone) {
+  const own = { name: hereName(), offsetAt: here };
+  if (!zone) return own;
+  let format;
+  try {
+    format = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+    });
+  } catch {
+    return own;
+  }
+  const name = format.resolvedOptions().timeZone;
+  if (name === own.name) return own;
+  const known = new Map();
+  return {
+    name,
+    offsetAt(ms) {
+      const quarter = Math.floor(ms / QUARTER_MS);
+      let offset = known.get(quarter);
+      if (offset === undefined) {
+        const at = quarter * QUARTER_MS;
+        const part = Object.fromEntries(format.formatToParts(at).map(({ type, value }) => [type, Number(value)]));
+        offset = Date.UTC(part.year, part.month - 1, part.day, part.hour, part.minute, part.second) - at;
+        known.set(quarter, offset);
+      }
+      return offset;
+    },
+  };
 }
 
-// The hour a moment falls in where this computer is, as YYYY-MM-DDTHH.
-export function hourOf(ms) {
-  return `${dayOf(ms)}T${pad(new Date(ms).getHours())}`;
+// The day a moment falls on by a clock, as YYYY-MM-DD: this computer's, unless another's `offsetAt` is given.
+export function dayOf(ms, offsetAt = here) {
+  const date = new Date(ms + offsetAt(ms));
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
 }
 
-// The last `count` hours, this one last. On the night the clocks go back there's one fewer, since an
-// hour comes twice by its name.
-export function lastHours(count, now = Date.now()) {
+// The hour a moment falls in by a clock, as YYYY-MM-DDTHH.
+export function hourOf(ms, offsetAt = here) {
+  return `${dayOf(ms, offsetAt)}T${pad(new Date(ms + offsetAt(ms)).getUTCHours())}`;
+}
+
+// The last `count` hours by a clock, this one last. On the night the clocks go back there's one fewer,
+// since an hour comes twice by its name.
+export function lastHours(count, now = Date.now(), offsetAt = here) {
   const hours = [];
   for (let i = count - 1; i >= 0; i--) {
-    const hour = hourOf(now - i * HOUR_MS);
+    const hour = hourOf(now - i * HOUR_MS, offsetAt);
     if (hours.at(-1) !== hour) hours.push(hour);
   }
   return hours;
 }
 
-// The last `count` days, today last.
-export function lastDays(count, now = Date.now()) {
-  const date = new Date(now);
-  date.setHours(12, 0, 0, 0);
+// The last `count` days by a clock, today last: from noon today as that clock has it, a day at a time,
+// so that a day the clocks change on is neither left out nor told twice.
+export function lastDays(count, now = Date.now(), offsetAt = here) {
+  const date = new Date(now + offsetAt(now));
+  date.setUTCHours(12, 0, 0, 0);
   const days = [];
   for (let i = 0; i < count; i++) {
-    days.unshift(dayOf(date.getTime()));
-    date.setDate(date.getDate() - 1);
+    days.unshift(`${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`);
+    date.setUTCDate(date.getUTCDate() - 1);
   }
   return days;
+}
+
+// The moment a day starts by a clock.
+function startOf(day, offsetAt) {
+  const [year, month, date] = day.split('-').map(Number);
+  const wall = Date.UTC(year, month - 1, date);
+  return wall - offsetAt(wall - offsetAt(wall));
 }
 
 // What a line of Claude Code's transcript says was used, if it's a reply with its count: `key` is the
@@ -105,15 +157,16 @@ export function codexTokens(usage = {}) {
 const blank = () => [0, 0, 0, 0, 0, 0, 0];
 
 // Adds what a request used at `at` to `into`: to its day among `days`, and to its hour among `hours`
-// where that's no longer ago than `hoursFrom`, which is as far back as hours are told. `tier` is the
-// service tier it was run at, where the maker charges apart for one.
+// where that's no longer ago than `hoursFrom`, which is as far back as hours are told, each by the
+// clock whose `offsetAt` it has. `tier` is the service tier it was run at, where the maker charges
+// apart for one.
 function tally(into, at, model, tokens, prices, sign = 1, tier = undefined) {
   const price = priceFor(prices, model);
   const cost = costOf(price, tokens, tier);
   const saved = savingsOf(price, tokens, tier);
   const all = tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cacheRead + tokens.cacheWrite + tokens.cacheWriteLong;
-  const slots = [(into.days[dayOf(at)] ??= {})];
-  if (at >= into.hoursFrom) slots.push((into.hours[hourOf(at)] ??= {}));
+  const slots = [(into.days[dayOf(at, into.offsetAt)] ??= {})];
+  if (at >= into.hoursFrom) slots.push((into.hours[hourOf(at, into.offsetAt)] ??= {}));
   for (const slot of slots) {
     const sum = (slot[model] ??= blank());
     sum[0] += sign * tokens.input;
@@ -169,9 +222,9 @@ const ASSISTANT = Buffer.from('"assistant"');
 
 // Reads on in one of Claude Code's transcripts. A request is counted once, by its last word on what it
 // used, however many lines repeat it.
-function readClaude(file, entry, { prices, goesOn, hoursFrom }) {
+function readClaude(file, entry, { prices, goesOn, hoursFrom, offsetAt }) {
   const recent = new Map(entry.recent ?? []);
-  const into = { days: entry.days, hours: (entry.hours ??= {}), hoursFrom };
+  const into = { days: entry.days, hours: (entry.hours ??= {}), hoursFrom, offsetAt };
   entry.offset = eachLine(file, entry.offset, line => {
     if (!line.includes(USAGE) || !line.includes(ASSISTANT)) return;
     const found = claudeEntry(parsed(line));
@@ -206,9 +259,9 @@ const CONTEXT = Buffer.from('"turn_context"');
 // rollout from before Codex wrote those has its running count instead, said again whenever it's asked
 // for, so there a count that hasn't grown is the one before. What's used is charged at the service
 // tier the thread was last set to, as its fast modes are: `priority`, `ultrafast`.
-function readCodex(file, entry, { prices, goesOn, hoursFrom }) {
-  const own = { days: entry.days, hours: (entry.hours ??= {}), hoursFrom };
-  const counted = { days: (entry.counted ??= {}), hours: (entry.countedHours ??= {}), hoursFrom };
+function readCodex(file, entry, { prices, goesOn, hoursFrom, offsetAt }) {
+  const own = { days: entry.days, hours: (entry.hours ??= {}), hoursFrom, offsetAt };
+  const counted = { days: (entry.counted ??= {}), hours: (entry.countedHours ??= {}), hoursFrom, offsetAt };
   entry.offset = eachLine(file, entry.offset, line => {
     const isRecord = line.includes(RECORD);
     if (!isRecord && !line.includes(COUNT) && !line.includes(CONTEXT) && !line.includes(SETTINGS)) return;
@@ -344,9 +397,9 @@ function rowsOf(file, query) {
 // Counts one of Antigravity's conversations, which is a database with a row for each of the model's
 // responses and a row for each step, where the time is. It's small, and a row of it can change, so
 // it's counted whole each time it has changed.
-function readAntigravity(file, entry, { prices, hoursFrom }) {
+function readAntigravity(file, entry, { prices, hoursFrom, offsetAt }) {
   const times = new Map(rowsOf(file, 'select idx, hex(metadata) from steps order by idx').map(antigravityStep).filter(Boolean).map(step => [step.id, step.at]));
-  const into = { days: {}, hours: {}, hoursFrom };
+  const into = { days: {}, hours: {}, hoursFrom, offsetAt };
   for (const turn of rowsOf(file, 'select idx, hex(data) from gen_metadata order by idx').map(antigravityTurn)) {
     const at = turn && times.get(turn.step);
     if (at) tally(into, at, turn.model ?? 'unknown', turn.tokens, prices);
@@ -381,12 +434,41 @@ export function chatFolders(env = process.env, home = os.homedir()) {
   };
 }
 
-function readKept(file) {
+// What was counted before by the clock of `zone`. What was counted by another is of no use: its days
+// are other days.
+function readKept(file, zone) {
   try {
     const kept = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return kept?.version === VERSION && kept.files && typeof kept.files === 'object' ? kept : undefined;
+    return kept?.version === VERSION && kept.zone === zone && kept.files && typeof kept.files === 'object' ? kept : undefined;
   } catch {
     return undefined;
+  }
+}
+
+// Where a clock's count is kept: this computer's own in `file`, and another's beside it, under the
+// zone's name, so that readers in two zones each find theirs as they left it.
+function keptFor(file, zone) {
+  if (zone === hereName()) return file;
+  const { dir, name, ext } = path.parse(file);
+  return path.join(dir, `${name}.${zone.replace(/[^A-Za-z0-9_+-]/g, '_')}${ext}`);
+}
+
+// Another clock's count that hasn't been asked for in a month goes.
+function forgetOldClocks(file, now) {
+  const { dir, name, ext } = path.parse(file);
+  let found;
+  try {
+    found = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const other of found) {
+    if (!other.startsWith(`${name}.`) || !other.endsWith(ext) || other === `${name}${ext}`) continue;
+    try {
+      if (now - fs.statSync(path.join(dir, other)).mtimeMs > CLOCK_KEPT_MS) fs.unlinkSync(path.join(dir, other));
+    } catch {
+      // Gone already, or not to be had: it's looked at again next time.
+    }
   }
 }
 
@@ -420,20 +502,25 @@ function stampOf(file, beside) {
 
 // Reads what has been written since the last time, for as long as `budgetMs` allows, and gives each
 // agent's count: `days` are the last ninety, today last, and `hours` the last twenty-four, this one
-// last. For each agent `tokens` of each kind and `cost` in dollars are a number a day, and under
+// last, by the clock of `zone`, a reader's time zone by its name, or this computer's own with none:
+// see `clockOf`. `zone` in what's given is the one they're told by. For each agent `tokens` of each kind and `cost` in dollars are a number a day, and under
 // `hourly` a number an hour, with `unpriced`, how many tokens the price list had no model for.
 // `scanning` says there's more to read, which the next call goes on with. `codexLimits` are the limits
 // Codex last wrote down, with `at`, when. A chat that's deleted is still counted, for the days it was
 // used on.
-export function readUsage({ file, folders = chatFolders(), prices = {}, now = Date.now(), days: count = DAYS, budgetMs = Infinity, clock = Date.now } = {}) {
+export function readUsage({ file, zone, folders = chatFolders(), prices = {}, now = Date.now(), days: count = DAYS, budgetMs = Infinity, clock = Date.now } = {}) {
   const started = clock();
   const goesOn = () => clock() - started < budgetMs;
-  const days = lastDays(count, now);
-  const hours = lastHours(HOURS, now);
-  const since = new Date(`${days[0]}T00:00:00`).getTime();
-  // What's as old as the first of the hours told, to the hour.
-  const hoursFrom = Math.floor((now - (HOURS - 1) * HOUR_MS) / HOUR_MS) * HOUR_MS;
-  const kept = (file && readKept(file)) || { version: VERSION, files: {} };
+  const told = clockOf(zone);
+  const { offsetAt } = told;
+  const days = lastDays(count, now, offsetAt);
+  const hours = lastHours(HOURS, now, offsetAt);
+  const since = startOf(days[0], offsetAt);
+  // What's as old as the first of the hours told, to the hour by that clock.
+  const first = now - (HOURS - 1) * HOUR_MS;
+  const hoursFrom = Math.floor((first + offsetAt(first)) / HOUR_MS) * HOUR_MS - offsetAt(first);
+  const keptFile = file && keptFor(file, told.name);
+  const kept = (keptFile && readKept(keptFile, told.name)) || { files: {} };
   const files = {};
   const waiting = [];
   for (const [agent, roots] of Object.entries(folders)) {
@@ -476,7 +563,7 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
       break;
     }
     try {
-      KINDS[entry.agent].read(chat, entry, { prices, goesOn, hoursFrom });
+      KINDS[entry.agent].read(chat, entry, { prices, goesOn, hoursFrom, offsetAt });
     } catch (error) {
       console.error(`usage: ${chat}: ${error.message}`);
       continue;
@@ -486,12 +573,13 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
     else scanning = true;
   }
   for (const entry of Object.values(files)) prune(entry);
-  if (file) {
+  if (keptFile) {
     try {
-      keep(file, { version: VERSION, files });
+      keep(keptFile, { version: VERSION, zone: told.name, files });
     } catch (error) {
       console.error(`usage: ${error.message}`);
     }
+    forgetOldClocks(file, clock());
   }
 
   const blankSums = slots => ({
@@ -555,7 +643,7 @@ export function readUsage({ file, folders = chatFolders(), prices = {}, now = Da
       .sort((a, b) => sumOf(b.cost) - sumOf(a.cost) || sumOf(b.tokens) - sumOf(a.tokens) || a.model.localeCompare(b.model));
     delete sums.byModel;
   }
-  return { days, hours, agents, scanning, ...(codexLimits && { codexLimits }) };
+  return { days, hours, zone: told.name, agents, scanning, ...(codexLimits && { codexLimits }) };
 }
 
 const WINDOWS = { 300: 'fiveHour', 10080: 'sevenDay' };
@@ -577,9 +665,9 @@ export function limitsFromRollout(found, now = Date.now()) {
 
 const AGENTS = ['claude', 'codex', 'antigravity'];
 
-// What a client is told: the days and the hours, and each agent that has anything to show with its
-// tokens and cost by day, and under `hourly` by hour, where it keeps count, and its account's `limits`,
-// where it has them. `shown` says which
+// What a client is told: the days and the hours, with the time `zone` whose clock they're told by, and
+// each agent that has anything to show with its tokens and cost by day, and under `hourly` by hour,
+// where it keeps count, and its account's `limits`, where it has them. `shown` says which
 // agents the client takes. `limits` are each agent's as it says them now: `{ limits, plan, credits,
 // updatedAt, reading }`.
 export function usageReply({ read, limits = {}, shown = () => true, now = Date.now() }) {
@@ -600,7 +688,10 @@ export function usageReply({ read, limits = {}, shown = () => true, now = Date.n
     }];
   });
   const isReading = AGENTS.some(agent => limits[agent]?.reading);
-  return { days: read.days, ...(read.hours && { hours: read.hours }), agents, scanning: Boolean(read.scanning || isReading), updatedAt: Math.floor(now / 1000) };
+  return {
+    days: read.days, ...(read.hours && { hours: read.hours }), ...(read.zone && { zone: read.zone }), agents,
+    scanning: Boolean(read.scanning || isReading), updatedAt: Math.floor(now / 1000),
+  };
 }
 
 // How long a read may take before it answers with what it has. The next goes on from there.
@@ -615,16 +706,17 @@ async function runWorker(request) {
   return reply;
 }
 
-// The reads, one at a time and in a process of their own, since the chats they go through can be
-// gigabytes. `run` runs one and gives what it printed. `prices` is asked to look at the list again
-// before each, which it does once a day, and what it finds is for the read after.
+// The reads, one at a time for each clock they're told by, and in a process of their own, since the
+// chats they go through can be gigabytes. `run` runs one and gives what it printed. `prices` is asked
+// to look at the list again before each, which it does once a day, and what it finds is for the read
+// after.
 export class UsageBook {
   #run;
   #prices;
   #request;
   #now;
-  #kept;
-  #reading;
+  #kept = new Map();
+  #reading = new Map();
 
   constructor({ file, pricesFile, prices, run = runWorker, budgetMs = BUDGET_MS, now = Date.now }) {
     this.#run = run;
@@ -633,14 +725,19 @@ export class UsageBook {
     this.#now = now;
   }
 
-  async read() {
+  // `zone` is the reader's time zone by its name, where it says one.
+  async read(zone) {
+    const clock = zone ?? '';
+    const kept = this.#kept.get(clock);
     // One that stopped short is gone on with at once.
-    if (this.#kept && !this.#kept.read.scanning && this.#now() - this.#kept.at < LIFETIME_MS) return this.#kept.read;
+    if (kept && !kept.read.scanning && this.#now() - kept.at < LIFETIME_MS) return kept.read;
     this.#prices?.refresh().catch(() => {});
-    this.#reading ??= this.#run(this.#request).then(read => {
-      this.#kept = { at: this.#now(), read };
-      return read;
-    }).finally(() => { this.#reading = undefined; });
-    return this.#reading;
+    if (!this.#reading.has(clock)) {
+      this.#reading.set(clock, this.#run({ ...this.#request, ...(zone && { zone }) }).then(read => {
+        this.#kept.set(clock, { at: this.#now(), read });
+        return read;
+      }).finally(() => { this.#reading.delete(clock); }));
+    }
+    return this.#reading.get(clock);
   }
 }

@@ -679,8 +679,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     screen: () => screenAccess(),
     // What the session's status line was last told, or null before Claude Code has run it.
     // What every agent here has used, for the reader's whole account and not one session's: see usage.mjs.
+    // `timeZone` is the reader's, by its name, so that a day and an hour are its own and not this computer's.
     usage: async (msg, socket) => {
       if (!usage) throw new HelperError('unsupported', 'This helper keeps no count of what is used.');
+      const zone = typeof msg.timeZone === 'string' && /^[A-Za-z0-9_+\-/]{1,64}$/.test(msg.timeZone) ? msg.timeZone : undefined;
       const said = other => (other && shows(socket, other.name) ? other.limits().catch(() => undefined) : undefined);
       // Claude Code's are asked of it, as /usage is, and waited for only a moment: until they come,
       // they're as its status line was last told them, and more is said to be on its way.
@@ -690,7 +692,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         if (asked === 'late') return { ...accountLimits(statusDir), reading: true };
         return asked ?? accountLimits(statusDir);
       };
-      const [read, ofCodex, ofAntigravity, ofClaudeCode] = await Promise.all([usage.read(), said(codex), said(antigravity), ofClaude()]);
+      const [read, ofCodex, ofAntigravity, ofClaudeCode] = await Promise.all([usage.read(zone), said(codex), said(antigravity), ofClaude()]);
       return usageReply({
         read, shown: agent => agent === 'claude' || shows(socket, agent),
         limits: { claude: ofClaudeCode, codex: ofCodex, antigravity: ofAntigravity },

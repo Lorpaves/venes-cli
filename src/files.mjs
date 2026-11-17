@@ -300,6 +300,12 @@ export function isText(bytes) {
   }
 }
 
+// A PDF says it's one near its start. It can be all letters as far as it's looked at, and it's still
+// a document to show and no text to read or to edit.
+const PDF_MARK = Buffer.from('%PDF-');
+const PDF_MARK_WITHIN = 1024;
+export const isPDF = bytes => bytes.subarray(0, PDF_MARK_WITHIN).includes(PDF_MARK);
+
 function readStart(file, length) {
   const buffer = Buffer.alloc(length);
   const fd = fs.openSync(file, 'r');
@@ -323,14 +329,17 @@ export function readFile(root, named, { textLimit = TEXT_BYTES, binaryLimit = BI
   // When it last changed goes with it, for a client that edits it to say which file it read.
   const about = { path: file, name: path.basename(file), size: stat.size, modifiedAt: Math.floor(stat.mtimeMs) };
   try {
-    if (isText(readStart(file, Math.min(stat.size, SNIFF_BYTES)))) {
+    const start = readStart(file, Math.min(stat.size, SNIFF_BYTES));
+    const isDocument = isPDF(start);
+    if (!isDocument && isText(start)) {
       const bytes = readStart(file, Math.min(stat.size, textLimit));
       if (stat.size <= textLimit) return { ...about, text: bytes.toString('utf8') };
       // Cut at a line's end, so that what's shown is whole lines and whole characters.
       const end = bytes.lastIndexOf(0x0a);
       return { ...about, text: bytes.subarray(0, end < 0 ? bytes.length : end + 1).toString('utf8'), truncated: true };
     }
-    const mediaType = mediaTypeOf(file);
+    // A PDF is one whatever it's called.
+    const mediaType = isDocument ? 'application/pdf' : mediaTypeOf(file);
     if (stat.size > binaryLimit) return { ...about, mediaType, tooLarge: true };
     return { ...about, mediaType, data: fs.readFileSync(file).toString('base64') };
   } catch (error) {
@@ -365,7 +374,8 @@ export function writeFile(root, named, { text, was, overwrite = false, limit = W
     && was.size === stat.size && was.modifiedAt === Math.floor(stat.mtimeMs);
   if (!overwrite && !isAsRead) throw new HelperError('file_changed', `${name} has changed since it was read.`);
   try {
-    if (!isText(readStart(real.file, Math.min(stat.size, SNIFF_BYTES)))) throw new HelperError('not_text', `${name} isn't a text file.`);
+    const start = readStart(real.file, Math.min(stat.size, SNIFF_BYTES));
+    if (isPDF(start) || !isText(start)) throw new HelperError('not_text', `${name} isn't a text file.`);
     fs.writeFileSync(real.file, bytes);
   } catch (error) {
     if (error instanceof HelperError) throw error;

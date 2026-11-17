@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CHUNK_BYTES, checkedName, createEntry, insideFolder, isText, isWithin, listAnywhere, listFolder, mediaTypeOf, moveToLinuxTrash, moveToTrash, readChunk, readFile,
+  CHUNK_BYTES, checkedName, createEntry, insideFolder, isPDF, isText, isWithin, listAnywhere, listFolder, mediaTypeOf, moveToLinuxTrash, moveToTrash, readChunk, readFile,
   trashEntry,
   writeFile,
 } from '../../src/files.mjs';
@@ -127,6 +127,24 @@ test('anything else comes as its bytes, for what shows it, unless it\'s too big'
     { path: path.join(root, 'logo.png'), name: 'logo.png', size: 8, modifiedAt, mediaType: 'image/png', data: bytes.toString('base64') });
   assert.deepEqual(readFile(root, 'logo.png', { binaryLimit: 4 }),
     { path: path.join(root, 'logo.png'), name: 'logo.png', size: 8, modifiedAt, mediaType: 'image/png', tooLarge: true });
+});
+
+test('a PDF is a document to show, though it\'s all letters as far as it\'s looked at', t => {
+  const { root, write } = folder(t);
+  // One with nothing in it but letters, as a small one a program wrote can be, and one that says so late.
+  const plain = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n');
+  assert.deepEqual([isText(plain), isPDF(plain), isPDF(Buffer.from('const a = 1;\n')), isPDF(Buffer.concat([Buffer.alloc(2000, 0x20), plain]))], [true, true, false, false]);
+  write('paper.pdf', plain);
+  write('scan', plain);
+  const paper = readFile(root, 'paper.pdf');
+  assert.deepEqual([paper.mediaType, paper.text, Buffer.from(paper.data, 'base64').equals(plain)], ['application/pdf', undefined, true]);
+  // It's one whatever it's called, and one too big to send says what it is too.
+  assert.equal(readFile(root, 'scan').mediaType, 'application/pdf');
+  assert.deepEqual([readFile(root, 'scan', { binaryLimit: 4 }).tooLarge, readFile(root, 'scan', { binaryLimit: 4 }).mediaType], [true, 'application/pdf']);
+  // And it's not for editing as text.
+  const was = { size: paper.size, modifiedAt: paper.modifiedAt };
+  assert.throws(() => writeFile(root, 'paper.pdf', { text: 'mine\n', was }), { code: 'not_text' });
+  assert.equal(fs.readFileSync(path.join(root, 'paper.pdf')).equals(plain), true);
 });
 
 test('a file that isn\'t there, a folder, or one outside is refused', t => {

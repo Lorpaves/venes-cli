@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  UsageBook, antigravityStep, antigravityTurn, chatFolders, claudeEntry, codexTokens, dayOf, eachLine, hourOf, lastDays, lastHours, limitsFromRollout,
+  UsageBook, antigravityStep, antigravityTurn, chatFolders, claudeEntry, clockOf, codexTokens, dayOf, eachLine, hourOf, lastDays, lastHours, limitsFromRollout,
   protoFields, readUsage, usageReply,
 } from '../../src/usage.mjs';
 
@@ -123,6 +123,75 @@ test('a moment is on the day it falls where the computer is, and the last days e
   const hours = lastHours(24, new Date(2026, 10, 16, 15, 30).getTime());
   assert.deepEqual([hours.length, hours[0], hours.at(-2), hours.at(-1)], [24, '2026-11-15T16', '2026-11-16T14', '2026-11-16T15']);
   assert.deepEqual(lastHours(3, new Date(2026, 0, 1, 1, 5).getTime()), ['2025-12-31T23', '2026-01-01T00', '2026-01-01T01']);
+});
+
+test('a reader in another time zone is told days and hours by the clock there', () => {
+  const own = clockOf();
+  assert.equal(own.name, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  // No zone, this computer's own by its name, and one it doesn't know are all its own clock.
+  assert.equal(clockOf(own.name).offsetAt, own.offsetAt);
+  assert.equal(clockOf('Nowhere/At_All').name, own.name);
+  const hour = 60 * 60 * 1000;
+  const shanghai = clockOf('Asia/Shanghai');
+  const at = Date.UTC(2026, 10, 16, 18, 14, 3);
+  assert.deepEqual([shanghai.name, shanghai.offsetAt(at)], ['Asia/Shanghai', 8 * hour]);
+  // Six in the evening by UTC is two the next morning there.
+  assert.deepEqual([dayOf(at, shanghai.offsetAt), hourOf(at, shanghai.offsetAt)], ['2026-11-17', '2026-11-17T02']);
+  assert.deepEqual(lastDays(3, at, shanghai.offsetAt), ['2026-11-15', '2026-11-16', '2026-11-17']);
+  assert.deepEqual(lastHours(3, at, shanghai.offsetAt), ['2026-11-17T00', '2026-11-17T01', '2026-11-17T02']);
+  // A clock that's half an hour off the hour has its own hours.
+  const kolkata = clockOf('Asia/Kolkata');
+  assert.equal(kolkata.offsetAt(at), 5.5 * hour);
+  assert.equal(hourOf(Date.UTC(2026, 10, 16, 18, 29, 59), kolkata.offsetAt), '2026-11-16T23');
+  assert.equal(hourOf(Date.UTC(2026, 10, 16, 18, 30), kolkata.offsetAt), '2026-11-17T00');
+  // Where the clocks change, each day is told once: they went back in New York on 1 November 2026.
+  const newYork = clockOf('America/New_York');
+  assert.deepEqual([newYork.offsetAt(Date.UTC(2026, 9, 31, 12)), newYork.offsetAt(Date.UTC(2026, 10, 2, 12))], [-4 * hour, -5 * hour]);
+  const days = lastDays(5, Date.UTC(2026, 10, 3, 4, 30), newYork.offsetAt);
+  assert.deepEqual(days, ['2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02']);
+  // The hour that comes twice that night is told once.
+  const hours = lastHours(4, Date.UTC(2026, 10, 1, 7, 30), newYork.offsetAt);
+  assert.deepEqual(hours, ['2026-11-01T00', '2026-11-01T01', '2026-11-01T02']);
+});
+
+test('what was used is counted by a reader\'s clock, and kept apart from this computer\'s count', t => {
+  const { folders, write, file, read } = setup(t);
+  const hour = 60 * 60 * 1000;
+  // A zone that's most of a day from this computer's, whichever this one is in.
+  const zone = Math.abs(clockOf().offsetAt(NOW)) > 6 * hour ? 'Etc/UTC' : 'Pacific/Kiritimati';
+  const there = clockOf(zone);
+  write(path.join(folders.claude[0], '-code', 'a.jsonl'), [
+    reply({ id: 'msg_1', at: NOW - 2 * hour, usage: { input_tokens: 5, output_tokens: 50 } }),
+    reply({ id: 'msg_2', at: NOW - 30 * hour, usage: { input_tokens: 1000, output_tokens: 0 } }),
+  ]);
+  const found = read({ zone });
+  assert.equal(found.zone, there.name);
+  assert.deepEqual([found.days.at(-1), found.hours.at(-1)], [dayOf(NOW, there.offsetAt), hourOf(NOW, there.offsetAt)]);
+  assert.deepEqual(found.days, lastDays(90, NOW, there.offsetAt));
+  const { claude } = found.agents;
+  const day = at => found.days.indexOf(dayOf(at, there.offsetAt));
+  assert.equal(claude.hourly.tokens.input[found.hours.indexOf(hourOf(NOW - 2 * hour, there.offsetAt))], 5);
+  assert.deepEqual([sum(claude.hourly.tokens.input), sum(claude.tokens.input)], [5, 1005]);
+  // Each is on its day there, which the two of them needn't share here.
+  assert.equal(claude.tokens.input[day(NOW - 30 * hour)] >= 1000, true);
+  assert.equal(claude.tokens.input[day(NOW - 2 * hour)] >= 5, true);
+
+  // It's kept beside this computer's own count, under the zone's name, and each is read on from where it was.
+  const beside = path.join(path.dirname(file), `usage.${zone.replace('/', '_')}.json`);
+  assert.equal(JSON.parse(fs.readFileSync(beside, 'utf8')).zone, there.name);
+  assert.equal(fs.existsSync(file), false);
+  const own = read();
+  assert.deepEqual([own.zone, own.days.at(-1), sum(own.agents.claude.tokens.input)], [clockOf().name, dayOf(NOW), 1005]);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).zone, clockOf().name);
+  assert.deepEqual(read({ zone }).agents, found.agents);
+  // A zone nobody here knows is this computer's clock.
+  assert.deepEqual(read({ zone: 'Nowhere/At_All' }).days, own.days);
+
+  // A count by another clock that nobody has asked for in a month goes, and this computer's own stays.
+  const old = new Date(NOW - 31 * 24 * hour);
+  fs.utimesSync(beside, old, old);
+  read({ clock: () => NOW });
+  assert.deepEqual([fs.existsSync(beside), fs.existsSync(file)], [false, true]);
 });
 
 test('a reply in a transcript says what its request used, by the kinds a price is listed for', () => {
@@ -321,7 +390,7 @@ test('a chat nobody has written to since before the days shown is left unread', 
   const old = write(path.join(folders.claude[0], '-code', 'old.jsonl'), [reply({ id: 'msg_1', daysAgo: 100, usage: USED })]);
   const then = noon(100);
   fs.utimesSync(old, then, then);
-  assert.deepEqual(read(), { days: lastDays(90, NOW), hours: lastHours(24, NOW), agents: {}, scanning: false });
+  assert.deepEqual(read(), { days: lastDays(90, NOW), hours: lastHours(24, NOW), zone: clockOf().name, agents: {}, scanning: false });
   assert.deepEqual(readUsage({ folders: { claude: [path.join(folders.claude[0], 'nowhere')] }, now: NOW }).agents, {});
 });
 
@@ -488,6 +557,16 @@ test('the chats are read by one process at a time, and what it found stands for 
   release();
   await fourth;
   assert.ok(refreshed.length >= 3, 'the list of prices is looked at with each');
+
+  // A reader in another time zone has its own read, by its own clock, and it stands beside the first.
+  const there = book.read('Asia/Shanghai');
+  assert.equal(runs.length, 4);
+  assert.deepEqual(runs[3], { file: '/h/usage.json', pricesFile: '/h/prices.json', budgetMs: 6000, zone: 'Asia/Shanghai' });
+  release();
+  await there;
+  assert.equal(await book.read('Asia/Shanghai'), await there);
+  assert.equal(await book.read(), await fourth);
+  assert.equal(runs.length, 4);
 
   // A read that failed is tried again by the next.
   const failing = new UsageBook({ run: async () => { throw new Error('no node'); } });

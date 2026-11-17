@@ -562,6 +562,57 @@ test('a session that ends takes what\'s queued with it', () => {
   assert.equal(events.find(e => e.kind === 'send.failed').code, 'session_ended');
 });
 
+const codeOutput = '<event kind="repl-eval" at="2026-11-17T15:15:45.225Z" eval="3" ms="201" status="settled">\n<result>done</result>\n</event>';
+
+test('in Code Mode what the code prints isn\'t a user message, and after a turn it starts another', () => {
+  const { store, hook, events } = setup();
+  hook('UserPromptSubmit', { prompt: 'run it' });
+  hook('UserPromptSubmit', { source: 'poll_event', prompt: codeOutput });
+  hook('Stop', {});
+  assert.equal(store.get('a').status, 'idle');
+  hook('UserPromptSubmit', { source: 'poll_event', prompt: codeOutput });
+  assert.deepEqual(userEvents(events).map(e => e.text), ['run it']);
+  assert.equal(store.get('a').status, 'running');
+  assert.equal(store.get('a').lastPrompt, 'run it');
+});
+
+test('what the code prints is known by its envelope when the hook doesn\'t say where it came from', () => {
+  const { hook, events } = setup();
+  hook('UserPromptSubmit', { prompt: codeOutput });
+  assert.deepEqual(userEvents(events), []);
+});
+
+test('what the code prints leaves a permission request waiting', () => {
+  const { store, hook } = setup();
+  hook('PreToolUse', { ...bash, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', bash);
+  hook('UserPromptSubmit', { source: 'poll_event', prompt: codeOutput });
+  assert.equal(store.get('a').status, 'waiting');
+  store.respond(held.request.id, { decision: 'allow' });
+});
+
+test('Poll taking the code\'s output doesn\'t read a message typed meanwhile', () => {
+  const { store, hook, sent } = working();
+  hook('UserPromptSubmit', { prompt: 'more' });
+  queue(store, 'enqueue', 'more');
+  hook('UserPromptSubmit', { source: 'poll_event', prompt: codeOutput });
+  queue(store, 'enqueue', codeOutput.replace('<event ', '<event nonce="n1" '));
+  queue(store, 'dequeue');
+  assert.deepEqual(sent(), []);
+  queue(store, 'remove', 'more');
+  assert.deepEqual(sent(), ['more']);
+});
+
+test('the code\'s output taken in beside a tool\'s result doesn\'t read a typed message either', () => {
+  const { store, hook, sent } = working();
+  hook('UserPromptSubmit', { prompt: 'more' });
+  queue(store, 'enqueue', codeOutput);
+  queue(store, 'remove', codeOutput);
+  assert.deepEqual(sent(), []);
+  queue(store, 'dequeue');
+  assert.deepEqual(sent(), ['more'], 'with no output waiting, a record that names nothing reads the message');
+});
+
 test('what has to wait depends on the lane', () => {
   const { store, hook, session } = working();
   assert.equal(store.mustHold(session, 'later'), true, 'a running turn');

@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { normalized, parseTaskNotification, signalsFrom, unwrapPasted } from './transcript.mjs';
+import { isPollEvent, normalized, parseTaskNotification, signalsFrom, unwrapPasted } from './transcript.mjs';
 import { HelperError } from './errors.mjs';
 import { splitAttachments, uploadsRoot } from './uploads.mjs';
 
@@ -154,7 +154,7 @@ export function modesOf(s) {
 
 function blankSession(id) {
   return {
-    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], backgroundTasks: 0, modes: [],
+    id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], pollEvents: 0, backgroundTasks: 0, modes: [],
   };
 }
 
@@ -437,6 +437,12 @@ export class SessionStore extends EventEmitter {
         this.#endSession(s, ev.reason);
         break;
       case 'UserPromptSubmit':
+        // In Code Mode what Claude's code prints comes through here too, for Claude to read. It isn't the
+        // user talking, and only says that an idle session has work again.
+        if (ev.source === 'poll_event' || isPollEvent(ev.prompt)) {
+          if (!isAtWork(s.status)) this.#setStatus(s, 'running');
+          break;
+        }
         // A finished background task re-enters as a synthetic prompt; it isn't the user talking.
         if (ev.prompt?.startsWith('<task-notification>')) this.#onTaskNotification(s, ev.prompt);
         // This runs as a message is typed. During a turn, Claude only reads it later.
@@ -530,6 +536,8 @@ export class SessionStore extends EventEmitter {
       else if (type === 'shellInput') this.#onShellInput(s, signal);
       else if (type === 'shellOutput') this.#onShellOutput(s, signal);
       else if (type === 'queueRead') this.#onQueueRead(s, signal.text);
+      else if (type === 'pollEventQueued') s.pollEvents = (s.pollEvents ?? 0) + 1;
+      else if (type === 'pollEventRead') s.pollEvents = Math.max((s.pollEvents ?? 0) - 1, 0);
       else if (type === 'queueTakenBack') this.#dropQueued(s, { code: 'taken_back', message: 'Taken back in the terminal.' });
     }
   }
@@ -696,8 +704,14 @@ export class SessionStore extends EventEmitter {
   }
 
   // Claude has a queued message, which `text` may not name. It joins the conversation here, where
-  // the transcript will have it too.
-  #onQueueRead(s, text = '') {
+  // the transcript will have it too. A record that names nothing while code's output waits in the queue
+  // is Poll taking that output.
+  #onQueueRead(s, text) {
+    if (text === undefined && s.pollEvents > 0) {
+      s.pollEvents -= 1;
+      return;
+    }
+    text ??= '';
     if (text.startsWith('<task-notification>')) return;
     const position = Math.max(s.queued.findIndex(queued => normalized(queued) === normalized(text)), 0);
     const [message] = s.queued.splice(position, 1);

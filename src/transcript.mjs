@@ -8,6 +8,11 @@ import { splitAttachments } from './uploads.mjs';
 
 const INTERRUPTED = /^\[Request interrupted by user/;
 const HIDDEN_USER_TEXT = /^<(task-notification|command-|local-command|system-reminder)/;
+// In Code Mode, what the code Claude runs prints reaches it as an event, such as
+// `<event kind="repl-eval" eval="3" …>`. It goes through the queue and the UserPromptSubmit hooks as a
+// typed message does, but it's the code's output for Claude to read, not anyone talking.
+const POLL_EVENT = /^\s*<event\b[^>]*\bkind="/;
+export const isPollEvent = text => typeof text === 'string' && POLL_EVENT.test(text);
 const REFUSAL = /^model_refusal_(no_)?fallback$/;
 // Claude Code's own word that a command went on in the background, at the start of a line of its
 // result: with `run_in_background`, or moved there by a message or by its timeout, after whatever it
@@ -216,9 +221,15 @@ function systemSignals(record) {
 }
 
 // What became of a message typed during a turn. `remove` is Claude reading it in that turn, `dequeue`
-// is it starting the next one, and `popAll` is someone taking back all that's queued.
+// is it starting the next one, and `popAll` is someone taking back all that's queued. Code Mode's events
+// go through the same queue, and Poll takes them with a `dequeue` that names nothing.
 function queueSignals({ operation, content }) {
-  if (operation === 'remove' || operation === 'dequeue') return [{ type: 'queueRead', text: content }];
+  const read = operation === 'remove' || operation === 'dequeue';
+  if (isPollEvent(content)) {
+    if (operation === 'enqueue') return [{ type: 'pollEventQueued' }];
+    if (read) return [{ type: 'pollEventRead' }];
+  }
+  if (read) return [{ type: 'queueRead', text: content }];
   return operation === 'popAll' ? [{ type: 'queueTakenBack' }] : [];
 }
 
@@ -492,7 +503,7 @@ function conversationItems(file) {
       items.push({ role: 'output', at, ...output, replies: shellReplies });
       shellReplies = true;
     } else if (INTERRUPTED.test(typed)) items.push({ role: 'system', at, kind: 'interrupted' });
-    else if (!HIDDEN_USER_TEXT.test(typed)) {
+    else if (!HIDDEN_USER_TEXT.test(typed) && !isPollEvent(typed)) {
       const { text, files } = splitAttachments(unwrapPasted(typed), { sessionId });
       items.push({ role: 'user', at, text, ...(files.length ? { attachments: files } : {}) });
     }

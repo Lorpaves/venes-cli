@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  TranscriptTail, findArtifact, followTranscripts, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand, shellOutput,
-  signalsFrom,
+  TranscriptTail, findArtifact, followTranscripts, isPollEvent, parseTaskNotification, readAgentParent, readHistory, readImage, readTail, shellCommand,
+  shellOutput, signalsFrom,
   unwrapPasted,
 } from '../../src/transcript.mjs';
 
@@ -31,6 +31,23 @@ test('the queue says when a message typed during a turn was read or taken back',
   assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'dequeue' }), [{ type: 'queueRead', text: undefined }]);
   assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'popAll', content: 'more' }), [{ type: 'queueTakenBack' }]);
   assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'enqueue', content: 'more' }), []);
+});
+
+const codeOutput = '<event nonce="n1" kind="repl-eval" at="2026-11-17T15:15:45.225Z" eval="3" ms="201" status="settled">\n<result>done</result>\n</event>';
+
+test('Code Mode\'s events in the queue aren\'t messages typed during a turn', () => {
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'enqueue', content: codeOutput }), [{ type: 'pollEventQueued' }]);
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'remove', content: codeOutput, reason: 'absorbed_mid_turn' }), [{ type: 'pollEventRead' }]);
+  assert.deepEqual(signalsFrom({ type: 'queue-operation', operation: 'dequeue' }), [{ type: 'queueRead', text: undefined }], 'Poll\'s names nothing');
+});
+
+test('an event is known by its envelope at the start', () => {
+  assert.ok(isPollEvent(codeOutput));
+  assert.ok(isPollEvent('\n<event kind="repl-status" at="x">'), 'as a hook has it, with no nonce');
+  assert.ok(!isPollEvent('<events kind="x">'));
+  assert.ok(!isPollEvent('see <event kind="x">'));
+  assert.ok(!isPollEvent('<event>no kind</event>'));
+  assert.ok(!isPollEvent(undefined));
 });
 
 test('ordinary and unknown records produce no signal', () => {
@@ -149,6 +166,29 @@ test('history joins tool calls to results and hides internal records', () => {
     const { items } = readHistory(file);
     assert.deepEqual(items.map(i => i.role), ['user', 'thinking', 'assistant', 'tool', 'system']);
     assert.equal(items[3].result, 'a.txt');
+  } finally { cleanup(); }
+});
+
+test('history leaves what Code Mode\'s code printed with the Poll call that took it', () => {
+  const { file, cleanup } = tempFile([
+    line({ type: 'user', origin: { kind: 'human' }, message: { content: 'run it' } }),
+    line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'r1', name: 'REPL', input: { code: '1' } }] } }),
+    line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: '(dispatched #3)' }] } }),
+    line({ type: 'queue-operation', operation: 'enqueue', content: codeOutput }),
+    line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'Poll', input: {} }] } }),
+    line({ type: 'queue-operation', operation: 'dequeue' }),
+    line({ type: 'attachment', attachment: { type: 'poll_events', deliveredVia: 'poll_tool', pollCall: 'p1', envelopes: [], kinds: [] } }),
+    line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'p1', content: codeOutput }] } }),
+    line({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } }),
+    // Output that came after the turn, which starts another.
+    line({ type: 'user', isMeta: true, message: { content: [] } }),
+    line({ type: 'attachment', attachment: { type: 'poll_events', envelopes: [codeOutput], kinds: ['repl-eval'] } }),
+    line({ type: 'user', message: { content: codeOutput } }),
+  ].join(''));
+  try {
+    const { items } = readHistory(file);
+    assert.deepEqual(items.map(i => i.role), ['user', 'tool', 'tool', 'assistant']);
+    assert.equal(items[2].result, codeOutput);
   } finally { cleanup(); }
 });
 

@@ -503,6 +503,8 @@ Held messages go out in order, each once the session is idle and any compaction 
 
 `message.user` carries the `clientId` of the send it came from. A message typed in the terminal has none. For a message sent during a turn it comes when Claude reads it, not when it's typed, so a client can show it as waiting until then, as Claude Code does. If someone takes it back at the terminal, `send.failed` with `taken_back` comes instead. Slash commands that Claude Code runs itself, such as `/compact`, fire no hook, so they never echo.
 
+In Code Mode, what Claude's code prints reaches Claude as an event (`<event kind="repl-eval" …>`) through the same `UserPromptSubmit` hook and queue as a message. It's no `message.user`, and its leaving the queue isn't a queued message being read. Claude reads it in the result of the `Poll` call that took it, or beside another tool's result. Output that comes once a turn is over starts another with no `message.user`, as a finished task does.
+
 A message that starts with `!` is a line for the shell, which runs in the terminal, as typing it there does. Claude Code fires no hook for one, so it echoes from the transcript once it has run: `message.user` with `shell: true` and the text as typed, then `message.output` with what it printed, `stdout` and `stderr` apart, as Claude Code shows them. Unless `respondToBashCommands` is off, Claude answers it in a turn of its own, so the session goes `running`, and `replies` is true. When `replies` is false nothing follows, and the line is all there is. Both carry the time the transcript has for them as `at`.
 
 ### Images

@@ -574,6 +574,51 @@ test('the chats are read by one process at a time, and what it found stands for 
   await assert.rejects(failing.read(), /no node/);
 });
 
+test('stopping ends the read going on and waits for it to end', async () => {
+  const signals = [];
+  let end;
+  const book = new UsageBook({
+    file: '/h/usage.json', pricesFile: '/h/prices.json',
+    run: (request, { signal }) => new Promise((resolve, reject) => {
+      signals.push(signal);
+      signal.addEventListener('abort', () => { end = () => reject(signal.reason); });
+    }),
+  });
+  const reading = book.read();
+  let stopped = false;
+  const stopping = book.stop().then(() => { stopped = true; });
+  assert.equal(signals[0].aborted, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false, 'it waits for the read');
+  end();
+  await stopping;
+  await assert.rejects(reading);
+});
+
+test('a helper that stops takes the process reading with it, and nothing is written after', async t => {
+  const dir = tempDir(t);
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home);
+  // Its process looks only here, not at this computer's own chats.
+  const saved = Object.fromEntries(['HOME', 'USERPROFILE', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME'].map(name => [name, process.env[name]]));
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', CODEX_HOME: '' });
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  const helper = path.join(dir, 'helper');
+  const book = new UsageBook({ file: path.join(helper, 'usage.json'), pricesFile: path.join(dir, 'prices.json') });
+  const reading = book.read();
+  await book.stop();
+  await assert.rejects(reading);
+  // As when Venes is uninstalled: the helper's folder goes once it has stopped.
+  fs.rmSync(helper, { recursive: true, force: true });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(fs.existsSync(helper), false);
+});
+
 test('the process that reads prints what it found, with the prices kept beside it', t => {
   const { dir, folders, write, file } = setup(t);
   const home = path.join(dir, 'home');

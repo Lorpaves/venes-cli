@@ -908,9 +908,10 @@ export async function startDaemon(paths) {
 
   return {
     store,
-    // Settles once an SDK install going on has ended too.
+    // Settles once an SDK install or a read of what was used going on has ended too.
     stop() {
       const installing = library.stop();
+      const reading = usage.stop();
       stopSaving();
       transcripts.stop();
       codex.stop();
@@ -922,7 +923,7 @@ export async function startDaemon(paths) {
       hookServer.close();
       clientServer.close();
       fs.rmSync(paths.pidFile, { force: true });
-      return installing;
+      return Promise.all([installing, reading]);
     },
   };
 }

@@ -699,8 +699,19 @@ const BUDGET_MS = 6000;
 // What was read stands for this long, since each read goes through whatever has been written since.
 const LIFETIME_MS = 30_000;
 
-async function runWorker(request) {
-  const { stdout } = await exec(process.execPath, [WORKER, JSON.stringify(request)], { timeout: WORKER_TIMEOUT_MS, maxBuffer: WORKER_BUFFER_BYTES });
+async function runWorker(request, { signal } = {}) {
+  const reading = exec(process.execPath, [WORKER, JSON.stringify(request)], { timeout: WORKER_TIMEOUT_MS, maxBuffer: WORKER_BUFFER_BYTES, signal });
+  const { child } = reading;
+  // One ended by the helper stopping is told so as soon as it's asked to end, and is waited for until its
+  // process has gone, so that it writes nothing after.
+  const gone = new Promise(resolve => child.once('exit', resolve));
+  let stdout;
+  try {
+    ({ stdout } = await reading);
+  } catch (error) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) await gone;
+    throw error;
+  }
   const { error, ...reply } = JSON.parse(stdout);
   if (error) throw new HelperError(error.code, error.message);
   return reply;
@@ -717,6 +728,8 @@ export class UsageBook {
   #now;
   #kept = new Map();
   #reading = new Map();
+  // Ends a read going on when the helper stops.
+  #stopping = new AbortController();
 
   constructor({ file, pricesFile, prices, run = runWorker, budgetMs = BUDGET_MS, now = Date.now }) {
     this.#run = run;
@@ -733,11 +746,18 @@ export class UsageBook {
     if (kept && !kept.read.scanning && this.#now() - kept.at < LIFETIME_MS) return kept.read;
     this.#prices?.refresh().catch(() => {});
     if (!this.#reading.has(clock)) {
-      this.#reading.set(clock, this.#run({ ...this.#request, ...(zone && { zone }) }).then(read => {
+      this.#reading.set(clock, this.#run({ ...this.#request, ...(zone && { zone }) }, { signal: this.#stopping.signal }).then(read => {
         this.#kept.set(clock, { at: this.#now(), read });
         return read;
       }).finally(() => { this.#reading.delete(clock); }));
     }
     return this.#reading.get(clock);
+  }
+
+  // Ends the reads going on, and waits for them, so that none writes what it counted once the helper has
+  // gone: its folder may be gone too, as when Venes is uninstalled, and the read would make it again.
+  async stop() {
+    this.#stopping.abort();
+    await Promise.allSettled(this.#reading.values());
   }
 }

@@ -450,7 +450,7 @@ The cost is what those tokens would cost bought by the token: each request's, by
 
 What was counted of a chat stays counted when the chat is deleted, for the days it was used on.
 
-A chat is read once and then only where it has grown, one of Antigravity's whole again when it has changed, in a process of its own, and a read that takes longer than a few seconds answers with what it has and `scanning: true`; the next goes on from there, newest chats first. Replies within half a minute of each other are the same reply.
+A chat is read once and then only where it has grown, one of Antigravity's whole again when it has changed, in a process of its own, and a read that takes longer than a few seconds answers with what it has and `scanning: true`; the next goes on from there, newest chats first. Replies within half a minute of each other are the same reply. When the helper stops, a read going on is ended, and the helper waits for its process to go, so nothing is written to `~/.venes` once the helper has gone, as when Venes is uninstalled.
 
 The limits are those each agent last said: Claude Code's asked of it as `/usage` asks, by a session that's given nothing to do, at most every few minutes, and until that's back as it last told any session's status line, with `scanning` true; Codex's from its server where it's running and otherwise as it last wrote them down with a count, and Antigravity's from `agy -p /usage`, at most every few minutes. Codex isn't started to be asked.
 

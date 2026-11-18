@@ -201,7 +201,7 @@ const commands = {
     const daemon = await startDaemon(paths);
     for (const signal of ['SIGINT', 'SIGTERM']) {
       process.on(signal, () => {
-        // Leaves once an SDK install going on has ended, or soon whatever happens.
+        // Leaves once an SDK install or a read of what was used going on has ended, or soon whatever happens.
         setTimeout(() => process.exit(0), STOP_TIMEOUT_MS - 1000).unref();
         daemon.stop().finally(() => process.exit(0));
       });

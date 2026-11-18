@@ -215,6 +215,9 @@ export async function resumeSession({
 }
 
 const EXIT_LIMIT_MS = 20_000;
+// How long a shell has to stay in a terminal before it's typed into: one that has only just come back can be one
+// on its way to another, as `sh -c '…; exec sh'` is, and what's typed then is lost.
+const SHELL_SETTLE_MS = 1000;
 
 // A command line for a shell to run: each word as it is, or quoted when the shell would read it apart.
 const shellLine = words => words.map(word => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`)).join(' ');
@@ -262,7 +265,7 @@ async function resumeInShell(deps, session, target, chosen) {
 // shell, or else in a terminal of its own, as a stopped session is resumed. `chosen` is what it ran with:
 // its model, effort and permission mode.
 export async function restartSession(deps, sessionId, chosen = {}) {
-  const { store, terminal, check = CHECK_MS, exitLimit = EXIT_LIMIT_MS } = deps;
+  const { store, terminal, check = CHECK_MS, exitLimit = EXIT_LIMIT_MS, settle = SHELL_SETTLE_MS } = deps;
   const session = store.find(sessionId);
   if (session?.pane && session.status !== 'ended') {
     const target = { pane: session.pane, tmuxSocket: session.tmuxSocket, rexSession: session.rexSession, rexServer: session.rexServer };
@@ -277,6 +280,10 @@ export async function restartSession(deps, sessionId, chosen = {}) {
       left = await terminal.foreground(target).catch(() => null);
       return left === null || isShell(left);
     }, exitLimit, check);
+    if (isShell(left)) {
+      await delay(settle);
+      left = await terminal.foreground(target).catch(() => null);
+    }
     if (isShell(left)) return resumeInShell(deps, session, target, chosen);
   }
   await resumeSession(deps, sessionId, { text: '' }, chosen);

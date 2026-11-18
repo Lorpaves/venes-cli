@@ -352,7 +352,7 @@ test('a restart quits Claude Code and resumes the session in the shell left in i
     pressKey: async (target, key) => { typed.push(['key', target.pane, key]); if (key === 'Enter') startIn(store, '%3', 'resume'); },
     readScreen: async () => '',
   });
-  assert.deepEqual(await restartSession(deps, ID, { model: 'claude-opus-5-5', effort: 'max', mode: 'plan' }), { restarted: true });
+  assert.deepEqual(await restartSession({ ...deps, settle: 5 }, ID, { model: 'claude-opus-5-5', effort: 'max', mode: 'plan' }), { restarted: true });
   assert.deepEqual(typed, [
     ['send', '%3', '/exit'],
     ['paste', '%3', `claude --model claude-opus-5-5 --effort max --permission-mode plan --resume ${ID}`],
@@ -382,5 +382,20 @@ test('a Claude Code that won\'t quit isn\'t restarted', async () => {
 test('a session that isn\'t running is restarted by resuming it', async () => {
   const { deps, started } = setUp({ onStart: s => startIn(s, '%7', 'resume') });
   assert.deepEqual(await restartSession(deps, ID), { restarted: true });
+  assert.deepEqual(started[0].command, ['claude', '--resume', ID]);
+});
+
+test('a shell only on its way to another isn\'t typed into: the session is resumed where nothing is lost', async () => {
+  const { deps, store, started } = setUp({ onStart: s => startIn(s, '%7', 'resume') });
+  startIn(store, '%3');
+  const seen = ['sh', 'env'];
+  const pasted = [];
+  Object.assign(deps.terminal, {
+    sendText: async () => quitIn(store, '%3'),
+    foreground: async () => { if (!seen.length) throw new Error('no such pane'); return seen.shift(); },
+    paste: async (target, text) => pasted.push(text),
+  });
+  assert.deepEqual(await restartSession({ ...deps, settle: 5 }, ID), { restarted: true });
+  assert.deepEqual(pasted, []);
   assert.deepEqual(started[0].command, ['claude', '--resume', ID]);
 });

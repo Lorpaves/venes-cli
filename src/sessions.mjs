@@ -33,6 +33,9 @@ const STALE_SESSION_MS = 60 * 60_000;
 const HELD_SETTLE_MS = 2000;
 // In case a compaction ends in a way neither hooks nor the transcript show.
 const COMPACT_LIMIT_MS = 30 * 60_000;
+// Claude Code takes back a turn stopped before Claude has answered, and writes nothing of it, not even
+// that it was stopped. One with no answer this long after Escape is over.
+const TAKEN_BACK_MS = 2500;
 // Stop can fire before the turn's last words reach the transcript.
 const TRANSCRIPT_SETTLE_MS = 2000;
 const ENDS_TURN = new Set(['turn.end', 'turn.interrupted', 'turn.error', 'session.ended']);
@@ -193,12 +196,13 @@ export class SessionStore extends EventEmitter {
   #agentParent;
   #compactWaitMs;
   #compactLimitMs;
+  #takenBackMs;
   #splitAttachments;
 
   // agentParent reads which tool call started a subagent, which needs the file system.
   // `splitAttachments` reads what's kept of the files a message names, which is I/O, so it's passed in.
   constructor({
-    agentParent = () => undefined, compactWaitMs = COMPACT_STATS_WAIT_MS, compactLimitMs = COMPACT_LIMIT_MS,
+    agentParent = () => undefined, compactWaitMs = COMPACT_STATS_WAIT_MS, compactLimitMs = COMPACT_LIMIT_MS, takenBackMs = TAKEN_BACK_MS,
     splitAttachments: split = (text, sessionId) => splitAttachments(text, { root: uploadsRoot(), sessionId }),
   } = {}) {
     super();
@@ -206,6 +210,7 @@ export class SessionStore extends EventEmitter {
     this.#splitAttachments = split;
     this.#compactWaitMs = compactWaitMs;
     this.#compactLimitMs = compactLimitMs;
+    this.#takenBackMs = takenBackMs;
   }
 
   get seq() { return this.#seq; }
@@ -464,12 +469,14 @@ export class SessionStore extends EventEmitter {
       case 'MessageDisplay':
         // Hooks run as separate processes, so the final delta can land after Stop.
         // It must not change the status, or a finished turn would look like it's running.
+        s.replied = true;
         this.#emit(s, 'message.assistant.delta', {
           messageId: ev.message_id, turnId: ev.turn_id, index: ev.index, text: ev.delta, final: ev.final, agentId,
         });
         break;
       case 'PreToolUse':
         this.#markRunning(s, agentId);
+        s.replied = true;
         s.tools.set(ev.tool_use_id, { name: ev.tool_name, input: ev.tool_input });
         this.#emit(s, 'tool.start', {
           toolUseId: ev.tool_use_id, name: ev.tool_name, input: ev.tool_input, agentId, parentToolUseId: this.#parentOf(s, agentId),
@@ -533,8 +540,10 @@ export class SessionStore extends EventEmitter {
   handleTranscriptRecord(sessionId, record) {
     const s = this.#sessions.get(sessionId);
     if (!s) return;
+    if (record?.type === 'assistant' && !record.isSidechain) s.replied = true;
     for (const { type, ...signal } of signalsFrom(record)) {
       if (type === 'interrupted') this.#onInterrupted(s);
+      else if (type === 'turnStarted') this.#onTurnStarted(s, signal);
       else if (type === 'toolResult') this.#onToolResult(s, signal);
       else if (type === 'thinking') this.#emit(s, 'message.thinking', signal);
       else if (type === 'compacted') this.#onCompactStats(s, signal);
@@ -551,6 +560,18 @@ export class SessionStore extends EventEmitter {
       else if (type === 'pollEventRead') s.pollEvents = Math.max((s.pollEvents ?? 0) - 1, 0);
       else if (type === 'queueTakenBack') this.#dropQueued(s, { code: 'taken_back', message: 'Taken back in the terminal.' });
     }
+  }
+
+  // Escape was pressed in the session's terminal to stop its turn. Claude Code takes back a turn stopped
+  // before Claude has answered, putting the message back in its box, and writes nothing of it, not even
+  // that it was stopped. So a turn with no answer yet, and still none a moment later, is over.
+  interruptSent(sessionId) {
+    const s = this.#sessions.get(sessionId);
+    if (!s || !isAtWork(s.status) || s.replied !== false) return;
+    const { turns } = s;
+    setTimeout(() => {
+      if (s.turns === turns && s.replied === false) this.#onInterrupted(s);
+    }, this.#takenBackMs).unref();
   }
 
   respond(requestId, answer) {
@@ -733,6 +754,19 @@ export class SessionStore extends EventEmitter {
   #startQueued(s) {
     if (!s.queued.length) return;
     this.#onUserMessage(s, s.queued.shift());
+    this.#setStatus(s, 'running');
+  }
+
+  // A prompt that starts a turn, as the transcript has it. One typed while a turn seemed to be going is
+  // kept as queued, for Claude to read later. Run at once instead, it says that turn was over, though
+  // nothing told of its end, as with one stopped before Claude answered. The message is this turn's:
+  // left queued, it would only show once this turn ended, and each message after it a turn late.
+  #onTurnStarted(s, { text }) {
+    const position = s.queued.findIndex(queued => normalized(queued) === normalized(text));
+    if (position < 0) return;
+    const [message] = s.queued.splice(position, 1);
+    this.#stopTurn(s);
+    this.#onUserMessage(s, message);
     this.#setStatus(s, 'running');
   }
 
@@ -934,12 +968,17 @@ export class SessionStore extends EventEmitter {
   }
 
   #onInterrupted(s) {
-    if (s.status !== 'running' && s.status !== 'waiting') return;
+    if (this.#stopTurn(s)) this.#startQueued(s);
+  }
+
+  // Ends the turn going on, as one stopped. Whether there was one.
+  #stopTurn(s) {
+    if (s.status !== 'running' && s.status !== 'waiting') return false;
     this.#closeRequests(s, { decision: 'deny', by: 'terminal' }, r => !r.agentId);
     for (const id of [...s.tools.keys()]) this.#endTool(s, id, { isError: true, interrupted: true });
     this.#setStatus(s, 'idle');
     this.#emit(s, 'turn.interrupted', {});
-    this.#startQueued(s);
+    return true;
   }
 
   #closeRequests(s, result, filter = () => true) {
@@ -958,6 +997,8 @@ export class SessionStore extends EventEmitter {
   #setStatus(s, status) {
     if (status === 'idle' || status === 'ended') this.#stopCompacting(s); // whatever became of it, the turn is over
     if (s.status === status) return;
+    // A turn begins, with nothing of Claude's in it yet.
+    if (isAtWork(status) && !isAtWork(s.status)) Object.assign(s, { turns: (s.turns ?? 0) + 1, replied: false });
     s.status = status;
     this.#emit(s, 'session.status', { status });
   }

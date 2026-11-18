@@ -548,6 +548,31 @@ T('interrupt_generation', {}, async r => {
   assert.equal((await r.session()).status, 'idle');
 });
 
+// Stopped before Claude has answered, a turn is taken back: Claude Code puts the message back in its box
+// and writes nothing of it. The turn is over all the same, and the next message is a turn of its own,
+// shown as it starts. Once it showed only as its turn ended, and each message after it a turn late.
+T('a_turn_stopped_before_claude_answers_is_over', {}, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  r.mark();
+  await r.client.request('send', { sessionId: id, text: 'Think it over with care, then reply with only the word SLOW.', clientId: 'stopped' });
+  await r.wait(e => e.kind === 'message.user' && e.clientId === 'stopped', 12000, 'the message stopped');
+  await r.client.request('interrupt', { sessionId: id });
+  await r.kind('turn.interrupted', 8000);
+  assert.equal((await r.session()).status, 'idle');
+  const written = fs.readFileSync((await r.session()).transcriptPath, 'utf8');
+  console.log(`      ${/\[Request interrupted by user/.test(written) ? 'Claude had begun, so the stop was written' : 'taken back, with nothing written'}`);
+  r.mark();
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word PLUM.', clientId: 'next' });
+  const echo = await r.wait(e => e.kind === 'message.user' && e.clientId === 'next', 12000, 'the next message, as its turn starts');
+  const end = await r.turnEnd(40000);
+  assert.ok(r.events.indexOf(echo) < r.events.indexOf(end), 'shown before its turn ends');
+  assert.match(end.lastMessage, /PLUM/);
+  assert.equal((await r.session()).status, 'idle');
+  assert.deepEqual((await r.client.request('join', { sessionId: id, limit: 1 })).queued, [], 'nothing is left queued');
+});
+
 T('question_from_client', {}, async r => {
   await r.type(ASK);
   const request = await r.request('question');

@@ -887,6 +887,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const session = sessionWithPane(msg.sessionId);
       if (session.status !== 'running' && session.status !== 'waiting') throw new HelperError('not_running', 'Nothing to interrupt.');
       await sendEscape(session);
+      store.interruptSent(msg.sessionId);
       return {};
     },
   };

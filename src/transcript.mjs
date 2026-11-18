@@ -174,6 +174,14 @@ function userSignals(record) {
   return signals;
 }
 
+// A prompt that starts a turn has its place among them, `turnPosition`. A message read during a turn
+// comes as an attachment instead.
+function turnStartSignals(record) {
+  if (!record.turnPosition || record.isMeta) return [];
+  const text = blocksOf(record).filter(block => block?.type === 'text').map(block => block.text ?? '').join('');
+  return text ? [{ type: 'turnStarted', text }] : [];
+}
+
 // A line run with `!` says nothing to hooks, so the transcript is all there is of it.
 function shellSignals(record, text) {
   const command = shellCommand(text);
@@ -238,7 +246,7 @@ function queueSignals({ operation, content }) {
 export function signalsFrom(record) {
   if (record?.isSidechain) return [];
   switch (record?.type) {
-    case 'user': return [...userSignals(record), ...imageSignals(record)];
+    case 'user': return [...userSignals(record), ...imageSignals(record), ...turnStartSignals(record)];
     case 'attachment': return imageSignals(record);
     case 'assistant': return [...thinkingSignals(record), ...modelSignals(record)];
     case 'system': return systemSignals(record);

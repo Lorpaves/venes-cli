@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { setTimeout as delay } from 'node:timers/promises';
 import { SessionStore } from '../../src/sessions.mjs';
 
 function setup(options) {
@@ -375,6 +376,68 @@ test('an interrupt ends tools that were still running', () => {
   store.handleTranscriptRecord('a', { type: 'user', message: { content: '[Request interrupted by user]' } });
   assert.equal(events.find(e => e.kind === 'tool.end').interrupted, true);
   assert.equal(store.get('a').status, 'idle');
+});
+
+test('a message Claude Code ran at once, while a turn seemed to be going, is that turn\'s', () => {
+  const { store, hook, events } = setup();
+  hook('UserPromptSubmit', { prompt: 'first' });
+  hook('UserPromptSubmit', { prompt: 'second' });
+  const from = events.length;
+  store.handleTranscriptRecord('a', { type: 'user', turnPosition: { promptIndex: 1, turnIndex: 1 }, origin: { kind: 'human' }, message: { role: 'user', content: 'second' } });
+  assert.deepEqual(events.slice(from).map(e => [e.kind, e.status ?? e.text]), [
+    ['session.status', 'idle'], ['turn.interrupted', undefined], ['message.user', 'second'], ['session.status', 'running'],
+  ]);
+  hook('Stop', { last_assistant_message: 'done', background_tasks: [] });
+  assert.equal(store.get('a').status, 'idle');
+  assert.equal(events.filter(e => e.kind === 'message.user').length, 2, 'nothing is left to start a turn of its own');
+});
+
+test('a queued message read as its turn starts shows once', () => {
+  const { store, hook, events } = setup();
+  hook('UserPromptSubmit', { prompt: 'first' });
+  hook('UserPromptSubmit', { prompt: 'second' });
+  hook('Stop', { last_assistant_message: 'done', background_tasks: [] });
+  const from = events.length;
+  store.handleTranscriptRecord('a', { type: 'user', turnPosition: { promptIndex: 1, turnIndex: 1 }, origin: { kind: 'human' }, message: { role: 'user', content: 'second' } });
+  assert.deepEqual(events.slice(from), []);
+  assert.equal(store.get('a').status, 'running');
+});
+
+test('a turn stopped before Claude answered is over a moment later, though nothing is written of it', async () => {
+  const { store, hook, kinds } = setup({ takenBackMs: 10 });
+  hook('UserPromptSubmit', { prompt: 'go' });
+  store.interruptSent('a');
+  await delay(40);
+  assert.equal(store.get('a').status, 'idle');
+  assert.ok(kinds().includes('turn.interrupted'));
+});
+
+test('a stopped turn that has an answer waits for the transcript to say it stopped', async () => {
+  const answers = [
+    ({ hook }) => hook('MessageDisplay', { message_id: 'm', delta: 'Hel', index: 0 }),
+    ({ store }) => store.handleTranscriptRecord('a', { type: 'assistant', message: { content: [{ type: 'text', text: 'Hi' }] } }),
+  ];
+  for (const answer of answers) {
+    const session = setup({ takenBackMs: 10 });
+    session.hook('UserPromptSubmit', { prompt: 'go' });
+    answer(session);
+    session.store.interruptSent('a');
+    await delay(40);
+    assert.equal(session.store.get('a').status, 'running');
+    assert.ok(!session.kinds().includes('turn.interrupted'));
+  }
+});
+
+test('a message sent right after a stop is a turn of its own, and the stop ends only the turn before it', async () => {
+  const { store, hook, events } = setup({ takenBackMs: 20 });
+  hook('UserPromptSubmit', { prompt: 'first' });
+  store.interruptSent('a');
+  hook('UserPromptSubmit', { prompt: 'second' });
+  store.handleTranscriptRecord('a', { type: 'user', turnPosition: { promptIndex: 1, turnIndex: 1 }, origin: { kind: 'human' }, message: { role: 'user', content: 'second' } });
+  await delay(50);
+  assert.equal(store.get('a').status, 'running');
+  assert.equal(events.filter(e => e.kind === 'turn.interrupted').length, 1);
+  assert.equal(events.filter(e => e.kind === 'message.user').at(-1).text, 'second');
 });
 
 test('a tool failure closes its tool once', () => {

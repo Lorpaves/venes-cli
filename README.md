@@ -241,7 +241,7 @@ A line ends at a line feed and nowhere else. JSON leaves a line separator (U+202
 | `pageText` | `sessionId`, `text` | Types into what's open, like a page's search box. `no_page` with nothing open |
 | `pageClose` | `sessionId` | Closes what's open, as Esc does, a press at a time while its footer says so |
 | `cancel` | `sessionId`, `clientId` | Drops a held message. `cancelled` is false if it already went out. |
-| `interrupt` | `sessionId` | Presses Esc |
+| `interrupt` | `sessionId` | Presses Esc. Claude Code takes back a turn stopped before Claude has answered, and puts its message back in the box with nothing written of it, so a turn still with no answer a moment later is over: `turn.interrupted` |
 | `taskOutput` | `sessionId`, `taskId` | `output` (null if there's none yet), `truncated` |
 
 To reconnect, pass the last `seq` you saw as `since`, together with `bootId` from the snapshot. A helper restart, which an update causes, closes the connection and reports `gap: true`.

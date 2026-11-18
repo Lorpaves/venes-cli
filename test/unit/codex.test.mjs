@@ -111,10 +111,13 @@ function fakeCodex() {
     return link;
   };
   server.startDaemon = async () => { server.starts += 1; server.isRunning = true; };
+  // A restart forgets what it had loaded, and its clients' connections go with it.
+  server.restarts = 0;
+  server.restartDaemon = async () => { server.restarts += 1; server.loaded.clear(); server.drop(); };
   return server;
 }
 
-function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined } = {}) {
+function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {} } = {}) {
   const server = fakeCodex();
   server.isRunning = isRunning;
   for (const thread of threads) server.threads.set(thread.id, thread);
@@ -123,8 +126,8 @@ function setup({ threads = [], loaded = [], isRunning = true, trusts = () => tru
   const events = [];
   store.on('event', event => events.push(event));
   const codex = new Codex({
-    store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, retryMs: 5, trusts, installed: () => isRunning, terminal,
-    env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on' }, keyLimitMs: 40,
+    store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, restartDaemon: server.restartDaemon, retryMs: 5, trusts,
+    installed: () => isRunning, terminal, env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on', ...env }, keyLimitMs: 40,
   });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
@@ -1568,4 +1571,25 @@ test('a chat forked is a session from then, and one put away is gone', async () 
   await codex.send({ sessionId, text: '/archive' });
   assert.deepEqual(server.called('thread/archive'), [{ threadId: sessionId }]);
   assert.equal(store.find(sessionId), undefined, 'put away, it has left the list here');
+});
+
+test('a restart restarts Codex\'s daemon, then opens the session on it again', async () => {
+  const { server, codex, last } = setup({ threads: [stored('t1')], loaded: ['t1'] });
+  await codex.restore();
+  await codex.restartNow('t1');
+  assert.equal(server.restarts, 1);
+  assert.ok(server.called('thread/resume').some(params => params.threadId === 't1'));
+  assert.equal(last('session.started').source, 'resume');
+});
+
+test('a test\'s own Codex server is no daemon to restart', async () => {
+  const { server, codex } = setup({ threads: [stored('t1')], loaded: ['t1'], env: { VENES_CODEX_SOCKET: '/tmp/test.sock' } });
+  await codex.restore();
+  await assert.rejects(codex.restartNow('t1'), { code: 'restart_unsupported' });
+  assert.equal(server.restarts, 0);
+});
+
+test('Codex is at work while any of its sessions has a turn going', async () => {
+  const { codex } = await running();
+  assert.equal(codex.isBusy(), true);
 });

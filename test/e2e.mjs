@@ -251,6 +251,9 @@ async function connect() {
 
 class Run {
   events = [];
+  // What a case leaves to be done when it ends, however it ends.
+  cleanups = [];
+  after(cleanup) { this.cleanups.push(cleanup); }
   constructor(client) {
     this.client = client;
     client.on('message', m => { if (m.type === 'event') this.events.push(m.event); });
@@ -304,14 +307,17 @@ class Run {
 // `settings` are Claude Code's for this session alone, on its command line.
 const settingsArgs = settings => (settings ? ['--settings', shq(JSON.stringify(settings))] : []);
 
-function launch({ mode = 'default', sources = 'project', model = MODEL, settings } = {}) {
+// With `shell`, Claude Code is started from a shell, as when someone types `claude` in their terminal, and
+// the shell is what's left in the pane once it quits.
+function launch({ mode = 'default', sources = 'project', model = MODEL, settings, shell = false } = {}) {
   const env = [
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
     `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, `VENES_TRASH=${TRASH}`, 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
   ];
-  const cmd = ['exec', 'env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
+  const claude = ['env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
+  const cmd = shell ? `${claude}; exec env -i TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" ${env.map(shq).join(' ')} sh` : `exec ${claude}`;
   tmux('new-session', '-d', '-s', 'run', '-x', '110', '-y', '42', '-c', WS, 'sh', '-c', cmd);
 }
 
@@ -2081,6 +2087,84 @@ if (hasRex) {
   });
 }
 
+// The command line a session's agent runs here, as its status sheet shows it.
+T('a_sessions_cli_is_the_claude_code_it_runs', {}, async r => {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await r.session();
+  const cli = await r.client.request('cli', { sessionId: id });
+  const installed = execFileSync(CLAUDE, ['--version'], { encoding: 'utf8' }).match(/\d+\.\d+\.\d+/)[0];
+  assert.deepEqual([cli.agent, cli.installed, cli.running, cli.restart], ['claude', installed, installed, null]);
+  assert.ok(['available', 'none', 'manual'].includes(cli.update), cli.update);
+});
+
+// What a restart brings: the session back, or first a question Claude Code asks as it starts, as it asks
+// someone starting it in Bypass Permissions mode for the first time. That's the reader's to answer, here with yes.
+async function backAfterRestart(r) {
+  const first = await r.wait(e => e.kind === 'session.started' || e.kind === 'request.opened', 40000, 'session.started or a question');
+  if (first.kind !== 'request.opened') return first;
+  const question = first.request.input.questions[0];
+  const yes = question.options.find(option => /^Yes/.test(option.label)).label;
+  await r.client.request('respond', { requestId: first.request.id, decision: 'allow', answers: { [question.question]: yes } });
+  return r.kind('session.started', 40000);
+}
+
+// A restart quits Claude Code and picks the session up again where it was, which then answers as before.
+// A session resumed in a terminal of its own has one the case doesn't: it goes with the case.
+const closeResumed = id => { try { tmux('kill-session', '-t', `venes-${id.slice(0, 8)}`); } catch { /* none, or it's in Rex */ } };
+
+// The session in this case's own terminal. A helper can also know of one an earlier case left.
+async function ownSession(r) {
+  const pane = inRex ? inRex.block : tmux('display-message', '-p', '-t', 'run', '#{pane_id}').trim();
+  const { sessions } = await r.client.request('sessions');
+  return sessions.find(session => session.pane === pane);
+}
+
+// A restarted session is quit as the case ends, so that no later case's helper finds it still going.
+async function quitRestarted(r, id) {
+  await r.client.request('send', { sessionId: id, text: '/exit' }).catch(() => {});
+  await r.wait(e => e.kind === 'session.ended' && e.sessionId === id, 15000, 'its end').catch(() => {});
+  closeResumed(id);
+}
+
+async function restartsAndAnswers(r) {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await ownSession(r);
+  r.after(() => quitRestarted(r, id));
+  r.mark();
+  assert.equal((await r.client.request('restart', { sessionId: id })).restart, 'now');
+  await r.kind('session.ended', 20000);
+  assert.equal((await backAfterRestart(r)).source, 'resume');
+  r.mark();
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.' });
+  assert.match((await r.turnEnd(60000)).lastMessage ?? '', /AGAIN/);
+  return id;
+}
+
+T('an_idle_session_restarts_and_answers_again', { mode: 'bypassPermissions' }, restartsAndAnswers);
+T('in_rex_an_idle_session_restarts_and_answers_again', { rex: true, mode: 'bypassPermissions' }, restartsAndAnswers);
+
+T('a_session_started_from_a_shell_restarts_in_that_shell', { mode: 'bypassPermissions', shell: true }, async r => {
+  const pane = tmux('display-message', '-p', '-t', 'run', '#{pane_id}').trim();
+  const id = await restartsAndAnswers(r);
+  const { sessions } = await r.client.request('sessions');
+  assert.equal(sessions.find(session => session.id === id).pane, pane, 'in the terminal it was in');
+});
+
+T('a_restart_asked_during_a_turn_waits_for_its_end', { mode: 'bypassPermissions' }, async r => {
+  await r.type(SLEEP(12, 'SLEPT'));
+  await r.kind('tool.start', 20000);
+  const { id } = await ownSession(r);
+  r.after(() => quitRestarted(r, id));
+  r.mark();
+  assert.equal((await r.client.request('restart', { sessionId: id })).restart, 'pending');
+  assert.equal((await r.client.request('cli', { sessionId: id })).restart, 'pending');
+  await r.turnEnd(60000);
+  await r.kind('session.ended', 20000);
+  assert.equal((await backAfterRestart(r)).source, 'resume');
+});
+
 T('a_stopped_session_can_be_deleted_for_good', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word STORED.');
   await r.turnEnd();
@@ -2741,6 +2825,7 @@ async function runCase(name) {
     try { console.log(run.pane().trimEnd().split('\n').slice(-14).join('\n')); } catch { /* no pane */ }
     return false;
   } finally {
+    for (const cleanup of run?.cleanups ?? []) { try { await cleanup(); } catch { /* left as it was */ } }
     try { tmux('kill-session', '-t', 'run'); } catch { /* already gone */ }
     try { if (inRex?.session) rex('kill', inRex.session); } catch { /* already gone */ }
     await delay(500);

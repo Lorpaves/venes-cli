@@ -23,7 +23,8 @@ import { readMode, switchMode } from './mode.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession } from './remove.mjs';
-import { askAgain, dialogLeft, resumeSession } from './resume.mjs';
+import { askAgain, dialogLeft, restartSession, resumeSession } from './resume.mjs';
+import { AgentCli } from './agentcli.mjs';
 import { startNewSession } from './start.mjs';
 import { PushDevices, notify, titleFor } from './push.mjs';
 import { RECENT_SESSIONS, checkedFolder, createFile, createFolder, homeFolder, recentFolders, runningIn, subfolders } from './folders.mjs';
@@ -41,13 +42,13 @@ import {
 } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { screenAccess, sshAccess } from './ssh.mjs';
-import { accountLimits, pruneStatus, readStatus, readWorkspace } from './status.mjs';
+import { accountLimits, pruneStatus, readStatus, readWorkspace, statusFacts } from './status.mjs';
 import { Prices } from './prices.mjs';
 import { UsageBook, usageReply } from './usage.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
 import { startAutoUpdate } from './update.mjs';
-import { VERSION } from './version.mjs';
+import { VERSION, isNewer } from './version.mjs';
 import { computer, isWindows } from './platform.mjs';
 import { WIRE_ROOT, fromWire, toWire, windowsDrives } from './wirepaths.mjs';
 
@@ -63,6 +64,9 @@ const TRANSCRIPT_POLL_MS = 300;
 const TASK_OUTPUT_BYTES = 256 * 1024;
 const HELD_CHECK_MS = 300;
 const REGISTRY_SAVE_MS = 2000;
+// How long after a turn ends a restart that waited for it goes: a message queued for the next turn
+// starts that turn first, and the session is at work again.
+const RESTART_SETTLE_MS = 1500;
 // How long a status waits for the account's per-model limits the first time they're read.
 const MODEL_LIMITS_WAIT_MS = 2500;
 // What may have changed a session's repository: a tool, a turn, a line for the shell, and its start, when
@@ -445,6 +449,76 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     return { sessions, unattached };
   };
 
+  // What each agent's command line is on this computer, and its updates (agentcli.mjs).
+  const agentCli = new AgentCli();
+  // Restarts under way, and the ones asked for while a session was at work, which go once it isn't.
+  const restarts = new Map();
+  const restartErrors = new Map();
+
+  // The agent a session is, and what knows it: Claude Code's sessions are the helper's own.
+  const cliAgentOf = async sessionId => {
+    const other = await otherOf(sessionId);
+    return other ? { key: other.name, other } : { key: 'claude' };
+  };
+
+  // A Claude Code session is at work while a turn runs, something waits on the reader, a message waits
+  // for its turn, or a task it started is still going.
+  const claudeBusy = sessionId => {
+    const s = store.find(sessionId);
+    if (!s || s.status === 'ended') return false;
+    return store.isBusy(s) || store.pendingFor(s).length > 0 || s.backgroundTasks > 0 || s.queued.length > 0;
+  };
+  const busyOf = (agent, sessionId) => (agent.other ? agent.other.isBusy(sessionId) : claudeBusy(sessionId));
+  const runningOf = async (agent, sessionId) => (agent.other ? agent.other.runningVersion?.(sessionId) : statusFacts(statusDir, sessionId).version);
+
+  const runRestart = async (sessionId, agent) => {
+    restarts.set(sessionId, 'restarting');
+    restartErrors.delete(sessionId);
+    try {
+      if (agent.other) await agent.other.restartNow(sessionId);
+      else {
+        const { model, effort } = statusFacts(statusDir, sessionId);
+        await restartSession({ store, library, terminal: resumeTerminal() }, sessionId, { model, effort, mode: store.find(sessionId)?.permissionMode });
+      }
+    } catch (error) {
+      restartErrors.set(sessionId, error.message);
+      console.error(`restart ${sessionId}: ${error.message}`);
+    } finally {
+      if (restarts.get(sessionId) === 'restarting') restarts.delete(sessionId);
+    }
+  };
+
+  // A restart starts at once on a session that isn't at work, and waits for one that is. Codex's is its
+  // daemon's, which every Codex session here shares, so it's refused while any of them works.
+  const requestRestart = async sessionId => {
+    if (restarts.get(sessionId) === 'restarting') return { restart: 'restarting' };
+    const agent = await cliAgentOf(sessionId);
+    if (await busyOf(agent, sessionId)) {
+      if (agent.key === 'codex') throw new HelperError('agent_busy', 'Codex is working. Try again when it has finished.');
+      restarts.set(sessionId, 'pending');
+      return { restart: 'pending' };
+    }
+    runRestart(sessionId, agent);
+    return { restart: 'now' };
+  };
+
+  // A restart that waited goes once its session has finished what it was doing. One whose session is
+  // quit meanwhile goes with it: it was quit on purpose.
+  store.on('event', event => {
+    if (restarts.get(event.sessionId) !== 'pending') return;
+    if (event.kind === 'session.ended') {
+      restarts.delete(event.sessionId);
+      return;
+    }
+    if (event.kind !== 'turn.end' && !(event.kind === 'session.status' && event.status === 'idle')) return;
+    setTimeout(async () => {
+      if (restarts.get(event.sessionId) !== 'pending') return;
+      const agent = await cliAgentOf(event.sessionId).catch(() => undefined);
+      if (!agent || await busyOf(agent, event.sessionId)) return;
+      runRestart(event.sessionId, agent);
+    }, RESTART_SETTLE_MS).unref();
+  });
+
   const commands = {
     // The Tailscale account Rex is signed in with, which a phone reaches this Mac as through Rex.
     ping: () => {
@@ -713,6 +787,32 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       }
       return { status: status ?? null };
     },
+    // The command line a session's agent runs here: the version the session runs, the one installed, the
+    // newest there is, and whether it can be updated from here.
+    cli: async ({ sessionId }) => {
+      const agent = await cliAgentOf(sessionId);
+      const busy = agent.key === 'codex' ? await agent.other.isBusy(sessionId) : false;
+      const report = await agentCli.report(agent.key, { running: await runningOf(agent, sessionId), busy });
+      // At work: this session is, so a restart waits for it; for Codex, any session on its daemon is, so a
+      // restart is refused.
+      const working = await busyOf(agent, sessionId);
+      return { ...report, working, restart: restarts.get(sessionId) ?? null, ...(restartErrors.has(sessionId) && { restartError: restartErrors.get(sessionId) }) };
+    },
+    // Updates a session's agent's command line on this computer, in the background, then restarts the
+    // session onto it: at once when it isn't at work, or once it isn't.
+    cliUpdate: async ({ sessionId }) => {
+      const agent = await cliAgentOf(sessionId);
+      const busy = agent.key === 'codex' ? await agent.other.isBusy(sessionId) : false;
+      const was = await runningOf(agent, sessionId);
+      return agentCli.update(agent.key, {
+        busy,
+        after: async ({ version }) => {
+          if (agent.key !== 'codex' && was && !isNewer(version, was)) return;
+          await requestRestart(sessionId).catch(error => restartErrors.set(sessionId, error.message));
+        },
+      });
+    },
+    restart: ({ sessionId }) => requestRestart(sessionId),
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {
       const upload = findUpload(uploads, sessionId, uploadId);

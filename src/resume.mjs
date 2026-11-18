@@ -5,7 +5,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import { HelperError, notTypable } from './sessions.mjs';
-import { pickChoice, readChoice } from './terminal.mjs';
+import { isShell, pickChoice, readChoice } from './terminal.mjs';
 import { referenceTo } from './uploads.mjs';
 
 const START_LIMIT_MS = 20_000;
@@ -24,16 +24,21 @@ function workingDirectory(cwd) {
   return cwd && fs.existsSync(cwd) ? cwd : os.homedir();
 }
 
-function resumeCommand(sessionId, text, env, { model, effort } = {}) {
-  const chosen = [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])];
-  // `--` keeps a message that starts with "-" from being read as a flag.
-  return ['claude', ...JSON.parse(env.VENES_RESUME_ARGS ?? '[]'), ...chosen, '--resume', sessionId, '--', text];
+function resumeCommand(sessionId, text, env, { model, effort, mode } = {}) {
+  const chosen = [
+    ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []),
+    ...(mode && mode !== 'default' ? ['--permission-mode', mode] : []),
+  ];
+  // `--` keeps a message that starts with "-" from being read as a flag. A restart has nothing to say,
+  // and the session waits at its prompt.
+  return ['claude', ...JSON.parse(env.VENES_RESUME_ARGS ?? '[]'), ...chosen, '--resume', sessionId, ...(text ? ['--', text] : [])];
 }
 
-function heardFrom(store, sessionId) {
+// What says a session is back: its first prompt, or for one resumed with nothing to say, its start.
+function heardFrom(store, sessionId, kind = 'message.user') {
   let stopListening;
   const prompted = new Promise(resolve => {
-    const listener = event => { if (event.sessionId === sessionId && event.kind === 'message.user') resolve(); };
+    const listener = event => { if (event.sessionId === sessionId && event.kind === kind) resolve(); };
     store.on('event', listener);
     stopListening = () => store.off('event', listener);
   });
@@ -53,13 +58,14 @@ const choiceAt = async (terminal, target) => (terminal.readScreen ? readChoice(a
 // that on and not said yes to it yet: that comes back as what's asked, for the reader to answer. It's
 // taken for a question only when two looks in a row find the same one, since the old conversation
 // is drawn on the way and can have the same words in it.
-async function waitForPrompt({ state, terminal, name, target, limit, check }) {
+async function waitForPrompt({ state, terminal, name, target, limit, check, isOpen }) {
   let seen;
   const deadline = Date.now() + limit;
   while (Date.now() < deadline) {
     await delay(check);
     if (state.isPrompted) return undefined;
-    if (!(await terminal.isSessionOpen(name, target))) throw new HelperError('resume_failed', 'Claude Code quit without resuming this session.');
+    const open = isOpen ? await isOpen() : await terminal.isSessionOpen(name, target);
+    if (!open) throw new HelperError('resume_failed', 'Claude Code quit without resuming this session.');
     const choice = await choiceAt(terminal, target);
     if (choice && JSON.stringify(choice) === seen) return choice;
     seen = choice && JSON.stringify(choice);
@@ -90,7 +96,7 @@ function cardFor(choice) {
 
 // Asks the reader what the terminal asks, and gives their answer: an option, that they left it, or
 // nothing when it was answered at the terminal meanwhile or the session went.
-async function ask({ store, terminal, session, name, target, state, check }, choice) {
+async function ask({ store, terminal, session, name, target, state, check, isOpen: opened }, choice) {
   const { fields, decide } = cardFor(choice);
   const { request, decision } = store.ask(session.id, fields, decide);
   let answer;
@@ -99,7 +105,7 @@ async function ask({ store, terminal, session, name, target, state, check }, cho
   while (!isAnswered) {
     await delay(check);
     if (isAnswered) break;
-    const isOpen = await terminal.isSessionOpen(name, target).catch(() => false);
+    const isOpen = opened ? await opened().catch(() => false) : await terminal.isSessionOpen(name, target).catch(() => false);
     if (!state.isPrompted && isOpen && (await choiceAt(terminal, target))) continue;
     store.settle(request.id, { decision: 'unknown', by: 'terminal' });
     break;
@@ -111,7 +117,7 @@ async function ask({ store, terminal, session, name, target, state, check }, cho
 // be another question. It ends with the session back, with its terminal closed, which ends the
 // session, or with a question left unanswered, which stays where it is.
 async function follow(deps, first) {
-  const { store, terminal, session, name, target, state, limit, check } = deps;
+  const { store, terminal, session, name, target, state, limit, check, isOpen } = deps;
   let choice = first;
   while (choice) {
     const answer = await ask({ ...deps, check: deps.askedCheck }, choice);
@@ -122,7 +128,7 @@ async function follow(deps, first) {
     if (answer?.option) await pickChoice(terminal, target, answer.option).catch(() => {});
     choice = undefined;
     try {
-      choice = await waitForPrompt({ state, terminal, name, target, limit, check });
+      choice = await waitForPrompt({ state, terminal, name, target, limit, check, isOpen });
     } catch (error) {
       // A dialog that can't be shown is left for someone at the terminal. Anything else is the end of it.
       if (error.code !== 'dialog_open') store.abandon(session);
@@ -176,7 +182,7 @@ export async function resumeSession({
   const session = store.reopen(sessionId, { cwd: info.cwd, startedAt: info.createdAt });
   if (clientId) store.expectEcho(session, clientId, text);
   const name = `${SESSION_PREFIX}${sessionId.slice(0, SHORT_ID_LENGTH)}`;
-  const { prompted, stopListening } = heardFrom(store, sessionId);
+  const { prompted, stopListening } = heardFrom(store, sessionId, prompt ? 'message.user' : 'session.started');
   const state = { isPrompted: false };
   prompted.then(() => { state.isPrompted = true; });
   let target;
@@ -206,4 +212,73 @@ export async function resumeSession({
   } finally {
     if (!isFollowed) stopListening();
   }
+}
+
+const EXIT_LIMIT_MS = 20_000;
+
+// A command line for a shell to run: each word as it is, or quoted when the shell would read it apart.
+const shellLine = words => words.map(word => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`)).join(' ');
+
+const until = async (isDone, limit, check) => {
+  for (const end = Date.now() + limit; Date.now() < end; await delay(check)) if (await isDone()) return true;
+  return isDone();
+};
+
+// Claude Code is started again in the terminal it was in, by that terminal's own shell, so whatever the
+// reader's `claude` adds to it there is added again. Its start says it's back, or what it asks first is
+// asked of the reader, as when a session is resumed.
+async function resumeInShell(deps, session, target, chosen) {
+  const { store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS, askedCheck = ASKED_CHECK_MS } = deps;
+  const sessionId = session.id;
+  const info = await library.info(sessionId).catch(() => undefined);
+  const reopened = store.reopen(sessionId, { cwd: info?.cwd ?? session.cwd, startedAt: info?.createdAt });
+  const { prompted, stopListening } = heardFrom(store, sessionId, 'session.started');
+  const state = { isPrompted: false };
+  prompted.then(() => { state.isPrompted = true; });
+  const isOpen = () => terminal.foreground(target).then(() => true, () => false);
+  let isFollowed = false;
+  try {
+    await terminal.paste(target, shellLine(resumeCommand(sessionId, '', env, chosen)));
+    await terminal.pressKey(target, 'Enter');
+    const choice = await waitForPrompt({ state, terminal, target, limit, check, isOpen });
+    if (choice) {
+      reopened.asking = true;
+      isFollowed = true;
+      follow({ store, terminal, session: reopened, target, state, limit, check, askedCheck, isOpen }, choice)
+        .catch(error => console.error(`restart: ${error.message}`))
+        .finally(() => { reopened.asking = false; stopListening(); });
+    }
+    return { restarted: true };
+  } catch (error) {
+    if (error.code !== 'dialog_open') store.abandon(reopened);
+    throw error;
+  } finally {
+    if (!isFollowed) stopListening();
+  }
+}
+
+// Restarts a session so that it runs the Claude Code installed now. One open in a terminal is asked to
+// quit, as /exit asks, and is picked up again where it was: in the same terminal when that's left with a
+// shell, or else in a terminal of its own, as a stopped session is resumed. `chosen` is what it ran with:
+// its model, effort and permission mode.
+export async function restartSession(deps, sessionId, chosen = {}) {
+  const { store, terminal, check = CHECK_MS, exitLimit = EXIT_LIMIT_MS } = deps;
+  const session = store.find(sessionId);
+  if (session?.pane && session.status !== 'ended') {
+    const target = { pane: session.pane, tmuxSocket: session.tmuxSocket, rexSession: session.rexSession, rexServer: session.rexServer };
+    await terminal.sendText(target, '/exit', () => store.pendingFor(session).length > 0);
+    if (!(await until(() => store.find(sessionId)?.status === 'ended', exitLimit, check))) {
+      throw new HelperError('restart_failed', "Claude Code didn't quit, so the session wasn't restarted.");
+    }
+    // Claude Code says it's over a moment before it has gone from its terminal: what's left there is
+    // known once it shows a shell, or the terminal has gone with it.
+    let left;
+    await until(async () => {
+      left = await terminal.foreground(target).catch(() => null);
+      return left === null || isShell(left);
+    }, exitLimit, check);
+    if (isShell(left)) return resumeInShell(deps, session, target, chosen);
+  }
+  await resumeSession(deps, sessionId, { text: '' }, chosen);
+  return { restarted: true };
 }

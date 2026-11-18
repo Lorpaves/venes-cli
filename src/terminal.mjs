@@ -47,6 +47,8 @@ const BOX_SETTLE_MS = 120;
 export const PAGE_KEYS = ['Up', 'Down', 'Left', 'Right', 'Enter', 'Escape', 'Tab', 'BTab', 'Space', 'BSpace'];
 
 export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
+// Whether a terminal's program is its shell, as when what ran in it has quit back to it.
+export const isShell = program => /^-?(zsh|bash|fish|sh|dash|ksh|tcsh|csh|nu|pwsh|powershell|cmd)(\.exe)?$/i.test(String(program ?? '').split(/[\\/]/).pop());
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
 const backendOf = session => (session.rexSession ? rex : tmux);
 export const readScreen = session => backendOf(session).readScreen(session);
@@ -296,5 +298,6 @@ export function resumeTerminal(env = process.env) {
     foreground: session => backendOf(session).foreground(session),
     findSession: backend.findSession,
     processOf: session => backendOf(session).processOf(session),
+    sendText,
   };
 }

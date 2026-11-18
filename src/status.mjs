@@ -252,3 +252,11 @@ export function pruneStatus(dir, now = Date.now()) {
     }
   }
 }
+
+// What a session's status line was last told of the Claude Code it runs: its version, and the model and
+// effort it uses, for starting it again as it was.
+export function statusFacts(dir, sessionId) {
+  const data = readJSON(statusFile(dir, sessionId));
+  if (!data || typeof data !== 'object') return {};
+  return withoutEmpty({ version: data.version, model: data.model?.id, effort: data.effort?.level });
+}

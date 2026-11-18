@@ -34,6 +34,7 @@ import { HelperError } from './errors.mjs';
 import { choicesOf, chooseRow } from './prompt.mjs';
 import { PAGE_KEYS, emptyBox, pageOf as openPageOf } from './terminal.mjs';
 import { VERSION } from './version.mjs';
+import { versionIn } from './agentcli.mjs';
 import { computer } from './platform.mjs';
 
 export { MODE_IDS };
@@ -100,6 +101,7 @@ const PICTURE_ID = /^(step|said)-(\d+):(\d+)$/;
 // had gone within a second when measured.
 const QUIT_LIMIT_MS = 5000;
 const QUIT_CHECK_MS = 100;
+const VERSION_LIMIT_MS = 10_000;
 // How long another writer of Antigravity's summary of its conversations is waited for.
 const ROWS_WAIT_MS = 3000;
 
@@ -578,6 +580,7 @@ export class Antigravity {
   #trash;
   #forget;
   #kill;
+  #version;
   #usage = { at: 0, limits: [], reading: undefined };
   #data;
   #env;
@@ -610,6 +613,8 @@ export class Antigravity {
     trash = moveToTrash,
     forget = id => dropRows(data, id),
     kill = pid => process.kill(pid, 'SIGTERM'),
+    // The version of Antigravity installed now.
+    version = () => exec(COMMAND, ['--version'], { timeout: VERSION_LIMIT_MS }).then(({ stdout }) => versionIn(stdout)),
     env = process.env,
     timing = {},
   }) {
@@ -624,6 +629,7 @@ export class Antigravity {
     this.#trash = trash;
     this.#forget = forget;
     this.#kill = kill;
+    this.#version = version;
     this.#data = data;
     this.#env = env;
     this.#timing = {
@@ -640,6 +646,32 @@ export class Antigravity {
     return AGENT;
   }
 
+  // At work while a turn goes on in it, or something waits on the reader.
+  isBusy(sessionId) {
+    const known = this.#store.find(sessionId);
+    if (!known || known.status === 'ended') return false;
+    return Boolean(this.#sessions.get(sessionId)?.turn) || known.status === 'running' || known.status === 'waiting' || this.#store.pendingFor(known).length > 0;
+  }
+
+  // The version of Antigravity a session runs: the one installed when it was first seen, since
+  // Antigravity updates itself while it runs.
+  runningVersion(sessionId) {
+    return this.#sessions.get(sessionId)?.cliVersion;
+  }
+
+  // Restarts a session so that it runs the Antigravity installed now: the one open on it is told to go,
+  // and it's opened again in a terminal, as a stored session is.
+  async restartNow(sessionId) {
+    await this.#quit(sessionId, this.#store.find(sessionId));
+    const cwd = await this.folderOf(sessionId);
+    if (!cwd) throw new HelperError('unknown_session', `No session ${sessionId}`);
+    const folder = fs.existsSync(cwd) ? cwd : os.homedir();
+    const target = await this.#open(sessionId, folder, { trust: isTrusted(folder, this.#data) });
+    const known = this.#adopt(sessionId, cwd, target, 'resume');
+    this.#session(sessionId).cliVersion = await this.#version().catch(() => undefined);
+    await this.#readBar(known);
+  }
+
   stop() {
     this.#isStopped = true;
     clearInterval(this.#timer);
@@ -651,7 +683,11 @@ export class Antigravity {
   }
 
   #session(id) {
-    if (!this.#sessions.has(id)) this.#sessions.set(id, blankSession());
+    if (!this.#sessions.has(id)) {
+      const session = blankSession();
+      this.#sessions.set(id, session);
+      this.#version().then(version => { session.cliVersion ??= version; }, () => {});
+    }
     return this.#sessions.get(id);
   }
 

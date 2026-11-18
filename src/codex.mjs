@@ -664,10 +664,12 @@ export class Codex {
   #env;
   #skills = new Map();
   #isStopped = false;
+  #restartDaemon;
 
   constructor({
     store, socketPath = controlSocket(), connect = CodexLink.connect,
     startDaemon = () => exec('codex', ['app-server', 'daemon', 'start'], { timeout: DAEMON_START_MS, cwd: os.homedir() }),
+    restartDaemon = () => exec('codex', ['app-server', 'daemon', 'restart'], { timeout: DAEMON_START_MS, cwd: os.homedir() }),
     retryMs = RECONNECT_MS, trusts = isTrustedByCodex,
     // Told where to look, as a test run is, there's a Codex only if something listens there.
     installed = () => !process.env.VENES_CODEX_SOCKET && isInstalled(),
@@ -684,10 +686,30 @@ export class Codex {
     this.#socketPath = socketPath;
     this.#connect = connect;
     this.#startDaemon = startDaemon;
+    this.#restartDaemon = restartDaemon;
   }
 
   get name() {
     return AGENT;
+  }
+
+  // Codex's daemon serves every Codex session on this computer, whoever started it, so it's at work while
+  // any of them has a turn going or waits on the reader.
+  isBusy() {
+    const working = session => session.agent === AGENT && (session.status === 'running' || session.status === 'waiting');
+    return [...this.#threads.values()].some(thread => thread.turnId) || this.#store.liveSessions().some(working);
+  }
+
+  // Restarts Codex's daemon, so that it runs the Codex installed now, and opens the session on it again.
+  // The connection to the old one is let go first, or the session would be asked for over it.
+  async restartNow(sessionId) {
+    // A test's own Codex server isn't the daemon the command restarts, which would be this computer's own.
+    if (this.#env.VENES_CODEX_SOCKET) throw new HelperError('restart_unsupported', "This Codex server isn't the computer's daemon, so it can't be restarted from here.");
+    await this.#restartDaemon();
+    const old = this.#link;
+    this.#link = undefined;
+    old?.close();
+    await this.#live(sessionId);
   }
 
   // The sessions already on the daemon when the helper starts, if it's running.

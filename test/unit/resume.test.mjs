@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionStore } from '../../src/sessions.mjs';
-import { askAgain, dialogLeft, resumeSession } from '../../src/resume.mjs';
+import { askAgain, dialogLeft, restartSession, resumeSession } from '../../src/resume.mjs';
 import { pickChoice, readChoice } from '../../src/terminal.mjs';
 
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -334,4 +334,53 @@ test('a session that never had a resume stop at a dialog is asked nothing', asyn
   store.handleHook({ hook_event_name: 'SessionStart', session_id: ID, source: 'startup', cwd: '/tmp' }, {});
   assert.equal(await dialogLeft(deps, store.find(ID)), undefined);
   assert.equal(await dialogLeft(deps, undefined), undefined);
+});
+
+// A session open in a terminal, as Claude Code's own hooks say.
+const startIn = (store, pane, source = 'startup') => store.handleHook({ hook_event_name: 'SessionStart', session_id: ID, source, cwd: '/tmp' }, { pane });
+const quitIn = (store, pane) => store.handleHook({ hook_event_name: 'SessionEnd', session_id: ID, reason: 'prompt_input_exit', cwd: '/tmp' }, { pane });
+
+test('a restart quits Claude Code and resumes the session in the shell left in its terminal, as it ran', async () => {
+  const { deps, store, started } = setUp();
+  startIn(store, '%3');
+  const typed = [];
+  let hasQuit = false;
+  Object.assign(deps.terminal, {
+    sendText: async (target, text) => { typed.push(['send', target.pane, text]); hasQuit = true; quitIn(store, '%3'); },
+    foreground: async () => (hasQuit ? '-zsh' : 'claude'),
+    paste: async (target, text) => typed.push(['paste', target.pane, text]),
+    pressKey: async (target, key) => { typed.push(['key', target.pane, key]); if (key === 'Enter') startIn(store, '%3', 'resume'); },
+    readScreen: async () => '',
+  });
+  assert.deepEqual(await restartSession(deps, ID, { model: 'claude-opus-5-5', effort: 'max', mode: 'plan' }), { restarted: true });
+  assert.deepEqual(typed, [
+    ['send', '%3', '/exit'],
+    ['paste', '%3', `claude --model claude-opus-5-5 --effort max --permission-mode plan --resume ${ID}`],
+    ['key', '%3', 'Enter'],
+  ]);
+  assert.equal(started.length, 0, 'no terminal of its own');
+  assert.deepEqual([store.find(ID).status, store.find(ID).pane], ['idle', '%3']);
+});
+
+test('when its terminal went with it, the session is resumed in one of its own, with nothing to say', async () => {
+  const { deps, store, started } = setUp({ onStart: s => startIn(s, '%7', 'resume') });
+  startIn(store, '%3');
+  Object.assign(deps.terminal, { sendText: async () => quitIn(store, '%3'), foreground: async () => { throw new Error('no such pane'); } });
+  assert.deepEqual(await restartSession(deps, ID, { mode: 'default' }), { restarted: true });
+  assert.deepEqual(started[0].command, ['claude', '--resume', ID]);
+  assert.equal(store.find(ID).pane, '%7');
+});
+
+test('a Claude Code that won\'t quit isn\'t restarted', async () => {
+  const { deps, store, started } = setUp();
+  startIn(store, '%3');
+  Object.assign(deps.terminal, { sendText: async () => {}, foreground: async () => 'claude' });
+  await assert.rejects(restartSession({ ...deps, exitLimit: 30 }, ID), { code: 'restart_failed' });
+  assert.equal(started.length, 0);
+});
+
+test('a session that isn\'t running is restarted by resuming it', async () => {
+  const { deps, started } = setUp({ onStart: s => startIn(s, '%7', 'resume') });
+  assert.deepEqual(await restartSession(deps, ID), { restarted: true });
+  assert.deepEqual(started[0].command, ['claude', '--resume', ID]);
 });

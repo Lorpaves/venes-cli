@@ -176,7 +176,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
   const trashed = [];
   const forgotten = [];
   const killed = [];
-  const agent = new Antigravity({
+  const agent = new Antigravity({ version: async () => '1.5.11',
     store, terminal, data, installed: () => installed, rows: async () => rows,
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
@@ -704,7 +704,7 @@ test('with no way to the Trash from here a conversation is deleted for good, and
   const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
   t.after(() => fs.rmSync(data, { recursive: true, force: true }));
   const store = new SessionStore();
-  const agent = new Antigravity({
+  const agent = new Antigravity({ version: async () => '1.5.11',
     store, data, installed: () => true, trash: async () => { throw none; }, forget: async () => { throw new Error('database is locked'); }, timing: { watch: 100_000 },
   });
   t.after(() => agent.stop());
@@ -714,7 +714,7 @@ test('with no way to the Trash from here a conversation is deleted for good, and
   assert.equal(fs.existsSync(path.join(data, 'conversations', `${ID}.db`)), false);
   // Any other failure to move it leaves it where it was.
   fs.writeFileSync(path.join(data, 'conversations', `${ID}.db`), '');
-  const failing = new Antigravity({ store, data, installed: () => true, trash: async () => { throw new Error('disk full'); }, forget: async () => {}, timing: { watch: 100_000 } });
+  const failing = new Antigravity({ version: async () => '1.5.11', store, data, installed: () => true, trash: async () => { throw new Error('disk full'); }, forget: async () => {}, timing: { watch: 100_000 } });
   t.after(() => failing.stop());
   await assert.rejects(failing.remove({ sessionId: ID }), /disk full/);
 });
@@ -942,7 +942,7 @@ test('a turn tells of the pictures a message came with and a call looked at', as
 
 test('with no Antigravity on the Mac there\'s nothing to list or start', async t => {
   const store = new SessionStore();
-  const agent = new Antigravity({ store, installed: () => false, rows: async () => { throw new Error('not asked'); }, timing: { watch: 100_000 } });
+  const agent = new Antigravity({ version: async () => '1.5.11', store, installed: () => false, rows: async () => { throw new Error('not asked'); }, timing: { watch: 100_000 } });
   t.after(() => agent.stop());
   assert.deepEqual([agent.isAvailable(), await agent.library(), (await agent.capabilities()).models], [false, [], []]);
   await assert.rejects(agent.start({ cwd: os.tmpdir() }), { code: 'no_antigravity' });
@@ -1060,4 +1060,20 @@ test('a question left unanswered is skipped, as Esc skips it at the terminal', a
   store.respond(request.id, { decision: 'deny' });
   await until(() => terminal.keys.length === 1, 'a key');
   assert.deepEqual(terminal.keys, ['Escape']);
+});
+
+test('a restart tells the Antigravity on a session to go and opens it again, running the version installed now', async t => {
+  const rows = [{ conversation_id: ID, title: 'Read Note', last_modified_time: '2026-11-15 10:39:39+00:00', workspace_uris: `["file://${os.tmpdir()}"]`, step_count: 4 }];
+  const { agent, store, terminal, data, stored, hook, killed } = setup(t, { rows, timing: { watch: 100_000 } });
+  stored();
+  fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ trustedWorkspaces: [fs.realpathSync(os.tmpdir())] }));
+  await hook('SessionStart', { cwd: os.tmpdir(), workspacePaths: [os.tmpdir()] });
+  terminal.running = 'antigravity';
+  terminal.onKill = () => { terminal.running = 'zsh'; };
+  assert.equal(agent.isBusy(ID), false);
+  await agent.restartNow(ID);
+  assert.deepEqual(killed, [4242]);
+  assert.deepEqual([terminal.started.at(-1).command, terminal.started.at(-1).cwd], [['agy', '--conversation', ID], os.tmpdir()]);
+  assert.equal(agent.runningVersion(ID), '1.5.11');
+  assert.equal(store.get(ID).pane, '%9');
 });

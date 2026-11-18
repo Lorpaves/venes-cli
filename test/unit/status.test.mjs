@@ -142,7 +142,7 @@ test('what the phone shows: model, effort, project, branch, context, limits with
   const { updatedAt, ...status } = await readStatus(dir, 'abc-123', NOW);
   assert.ok(Math.abs(updatedAt * 1000 - Date.now()) < 60_000);
   assert.deepEqual(status, {
-    model: 'Opus 5.5', effort: 'max', project: 'demo-app', repo: 'acme/demo', branch: 'feature/login',
+    model: 'Opus 5.5', modelId: 'claude-opus-5-5', effort: 'max', project: 'demo-app', repo: 'acme/demo', branch: 'feature/login',
     context: { percent: 44.5, used: 445000, size: 1000000 },
     fiveHour: { percent: 23.5, resetsAt: 2_000_007_200 },
     sevenDay: { percent: 41.2, resetsAt: 2_000_300_000 },

@@ -93,7 +93,7 @@ function fakeCodex() {
       if (server.fails.skills) throw rpcError('no skills here');
       return { data: [{ cwd: cwds[0] ?? FOLDER, errors: [], skills: server.skills }] };
     },
-    'account/rateLimits/read': () => ({ rateLimits: server.limits }),
+    'account/rateLimits/read': () => ({ rateLimits: server.limits, ...(server.resets && { rateLimitResetCredits: server.resets }) }),
   };
   server.connect = async () => {
     if (!server.isRunning) throw Object.assign(new Error('connect ENOENT'), { code: 'ENOENT' });
@@ -1352,6 +1352,7 @@ test('the account\'s limits are told for a list of what\'s used, where Codex is 
   const said = await codex.limits();
   assert.deepEqual(said.limits, [{ window: 'fiveHour', percent: 12, resetsAt: 1_800_000_000 }, { window: 'sevenDay', percent: 31, resetsAt: 1_800_500_000 }]);
   assert.deepEqual([said.plan, said.credits], ['pro', { unlimited: false, balance: 12.5 }]);
+  assert.equal('limitResets' in said, false, 'none to hand, none said');
   assert.ok(Math.abs(said.updatedAt - Date.now() / 1000) < 5);
   // One metered apart comes after the plan's own, by its name, and what was said a moment ago stands.
   server.say('account/rateLimits/updated', { rateLimits: { limitId: 'codex_spark', limitName: 'Spark', primary: { usedPercent: 2, windowDurationMins: 300 }, secondary: null } });
@@ -1642,4 +1643,10 @@ test('closing waits for its own thread\'s turn, and no other', async () => {
   const { codex, sessionId } = await running();
   assert.equal(codex.isWorking(sessionId), true);
   assert.equal(codex.isWorking('another-thread'), false);
+});
+
+test('the resets of its limits an account has to hand are told with them', async () => {
+  const { codex, server } = await running();
+  server.resets = { availableCount: 1, credits: [{ title: 'Full reset (Weekly + 5 hr)', expiresAt: 1_797_108_945, status: 'available' }, { title: 'Used', status: 'used' }] };
+  assert.deepEqual((await codex.limits()).limitResets, [{ title: 'Full reset (Weekly + 5 hr)', expiresAt: 1_797_108_945 }]);
 });

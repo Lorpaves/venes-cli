@@ -1534,15 +1534,17 @@ export class Codex {
   async limits() {
     await this.#readLimits();
     if (!this.#limits) return undefined;
-    const { snapshot, others, at } = this.#limits;
+    const { snapshot, others, resets, at } = this.#limits;
     const own = WINDOWS.flatMap(([window, minutes]) => {
       const limit = limitOf(windowOf(snapshot, minutes));
       return limit ? [{ window, ...limit }] : [];
     });
     const credits = creditsOf(snapshot?.credits);
+    const limitResets = limitResetsOf(resets);
     return {
       limits: [...own, ...otherLimitsOf(others, snapshot?.limitId ?? 'codex')],
-      ...(snapshot?.planType && { plan: snapshot.planType }), ...(credits && { credits }), updatedAt: Math.floor(at / 1000),
+      ...(snapshot?.planType && { plan: snapshot.planType }), ...(credits && { credits }), ...(limitResets.length && { limitResets }),
+      updatedAt: Math.floor(at / 1000),
     };
   }
 

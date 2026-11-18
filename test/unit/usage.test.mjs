@@ -512,8 +512,11 @@ test('a client is told of each agent it takes that has anything to show', () => 
     ],
   });
   // What Codex says now is what's told, with its plan and credits.
-  const live = usageReply({ read, now, limits: { codex: { limits: [{ window: 'sevenDay', percent: 80 }], plan: 'pro', credits: { unlimited: false, balance: 5 }, updatedAt: 18 } } });
-  assert.deepEqual(live.agents[1], { agent: 'codex', tokens: used.tokens, cost: used.cost, limits: [{ window: 'sevenDay', percent: 80 }], plan: 'pro', credits: { unlimited: false, balance: 5 }, limitsAt: 18 });
+  const live = usageReply({ read, now, limits: { codex: { limits: [{ window: 'sevenDay', percent: 80 }], plan: 'pro', credits: { unlimited: false, balance: 5 }, limitResets: [{ title: 'Full reset', expiresAt: 19 }], updatedAt: 18 } } });
+  assert.deepEqual(live.agents[1], {
+    agent: 'codex', tokens: used.tokens, cost: used.cost, limits: [{ window: 'sevenDay', percent: 80 }], plan: 'pro', credits: { unlimited: false, balance: 5 },
+    limitResets: [{ title: 'Full reset', expiresAt: 19 }], limitsAt: 18,
+  });
   // A client from before the other agents is told of Claude Code alone, and an agent with nothing isn't told of.
   assert.deepEqual(usageReply({ read, now, shown: agent => agent === 'claude' }).agents.map(agent => agent.agent), ['claude']);
   assert.deepEqual(usageReply({ read: { days, agents: {}, scanning: false }, now, limits: { antigravity: { limits: [], reading: false } } }).agents, []);

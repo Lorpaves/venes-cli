@@ -210,6 +210,8 @@ export async function readStatus(dir, sessionId, now = Date.now()) {
   const limits = data.rate_limits ?? (replied ? undefined : latestLimits(dir, sessionId));
   return withoutEmpty({
     model: data.model?.display_name,
+    // The model's own id, by which a client finds it among those on offer.
+    modelId: data.model?.id,
     effort: data.effort?.level,
     project: project ? path.basename(project) : undefined,
     repo: repo?.owner && repo?.name ? `${repo.owner}/${repo.name}` : undefined,

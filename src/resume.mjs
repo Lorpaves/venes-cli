@@ -260,6 +260,16 @@ async function resumeInShell(deps, session, target, chosen) {
   }
 }
 
+const targetOf = session => ({ pane: session.pane, tmuxSocket: session.tmuxSocket, rexSession: session.rexSession, rexServer: session.rexServer });
+
+// Asks the Claude Code in a session's terminal to quit, as /exit there does, and waits until it says it has.
+// Whether it did.
+export async function quitInTerminal(deps, session) {
+  const { store, terminal, check = CHECK_MS, exitLimit = EXIT_LIMIT_MS } = deps;
+  await terminal.sendText(targetOf(session), '/exit', () => store.pendingFor(session).length > 0);
+  return until(() => store.find(session.id)?.status === 'ended', exitLimit, check);
+}
+
 // Restarts a session so that it runs the Claude Code installed now. One open in a terminal is asked to
 // quit, as /exit asks, and is picked up again where it was: in the same terminal when that's left with a
 // shell, or else in a terminal of its own, as a stopped session is resumed. `chosen` is what it ran with:
@@ -268,9 +278,8 @@ export async function restartSession(deps, sessionId, chosen = {}) {
   const { store, terminal, check = CHECK_MS, exitLimit = EXIT_LIMIT_MS, settle = SHELL_SETTLE_MS } = deps;
   const session = store.find(sessionId);
   if (session?.pane && session.status !== 'ended') {
-    const target = { pane: session.pane, tmuxSocket: session.tmuxSocket, rexSession: session.rexSession, rexServer: session.rexServer };
-    await terminal.sendText(target, '/exit', () => store.pendingFor(session).length > 0);
-    if (!(await until(() => store.find(sessionId)?.status === 'ended', exitLimit, check))) {
+    const target = targetOf(session);
+    if (!(await quitInTerminal(deps, session))) {
       throw new HelperError('restart_failed', "Claude Code didn't quit, so the session wasn't restarted.");
     }
     // Claude Code says it's over a moment before it has gone from its terminal: what's left there is

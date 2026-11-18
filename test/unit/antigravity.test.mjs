@@ -1077,3 +1077,18 @@ test('a restart tells the Antigravity on a session to go and opens it again, run
   assert.equal(agent.runningVersion(ID), '1.5.11');
   assert.equal(store.get(ID).pane, '%9');
 });
+
+test('closing tells the Antigravity on a session to go, and the session is over', async t => {
+  const rows = [{ conversation_id: ID, title: 'Read Note', last_modified_time: '2026-11-15 10:39:39+00:00', workspace_uris: `["file://${os.tmpdir()}"]`, step_count: 4 }];
+  const { agent, store, terminal, stored, hook, killed } = setup(t, { rows, timing: { watch: 100_000 } });
+  stored();
+  await hook('SessionStart', { cwd: os.tmpdir(), workspacePaths: [os.tmpdir()] });
+  terminal.running = 'antigravity';
+  terminal.onKill = () => { terminal.running = 'zsh'; };
+  assert.equal(agent.isClosable(ID), true);
+  await agent.closeNow(ID);
+  assert.deepEqual(killed, [4242]);
+  assert.equal(store.get(ID).status, 'ended');
+  assert.equal(agent.isClosable(ID), false);
+  await assert.rejects(agent.closeNow(ID), { code: 'not_open' });
+});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { removeSession } from '../../src/remove.mjs';
+import { removeSession, stopSession } from '../../src/remove.mjs';
 import { HelperError, SessionStore } from '../../src/sessions.mjs';
 
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -101,4 +101,24 @@ test('a session nobody has heard of is reported as unknown', async () => {
   const { deps, events } = setUp({ deleting: async () => { throw new HelperError('unknown_session', 'none'); } });
   await assert.rejects(removeSession(deps, ID), { code: 'unknown_session' });
   assert.deepEqual(events, []);
+});
+
+test('closing stops a running session and keeps it', async () => {
+  const { deps, steps } = setUp({ running: [{ id: ID, pid: 42, kind: 'interactive' }] });
+  assert.equal(await stopSession(deps, ID), true);
+  assert.deepEqual(steps, ['kill 42']);
+});
+
+test('a session that isn\'t running has nothing to stop', async () => {
+  const { deps, steps } = setUp();
+  assert.equal(await stopSession(deps, ID), false);
+  assert.deepEqual(steps, []);
+});
+
+test('one that can\'t be stopped is told of in the words given', async () => {
+  const said = { background: 'Not from here.', wouldnt: 'It wouldn\'t quit.' };
+  const { deps } = setUp({ running: [{ id: ID, pid: 42, kind: 'interactive' }], stopsAfter: Infinity });
+  await assert.rejects(stopSession(deps, ID, said), { code: 'session_running', message: 'It wouldn\'t quit.' });
+  const other = setUp({ running: [{ id: ID, pid: 42, kind: 'background' }] });
+  await assert.rejects(stopSession(other.deps, ID, said), { code: 'background_session', message: 'Not from here.' });
 });

@@ -17,21 +17,29 @@ function signal(pid) {
   }
 }
 
-async function stop(running, isListed, { kill, limit, check }) {
+// Ends a session's Claude Code, as SIGTERM asks it to, and waits for it to go. False when it wasn't
+// running. `said` is what's told when it can't be stopped: one a supervisor runs, or one that won't go.
+export async function stopSession({ library, kill = signal, limit = STOP_LIMIT_MS, check = CHECK_MS }, sessionId, said = {}) {
+  const {
+    background = 'Delete a background session with claude rm.',
+    wouldnt = 'This session wouldn\'t stop, so it hasn\'t been deleted.',
+  } = said;
+  const isListed = async () => (await library.running()).find(session => session.id === sessionId);
+  const running = await isListed();
+  if (!running) return false;
   // A supervisor runs these, and `claude rm` has its own rules about their worktrees.
-  if (running.kind === 'background' || !running.pid) throw new HelperError('background_session', 'Delete a background session with claude rm.');
+  if (running.kind === 'background' || !running.pid) throw new HelperError('background_session', background);
   kill(running.pid);
   const end = Date.now() + limit;
   while (await isListed()) {
-    if (Date.now() >= end) throw new HelperError('session_running', 'This session wouldn\'t stop, so it hasn\'t been deleted.');
+    if (Date.now() >= end) throw new HelperError('session_running', wouldnt);
     await pause(check);
   }
+  return true;
 }
 
 export async function removeSession({ store, library, kill = signal, limit = STOP_LIMIT_MS, check = CHECK_MS }, sessionId) {
-  const isListed = async () => (await library.running()).find(session => session.id === sessionId);
-  const running = await isListed();
-  if (running) await stop(running, isListed, { kill, limit, check });
+  await stopSession({ library, kill, limit, check }, sessionId);
   try {
     await library.delete(sessionId);
   } catch (error) {

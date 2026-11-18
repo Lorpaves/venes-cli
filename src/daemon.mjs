@@ -22,8 +22,8 @@ import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
 import { Library, joinedStatus } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
-import { removeSession } from './remove.mjs';
-import { askAgain, dialogLeft, restartSession, resumeSession } from './resume.mjs';
+import { removeSession, stopSession } from './remove.mjs';
+import { askAgain, dialogLeft, quitInTerminal, restartSession, resumeSession } from './resume.mjs';
 import { AgentCli } from './agentcli.mjs';
 import { startNewSession } from './start.mjs';
 import { PushDevices, notify, titleFor } from './push.mjs';
@@ -492,6 +492,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   // daemon's, which every Codex session here shares, so it's refused while any of them works.
   const requestRestart = async sessionId => {
     if (restarts.get(sessionId) === 'restarting') return { restart: 'restarting' };
+    // Asked for after a closing that waits, it's what's wanted now.
+    if (closes.get(sessionId) === 'pending') closes.delete(sessionId);
     const agent = await cliAgentOf(sessionId);
     if (await busyOf(agent, sessionId)) {
       if (agent.key === 'codex') throw new HelperError('agent_busy', 'Codex is working. Try again when it has finished.');
@@ -516,6 +518,86 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const agent = await cliAgentOf(event.sessionId).catch(() => undefined);
       if (!agent || await busyOf(agent, event.sessionId)) return;
       runRestart(event.sessionId, agent);
+    }, RESTART_SETTLE_MS).unref();
+  });
+
+  // Closings under way, and the ones asked for while a session was at work, which go once it isn't.
+  const closes = new Map();
+  const closeErrors = new Map();
+  const CLAUDE_CLOSE = { background: "A background session can't be closed from here.", wouldnt: "Claude Code wouldn't quit." };
+
+  // A session has a command line to close: Claude Code running it, Antigravity open on it, or Codex's own
+  // terminal on its thread, as Codex's server is every Codex session's and isn't closed.
+  const closableOf = (agent, sessionId) => {
+    if (agent.other) return agent.other.isClosable(sessionId);
+    const s = store.find(sessionId);
+    return Boolean(s && s.status !== 'ended');
+  };
+  // At work, for closing, which waits for it: the session, and for Codex its thread alone.
+  const workingOf = (agent, sessionId) => {
+    if (!agent.other) return claudeBusy(sessionId);
+    return agent.other.isWorking ? agent.other.isWorking(sessionId) : agent.other.isBusy(sessionId);
+  };
+
+  const runClose = async (sessionId, agent) => {
+    closes.set(sessionId, 'closing');
+    closeErrors.delete(sessionId);
+    try {
+      if (agent.other) await agent.other.closeNow(sessionId);
+      else await closeClaude(sessionId);
+    } catch (error) {
+      closeErrors.set(sessionId, error.message);
+      console.error(`close ${sessionId}: ${error.message}`);
+    } finally {
+      if (closes.get(sessionId) === 'closing') closes.delete(sessionId);
+    }
+  };
+
+  // Claude Code is asked to quit as /exit asks, in its terminal, or where the helper can't type, with SIGTERM.
+  // One that had gone without a word is over all the same.
+  const closeClaude = async sessionId => {
+    const s = store.find(sessionId);
+    if (s?.pane) {
+      if (!(await quitInTerminal({ store, terminal: resumeTerminal() }, s))) throw new HelperError('session_running', CLAUDE_CLOSE.wouldnt);
+      return;
+    }
+    if (!(await stopSession({ library }, sessionId, CLAUDE_CLOSE)) && store.find(sessionId)?.status !== 'ended') {
+      store.report(sessionId, 'session.ended', { reason: 'closed' });
+    }
+  };
+
+  // Closing goes at once for a session that isn't at work, and waits for one that is. The conversation
+  // stays, and a message opens it again.
+  const requestClose = async sessionId => {
+    if (closes.get(sessionId) === 'closing') return { close: 'closing' };
+    const agent = await cliAgentOf(sessionId);
+    if (!(await closableOf(agent, sessionId))) throw new HelperError('not_open', "This session isn't open, so there's nothing to close.");
+    // A restart that waited would open it again.
+    if (restarts.get(sessionId) === 'pending') restarts.delete(sessionId);
+    if (await workingOf(agent, sessionId)) {
+      closes.set(sessionId, 'pending');
+      return { close: 'pending' };
+    }
+    runClose(sessionId, agent);
+    return { close: 'now' };
+  };
+
+  // A closing that waited goes once its session has finished. Once the session is over, so is its closing,
+  // whatever ended it.
+  store.on('event', event => {
+    const closing = closes.get(event.sessionId);
+    if (!closing) return;
+    if (event.kind === 'session.ended') {
+      closes.delete(event.sessionId);
+      return;
+    }
+    if (closing !== 'pending') return;
+    if (event.kind !== 'turn.end' && !(event.kind === 'session.status' && event.status === 'idle')) return;
+    setTimeout(async () => {
+      if (closes.get(event.sessionId) !== 'pending') return;
+      const agent = await cliAgentOf(event.sessionId).catch(() => undefined);
+      if (!agent || await workingOf(agent, event.sessionId)) return;
+      runClose(event.sessionId, agent);
     }, RESTART_SETTLE_MS).unref();
   });
 
@@ -797,7 +879,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       // At work: this session is, so a restart waits for it; for Codex, any session on its daemon is, so a
       // restart is refused.
       const working = await busyOf(agent, sessionId);
-      return { ...report, working, restart: restarts.get(sessionId) ?? null, ...(restartErrors.has(sessionId) && { restartError: restartErrors.get(sessionId) }) };
+      return {
+        ...report, working, restart: restarts.get(sessionId) ?? null, ...(restartErrors.has(sessionId) && { restartError: restartErrors.get(sessionId) }),
+        closable: await closableOf(agent, sessionId), close: closes.get(sessionId) ?? null, ...(closeErrors.has(sessionId) && { closeError: closeErrors.get(sessionId) }),
+      };
     },
     // Updates a session's agent's command line on this computer, in the background, then restarts the
     // session onto it: at once when it isn't at work, or once it isn't.
@@ -814,6 +899,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       });
     },
     restart: ({ sessionId }) => requestRestart(sessionId),
+    close: ({ sessionId }) => requestClose(sessionId),
     // What a message had attached, for a client that didn't send it or no longer has it.
     file: ({ sessionId, uploadId }) => {
       const upload = findUpload(uploads, sessionId, uploadId);

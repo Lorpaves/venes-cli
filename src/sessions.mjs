@@ -468,8 +468,9 @@ export class SessionStore extends EventEmitter {
         break;
       case 'MessageDisplay':
         // Hooks run as separate processes, so the final delta can land after Stop.
-        // It must not change the status, or a finished turn would look like it's running.
-        s.replied = true;
+        // It must not change the status, or a finished turn would look like it's running. Nor is it an answer in
+        // the turn after.
+        if (!ev.final) s.replied = true;
         this.#emit(s, 'message.assistant.delta', {
           messageId: ev.message_id, turnId: ev.turn_id, index: ev.index, text: ev.delta, final: ev.final, agentId,
         });
@@ -540,7 +541,8 @@ export class SessionStore extends EventEmitter {
   handleTranscriptRecord(sessionId, record) {
     const s = this.#sessions.get(sessionId);
     if (!s) return;
-    if (record?.type === 'assistant' && !record.isSidechain) s.replied = true;
+    // Claude's words in this turn: the turn before's can still be on their way here.
+    if (record?.type === 'assistant' && !record.isSidechain && !(Date.parse(record.timestamp) < (s.turnStartedAt ?? 0))) s.replied = true;
     for (const { type, ...signal } of signalsFrom(record)) {
       if (type === 'interrupted') this.#onInterrupted(s);
       else if (type === 'turnStarted') this.#onTurnStarted(s, signal);
@@ -998,7 +1000,7 @@ export class SessionStore extends EventEmitter {
     if (status === 'idle' || status === 'ended') this.#stopCompacting(s); // whatever became of it, the turn is over
     if (s.status === status) return;
     // A turn begins, with nothing of Claude's in it yet.
-    if (isAtWork(status) && !isAtWork(s.status)) Object.assign(s, { turns: (s.turns ?? 0) + 1, replied: false });
+    if (isAtWork(status) && !isAtWork(s.status)) Object.assign(s, { turns: (s.turns ?? 0) + 1, replied: false, turnStartedAt: Date.now() });
     s.status = status;
     this.#emit(s, 'session.status', { status });
   }

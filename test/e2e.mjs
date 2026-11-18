@@ -2206,6 +2206,40 @@ T('a_restart_asked_during_a_turn_waits_for_its_end', { mode: 'bypassPermissions'
   assert.equal((await backAfterRestart(r)).source, 'resume');
 });
 
+// Closing quits the session's Claude Code on the computer and keeps the conversation, which a message
+// opens again.
+async function closesAndOpensAgain(r) {
+  await r.type('Reply with only the word READY.');
+  await r.turnEnd();
+  const { id } = await ownSession(r);
+  r.after(() => quitRestarted(r, id));
+  assert.equal((await r.client.request('cli', { sessionId: id })).closable, true);
+  r.mark();
+  assert.equal((await r.client.request('close', { sessionId: id })).close, 'now');
+  await r.kind('session.ended', 20000);
+  const cli = await r.client.request('cli', { sessionId: id });
+  assert.deepEqual([cli.closable, cli.close, cli.closeError], [false, null, undefined]);
+  await assert.rejects(r.client.request('close', { sessionId: id }), { code: 'not_open' });
+  r.mark();
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.' });
+  assert.match((await r.turnEnd(60000)).lastMessage ?? '', /AGAIN/);
+}
+
+T('an_idle_session_closes_and_a_message_opens_it_again', {}, closesAndOpensAgain);
+T('in_rex_an_idle_session_closes_and_a_message_opens_it_again', { rex: true }, closesAndOpensAgain);
+
+T('a_close_asked_during_a_turn_waits_for_its_end', { mode: 'bypassPermissions' }, async r => {
+  await r.type(SLEEP(8, 'SLEPT'));
+  await r.kind('tool.start', 20000);
+  const { id } = await ownSession(r);
+  r.mark();
+  assert.equal((await r.client.request('close', { sessionId: id })).close, 'pending');
+  assert.equal((await r.client.request('cli', { sessionId: id })).close, 'pending');
+  const end = await r.turnEnd(60000);
+  assert.match(end.lastMessage ?? '', /SLEPT/, 'the turn was let finish');
+  await r.kind('session.ended', 20000);
+});
+
 T('a_stopped_session_can_be_deleted_for_good', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word STORED.');
   await r.turnEnd();
@@ -2361,6 +2395,15 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
       try { started = tmux('list-panes', '-t', terminalName, '-F', '#{pane_start_command}').trim(); } catch { /* not opened yet */ }
     }
     assert.match(started, new RegExp(`codex --remote unix://\\S+ resume ${sessionId}`), started);
+    // Closed from here, it's Codex's own terminal that goes, and the thread goes on in Codex's server, as the
+    // commands below show.
+    assert.equal((await r.client.request('cli', { sessionId })).closable, true);
+    assert.equal((await r.client.request('close', { sessionId })).close, 'now');
+    let closable = true;
+    for (const deadline = Date.now() + 10000; Date.now() < deadline && closable; await delay(200)) {
+      closable = (await r.client.request('cli', { sessionId })).closable;
+    }
+    assert.equal(closable, false, 'Codex has gone from its terminal');
   } finally {
     try { tmux('kill-session', '-t', terminalName); } catch { /* it had gone by itself */ }
   }

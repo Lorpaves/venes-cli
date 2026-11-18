@@ -428,6 +428,20 @@ test('a stopped turn that has an answer waits for the transcript to say it stopp
   }
 });
 
+test('words from the turn before, still on their way, aren\'t an answer in this one', async () => {
+  const { store, hook, kinds } = setup({ takenBackMs: 10 });
+  hook('UserPromptSubmit', { prompt: 'first' });
+  hook('Stop', { last_assistant_message: 'READY', background_tasks: [] });
+  const before = new Date(Date.now() - 1000).toISOString();
+  hook('UserPromptSubmit', { prompt: 'second' });
+  hook('MessageDisplay', { message_id: 'm', delta: 'READY', index: 0, final: true });
+  store.handleTranscriptRecord('a', { type: 'assistant', timestamp: before, message: { content: [{ type: 'text', text: 'READY' }] } });
+  store.interruptSent('a');
+  await delay(40);
+  assert.equal(store.get('a').status, 'idle');
+  assert.ok(kinds().includes('turn.interrupted'));
+});
+
 test('a message sent right after a stop is a turn of its own, and the stop ends only the turn before it', async () => {
   const { store, hook, events } = setup({ takenBackMs: 20 });
   hook('UserPromptSubmit', { prompt: 'first' });

@@ -117,7 +117,7 @@ function fakeCodex() {
   return server;
 }
 
-function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {} } = {}) {
+function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {}, kill = undefined, quitLimitMs = 60 } = {}) {
   const server = fakeCodex();
   server.isRunning = isRunning;
   for (const thread of threads) server.threads.set(thread.id, thread);
@@ -128,6 +128,7 @@ function setup({ threads = [], loaded = [], isRunning = true, trusts = () => tru
   const codex = new Codex({
     store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, restartDaemon: server.restartDaemon, retryMs: 5, trusts,
     installed: () => isRunning, terminal, env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on', ...env }, keyLimitMs: 40,
+    ...(kill && { kill }), quitLimitMs,
   });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
@@ -1592,4 +1593,53 @@ test('a test\'s own Codex server is no daemon to restart', async () => {
 test('Codex is at work while any of its sessions has a turn going', async () => {
   const { codex } = await running();
   assert.equal(codex.isBusy(), true);
+});
+
+// Codex's own terminal on a thread, with Codex in it until it's told to go.
+function codexWindow({ program = 'codex', stays = false } = {}) {
+  const killed = [];
+  const terminal = {
+    running: program, asked: [],
+    findSession: async (name, env) => { terminal.asked.push([name, env]); return { pane: '%4' }; },
+    processOf: async () => ({ name: terminal.running, pid: 4242 }),
+  };
+  const kill = pid => { killed.push(pid); if (!stays) terminal.running = 'zsh'; };
+  return { terminal, killed, kill };
+}
+
+test('closing a Codex session quits Codex\'s own terminal on it, and leaves the thread to Codex\'s server', async () => {
+  const { terminal, killed, kill } = codexWindow();
+  const { server, codex } = setup({ threads: [stored('t1')], loaded: ['t1'], terminal, kill });
+  await codex.restore();
+  assert.equal(await codex.isClosable('t1'), true);
+  await codex.closeNow('t1');
+  assert.deepEqual(killed, [4242]);
+  assert.equal(terminal.asked[0][0], 'venes-codex-t1');
+  assert.equal(await codex.isClosable('t1'), false);
+  assert.equal(server.restarts, 0);
+  assert.ok(server.loaded.has('t1'), 'the thread is still loaded');
+});
+
+test('a Codex session with no terminal of Codex\'s on it has nothing to close', async () => {
+  const { codex } = setup({ threads: [stored('t1')], loaded: ['t1'] });
+  await codex.restore();
+  assert.equal(await codex.isClosable('t1'), false);
+  await assert.rejects(codex.closeNow('t1'), { code: 'not_open' });
+  const left = codexWindow({ program: '-zsh' });
+  const other = setup({ threads: [stored('t1')], loaded: ['t1'], terminal: left.terminal, kill: left.kill });
+  await other.codex.restore();
+  assert.equal(await other.codex.isClosable('t1'), false, 'Codex has left it for its shell');
+});
+
+test('a Codex that won\'t quit is said to', async () => {
+  const { terminal, kill } = codexWindow({ stays: true });
+  const { codex } = setup({ threads: [stored('t1')], loaded: ['t1'], terminal, kill, quitLimitMs: 30 });
+  await codex.restore();
+  await assert.rejects(codex.closeNow('t1'), { code: 'session_running' });
+});
+
+test('closing waits for its own thread\'s turn, and no other', async () => {
+  const { codex, sessionId } = await running();
+  assert.equal(codex.isWorking(sessionId), true);
+  assert.equal(codex.isWorking('another-thread'), false);
 });

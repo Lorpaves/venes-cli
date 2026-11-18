@@ -19,6 +19,7 @@ import { imageSize } from './imagesize.mjs';
 import { isImage } from './uploads.mjs';
 import { VERSION } from './version.mjs';
 import { computer } from './platform.mjs';
+import { isShell } from './terminal.mjs';
 
 const exec = promisify(execFile);
 
@@ -619,6 +620,9 @@ const terminalName = threadId => `${TERMINAL_PREFIX}${threadId.slice(0, TERMINAL
 const KEY_LIMIT_MS = 2000;
 const KEY_CHECK_MS = 50;
 const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
+// How long Codex's own terminal has to quit once told to, and how often it's looked at meanwhile.
+const QUIT_LIMIT_MS = 5000;
+const QUIT_CHECK_MS = 100;
 const TERMINAL_ENV = ['PATH', 'LANG', 'LC_ALL', 'CODEX_HOME', 'VENES_TMUX_SOCKET'];
 
 function blankThread() {
@@ -658,6 +662,8 @@ export class Codex {
   #retry;
   #retryMs;
   #keyLimitMs;
+  #kill;
+  #quitLimitMs;
   #trusts;
   #installed;
   #terminal;
@@ -675,7 +681,10 @@ export class Codex {
     installed = () => !process.env.VENES_CODEX_SOCKET && isInstalled(),
     // What opens a terminal at the Mac, as for a Claude Code session that's resumed: none, and no session gets one.
     terminal = undefined, env = process.env, keyLimitMs = KEY_LIMIT_MS,
+    kill = pid => process.kill(pid, 'SIGTERM'), quitLimitMs = QUIT_LIMIT_MS,
   }) {
+    this.#kill = kill;
+    this.#quitLimitMs = quitLimitMs;
     this.#keyLimitMs = keyLimitMs;
     this.#terminal = terminal;
     this.#env = env;
@@ -698,6 +707,45 @@ export class Codex {
   isBusy() {
     const working = session => session.agent === AGENT && (session.status === 'running' || session.status === 'waiting');
     return [...this.#threads.values()].some(thread => thread.turnId) || this.#store.liveSessions().some(working);
+  }
+
+  // Whether this thread has a turn going or waits on the reader: closing its terminal waits for that.
+  isWorking(threadId) {
+    const known = this.#store.find(threadId);
+    return Boolean(this.#threads.get(threadId)?.turnId) || known?.status === 'running' || known?.status === 'waiting';
+  }
+
+  // A Codex session's command line is Codex's own terminal on its thread at the Mac. Its server is every
+  // Codex session's, and isn't closed.
+  async isClosable(threadId) {
+    return Boolean(await this.#cliOn(threadId));
+  }
+
+  // Closes Codex's own terminal on the thread: the command line in it is told to go. The thread goes on in
+  // Codex's server, for this app and Codex's others.
+  async closeNow(threadId) {
+    const open = await this.#cliOn(threadId);
+    if (!open) throw new HelperError('not_open', `Codex isn't open on this conversation on the ${computer}.`);
+    if (open.running.pid) {
+      try {
+        this.#kill(open.running.pid);
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error; // it has just gone by itself
+      }
+    }
+    for (const end = Date.now() + this.#quitLimitMs; ; await pause(QUIT_CHECK_MS)) {
+      if (!(await this.#cliOn(threadId))) return;
+      if (Date.now() >= end) throw new HelperError('session_running', "Codex wouldn't quit.");
+    }
+  }
+
+  // Codex's own terminal on the thread, while Codex runs in it and not the shell it leaves.
+  async #cliOn(threadId) {
+    if (!this.#terminal?.findSession || !this.#terminal.processOf) return undefined;
+    const target = await this.#terminal.findSession(terminalName(threadId), this.#terminalEnv()).catch(() => undefined);
+    if (!target) return undefined;
+    const running = await this.#terminal.processOf(target).catch(() => undefined);
+    return running?.name && !isShell(running.name) ? { target, running } : undefined;
   }
 
   // Restarts Codex's daemon, so that it runs the Codex installed now, and opens the session on it again.

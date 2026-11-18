@@ -659,6 +659,20 @@ export class Antigravity {
     return this.#sessions.get(sessionId)?.cliVersion;
   }
 
+  // Whether Antigravity is open on the session, which closing it ends.
+  isClosable(sessionId) {
+    return Boolean(this.#typable(sessionId));
+  }
+
+  // Closes the session's Antigravity: the one open on it is told to go. The conversation stays, and a
+  // message opens it again.
+  async closeNow(sessionId) {
+    const known = this.#typable(sessionId);
+    if (!known) throw new HelperError('not_open', "This session isn't open, so there's nothing to close.");
+    await this.#quit(sessionId, known, "Antigravity wouldn't quit.");
+    if (this.#typable(sessionId)) this.#end(sessionId, 'closed');
+  }
+
   // Restarts a session so that it runs the Antigravity installed now: the one open on it is told to go,
   // and it's opened again in a terminal, as a stored session is.
   async restartNow(sessionId) {
@@ -1689,7 +1703,7 @@ export class Antigravity {
   // Tells the Antigravity that has a conversation open in a terminal the helper can reach to go: the
   // session's own terminal, or the one the helper opened on it before. Left running, it would write
   // the conversation back.
-  async #quit(sessionId, known) {
+  async #quit(sessionId, known, wouldnt = 'This session wouldn\'t stop, so it hasn\'t been deleted.') {
     if (!this.#terminal?.processOf) return;
     const name = `${TERMINAL_PREFIX}${sessionId.slice(0, TERMINAL_ID_LENGTH)}`;
     const variables = Object.fromEntries(TERMINAL_ENV.filter(key => this.#env[key]).map(key => [key, this.#env[key]]));
@@ -1706,7 +1720,7 @@ export class Antigravity {
     }
     for (const end = Date.now() + this.#timing.quitLimit; ; await pause(this.#timing.quitCheck)) {
       if (!(await runsIn(this.#terminal, where))) return;
-      if (Date.now() >= end) throw new HelperError('session_running', 'This session wouldn\'t stop, so it hasn\'t been deleted.');
+      if (Date.now() >= end) throw new HelperError('session_running', wouldnt);
     }
   }
 

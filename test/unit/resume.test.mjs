@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionStore } from '../../src/sessions.mjs';
-import { askAgain, dialogLeft, restartSession, resumeSession } from '../../src/resume.mjs';
+import { askAgain, dialogLeft, quitInTerminal, restartSession, resumeSession } from '../../src/resume.mjs';
 import { pickChoice, readChoice } from '../../src/terminal.mjs';
 
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -398,4 +398,15 @@ test('a shell only on its way to another isn\'t typed into: the session is resum
   assert.deepEqual(await restartSession({ ...deps, settle: 5 }, ID), { restarted: true });
   assert.deepEqual(pasted, []);
   assert.deepEqual(started[0].command, ['claude', '--resume', ID]);
+});
+
+test('Claude Code asked to quit in its terminal says whether it has', async () => {
+  const { deps, store } = setUp();
+  startIn(store, '%3');
+  const typed = [];
+  deps.terminal.sendText = async (target, text) => { typed.push([target.pane, text]); };
+  assert.equal(await quitInTerminal({ ...deps, exitLimit: 30 }, store.find(ID)), false, 'it stays');
+  deps.terminal.sendText = async (target, text) => { typed.push([target.pane, text]); quitIn(store, '%3'); };
+  assert.equal(await quitInTerminal({ ...deps, exitLimit: 30 }, store.find(ID)), true, 'it goes');
+  assert.deepEqual(typed, [['%3', '/exit'], ['%3', '/exit']]);
 });

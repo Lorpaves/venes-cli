@@ -663,7 +663,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     }),
     capabilities: forOther('capabilities', async msg => {
       const cwd = store.find(msg.sessionId)?.cwd ?? (await library.info(msg.sessionId))?.cwd;
-      return library.capabilities(cwd);
+      // A Claude Code question's answer can carry the reader's notes, which go to Claude Code beside it.
+      return { ...(await library.capabilities(cwd)), answerNotes: true };
     }),
     configure: forOther('configure', configure),
     delete: async ({ sessionId }) => {

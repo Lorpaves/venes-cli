@@ -594,6 +594,22 @@ T('question_with_a_file', { mode: 'bypassPermissions' }, async r => {
   assert.match(end.lastMessage, /FIG/i);
 });
 
+// A note the reader adds beside an option goes to Claude with the answer, as Claude Code's AskUserQuestion takes
+// one, and a Claude Code session says it can take one.
+T('question_with_a_note', { mode: 'bypassPermissions' }, async r => {
+  await r.type(ASK);
+  const request = await r.request('question');
+  const { id } = await r.session();
+  assert.equal((await r.client.request('capabilities', { sessionId: id })).answerNotes, true);
+  const note = 'the darker one, please';
+  await r.client.request('respond', { requestId: request.id, decision: 'allow', answers: { 'Which color?': 'Blue' }, annotations: { 'Which color?': { notes: note } } });
+  await r.turnEnd(90000);
+  const asked = r.events.find(event => event.kind === 'tool.end' && event.name === 'AskUserQuestion');
+  const told = JSON.stringify(asked?.response ?? null);
+  assert.match(told, /Blue/, 'the answer reached Claude');
+  assert.ok(told.includes(note), 'with the note beside it');
+});
+
 T('plan_approve', { mode: 'plan' }, async r => {
   await r.type(PLAN('plan'));
   const request = await r.request('plan', 60000);

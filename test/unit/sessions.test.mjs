@@ -321,6 +321,27 @@ test('a question needs every answer', async () => {
   assert.deepEqual(updatedInput.questions, ask.tool_input.questions);
 });
 
+test('a note the reader added beside an answer goes with it, for the questions asked', async () => {
+  const { store, hook } = setup();
+  const ask = { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Q1' }, { question: 'Q2' }] } };
+  hook('PreToolUse', { ...ask, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', ask);
+  store.respond(held.request.id, {
+    decision: 'allow', answers: { Q1: 'a', Q2: 'b' }, annotations: { Q1: { notes: '  more  ' }, Q2: { notes: ' ' }, Q9: { notes: 'not asked' } },
+  });
+  const { updatedInput } = (await held.decision).hookSpecificOutput.decision;
+  assert.deepEqual([updatedInput.answers, updatedInput.annotations], [{ Q1: 'a', Q2: 'b' }, { Q1: { notes: 'more' } }]);
+});
+
+test('answers with no notes send none', async () => {
+  const { store, hook } = setup();
+  const ask = { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Q1' }] } };
+  hook('PreToolUse', { ...ask, tool_use_id: 't1' });
+  const held = hook('PermissionRequest', ask);
+  store.respond(held.request.id, { decision: 'allow', answers: { Q1: 'a' }, annotations: { Q1: {} } });
+  assert.equal('annotations' in (await held.decision).hookSpecificOutput.decision.updatedInput, false);
+});
+
 test('an answer that arrives after the terminal answered is refused', async () => {
   const { store, hook, events } = setup();
   hook('PreToolUse', { ...bash, tool_use_id: 't1' });

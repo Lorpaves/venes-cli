@@ -83,7 +83,18 @@ function denial(request, message) {
   return { behavior: 'deny', message: `${REJECTED} STOP what you are doing and wait for the user to tell you how to proceed.`, interrupt: true };
 }
 
-function buildDecision(request, { decision, message, answers, always, option }) {
+// The notes a reader added to their answers, for the questions asked: Claude Code shows each with its answer.
+function notesFor(request, annotations) {
+  if (!annotations || typeof annotations !== 'object') return {};
+  const asked = new Set((request.input.questions ?? []).map(q => q.question));
+  const notes = Object.entries(annotations).flatMap(([question, said]) => {
+    const words = typeof said?.notes === 'string' ? said.notes.trim() : '';
+    return asked.has(question) && words ? [[question, { notes: words }]] : [];
+  });
+  return notes.length ? { annotations: Object.fromEntries(notes) } : {};
+}
+
+function buildDecision(request, { decision, message, answers, annotations, always, option }) {
   if (decision === 'deny') return permissionDecision(denial(request, message));
   if (decision !== 'allow') throw new HelperError('bad_decision', `Unknown decision: ${decision}`);
   if (request.kind === 'permission' && option != null) {
@@ -104,7 +115,7 @@ function buildDecision(request, { decision, message, answers, always, option }) 
   if (request.kind === 'question') {
     const missing = (request.input.questions ?? []).filter(q => !answers?.[q.question]).map(q => q.question);
     if (missing.length) throw new HelperError('missing_answers', 'Every question needs an answer.', { missing });
-    return permissionDecision({ behavior: 'allow', updatedInput: { ...request.input, answers } });
+    return permissionDecision({ behavior: 'allow', updatedInput: { ...request.input, answers, ...notesFor(request, annotations) } });
   }
   if (!always) return permissionDecision({ behavior: 'allow' });
   if (!request.permissionSuggestions?.length) throw new HelperError('nothing_to_remember', 'This request has no rule to remember.');

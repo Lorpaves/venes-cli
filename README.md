@@ -194,7 +194,7 @@ A line ends at a line feed and nowhere else. JSON leaves a line separator (U+202
 | `update` | | Checks for a new version now. `version`, `available` (null if there's none) |
 | `sessions` | | `sessions`, `unattached` |
 | `library` | `limit`, `offset` | Every session Claude Code has stored, and what's running. See [The library](#the-library). |
-| `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). |
+| `capabilities` | `sessionId` | `commands` and `models` on offer in the session's folder. See [Commands and models](#commands-and-models). `answerNotes: true` says a question's answer can carry the reader's notes. |
 | `mentions` | `sessionId`, `query`, `limit` | `items`: what an `@` followed by `query` can name for the session, as Claude Code's own `@` offers it: each with its `path` and `kind`, `file` or `dir`, a folder's path ending in `/`. A `query` that starts like a path (`./`, `../`, `~/`, `/`, or just `~`, `.` or `..`) lists the folder it points into, folders first, hidden entries left out, written the way it was typed, as in `../helper/`. Anything else is looked for among the project's files and the folders above them, best match first, scored as Claude Code scores them: in a git repository every file git has, from the session's folder, then new ones unless ignored; elsewhere what ripgrep finds. With nothing typed, or just `.` or `./`, it's what's in the session's folder. A leading `@` in `query` is ignored. As many as Claude Code shows, 15, or 10 of a folder, and fewer if `limit` asks |
 | `configure` | `sessionId`, `model`, `effort` (either or both) | Changes what the session runs on. See [Commands and models](#commands-and-models). |
 | `setMode` | `sessionId`, `mode` | Changes the mode a session asks permission in. See [Permission modes](#permission-modes). |
@@ -224,7 +224,7 @@ A line ends at a line feed and nowhere else. JSON leaves a line separator (U+202
 | `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
 | `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
-| `respond` | `requestId`, `decision`, `message`, `answers`, `always`, `option` | Answers a request |
+| `respond` | `requestId`, `decision`, `message`, `answers`, `annotations`, `always`, `option` | Answers a request. A question's `annotations`, by question as AskUserQuestion has them (`{"Which color?": {"notes": "…"}}`), go to Claude Code beside its `answers`, which shows Claude each note with its answer. Notes for questions it didn't ask, and empty ones, are left out. |
 | `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
 | `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
 | `discard` | `sessionId`, `uploadId` | `discarded`: an upload taken back out of the composer before its message went. Its file goes from Downloads too, unless a message has it or it was moved or changed since. See [Attachments](#attachments) |

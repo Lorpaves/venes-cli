@@ -265,7 +265,7 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 
 ### The library
 
-`library` lists sessions the helper may never have heard from, newest first. It comes from `claude agents --json` for what's running, and the Agent SDK's `listSessions()` for what's stored. Pass `offset` from one reply to get the next page.
+`library` lists sessions the helper may never have heard from, newest first. It comes from `claude agents --json` for what's running, and the Agent SDK's `listSessions()` for what's stored. Pass `offset` from one reply to get the next page. Claude Code lists every process of its own as a session that's running, named for its folder, and that includes the ones the helper starts to read the account's limits (in the home folder) and what a folder offers (`capabilities`). Those run under session ids the helper chooses, and are left out.
 
 | Field | Contents |
 |---|---|

@@ -28,6 +28,14 @@ test('what claude agents prints becomes sessions with the helper\'s statuses', (
   ]);
 });
 
+test('the helper\'s own runs of Claude Code, which it lists as running too, are left out', () => {
+  const output = JSON.stringify([
+    { sessionId: 'mine', name: 'lorpaves-2b', cwd: '/Users/lorpaves', startedAt: 1, status: 'idle', pid: 7, kind: 'interactive' },
+    { sessionId: 'theirs', name: 'venes-client', cwd: '/w', startedAt: 2, status: 'busy', pid: 9, kind: 'interactive' },
+  ]);
+  assert.deepEqual(readRunning(output, new Set(['mine'])).map(session => session.id), ['theirs']);
+});
+
 test('a background session with no process goes by its state', () => {
   const output = JSON.stringify([
     { sessionId: 'a', state: 'working' }, { sessionId: 'b', state: 'blocked' }, { sessionId: 'c', state: 'done' }, { sessionId: 'd', state: 'failed' },
@@ -247,6 +255,25 @@ test('capabilities come from a session that runs no hooks and leaves nothing beh
   assert.equal(options.strictMcpConfig, true);
   assert.deepEqual(options.settingSources, ['user', 'project', 'local']);
   assert.equal(lines().at(-1), 'closed');
+});
+
+test('each run of Claude Code the helper makes has an id of its own, and isn\'t among what\'s running', async t => {
+  const { library, dir, bin, opened } = fakeSdk(t);
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits: { five_hour: { utilization: 1 } } });
+  await library.capabilities(dir, 0);
+  await library.modelLimits(0);
+  const ids = opened().map(options => options.sessionId);
+  assert.equal(ids.length, 2);
+  for (const id of ids) assert.match(id, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+  assert.notEqual(ids[0], ids[1]);
+  // What claude agents says while they run: both of them, and a session of the reader's.
+  const agents = path.join(dir, 'agents.json');
+  fs.writeFileSync(agents, JSON.stringify([
+    ...ids.map((sessionId, pid) => ({ sessionId, name: 'lorpaves-2b', cwd: os.homedir(), startedAt: 1, status: 'idle', pid, kind: 'interactive' })),
+    { sessionId: ID, name: 'venes-client', cwd: dir, startedAt: 2, status: 'busy', pid: 9, kind: 'interactive' },
+  ]));
+  fs.writeFileSync(path.join(bin, 'claude'), `#!/bin/sh\n/bin/cat ${JSON.stringify(agents)}\n`, { mode: 0o755 });
+  assert.deepEqual((await library.running()).map(session => session.id), [ID]);
 });
 
 test('capabilities are read once for a while, then again', async t => {

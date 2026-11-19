@@ -9,6 +9,10 @@ import { pathToFileURL } from 'node:url';
 import { findArtifact, readHistory, readImage } from './transcript.mjs';
 
 const SESSION_ID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+// For the e2e alone: how long a run of the helper's own is held open once it has answered, so that it's
+// there to be looked for. Nothing else sets it.
+const HOLD_MS = Number(process.env.VENES_HOLD_OWN_RUNS_MS) || 0;
+const hold = () => (HOLD_MS ? new Promise(resolve => { setTimeout(resolve, HOLD_MS); }) : undefined);
 
 class ReadError extends Error {
   constructor(code, message) {
@@ -36,20 +40,23 @@ async function* noMessages() {
 
 // What Claude Code offers in a folder, from a session that's never given anything to do. Hooks
 // are off for it, so that it doesn't look like a session to the helper, or to anything else, and
-// no MCP server gets started for the moment it lasts.
-async function capabilities({ sdk, cwd, claude }) {
+// no MCP server gets started for the moment it lasts. Claude Code lists it all the same, as every
+// process of its own, among the sessions that are running: it runs under the id the helper gave
+// it, `sessionId`, by which the helper leaves it out.
+async function capabilities({ sdk, cwd, claude, sessionId }) {
   const { query } = await sdkAt(sdk);
   const session = query({
     prompt: noMessages(),
     options: {
       cwd, pathToClaudeCodeExecutable: claude, persistSession: false, strictMcpConfig: true,
-      settingSources: ['user', 'project', 'local'], settings: { disableAllHooks: true },
+      settingSources: ['user', 'project', 'local'], settings: { disableAllHooks: true }, ...(sessionId && { sessionId }),
     },
   });
   try {
     const { commands, models } = await session.initializationResult();
     return { commands, models };
   } finally {
+    await hold();
     session.close();
   }
 }
@@ -58,13 +65,13 @@ async function capabilities({ sdk, cwd, claude }) {
 // use of one model. From a session that's never given anything to do, as `capabilities` is. The SDK
 // calls this experimental, so it's asked only where it's there, and a helper is released with the
 // version of the SDK it was tried with.
-async function usage({ sdk, claude }) {
+async function usage({ sdk, claude, sessionId }) {
   const { query } = await sdkAt(sdk);
   const session = query({
     prompt: noMessages(),
     options: {
       cwd: os.homedir(), pathToClaudeCodeExecutable: claude, persistSession: false, strictMcpConfig: true,
-      settingSources: ['user'], settings: { disableAllHooks: true },
+      settingSources: ['user'], settings: { disableAllHooks: true }, ...(sessionId && { sessionId }),
     },
   });
   try {
@@ -73,6 +80,7 @@ async function usage({ sdk, claude }) {
     if (typeof read !== 'function') return { limits: null };
     return { limits: (await read.call(session, { skipBehaviors: true }))?.rate_limits ?? null };
   } finally {
+    await hold();
     session.close();
   }
 }

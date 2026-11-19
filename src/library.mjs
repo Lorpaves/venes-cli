@@ -4,6 +4,7 @@
 // can't wait behind that.
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +18,9 @@ const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 const SDK_VERSION = '0.3.319';
 const INSTALL_TIMEOUT_MS = 180_000;
 const AGENTS_TIMEOUT_MS = 10_000;
+// How many of the helper's own runs of Claude Code are remembered, to leave them out of what's running.
+// Each lasts a few seconds, and there's one every few minutes at most.
+const OWN_RUNS_KEPT = 64;
 const READ_TIMEOUT_MS = 60_000;
 const READ_BUFFER_BYTES = 64 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 50;
@@ -30,8 +34,9 @@ const STATUS = { busy: 'running', waiting: 'waiting', idle: 'idle' };
 // A background session can still be at work with no process, and then has no `status`.
 const BACKGROUND_STATE = { working: 'running', blocked: 'waiting' };
 
-export function readRunning(stdout) {
-  return JSON.parse(stdout).filter(entry => entry.sessionId).map(entry => ({
+// What's running, but the helper's own runs of Claude Code, by the session ids it gave them: `own`.
+export function readRunning(stdout, own = new Set()) {
+  return JSON.parse(stdout).filter(entry => entry.sessionId && !own.has(entry.sessionId)).map(entry => ({
     id: entry.sessionId, title: entry.name, cwd: entry.cwd, startedAt: entry.startedAt, pid: entry.pid, kind: entry.kind,
     status: STATUS[entry.status] ?? BACKGROUND_STATE[entry.state] ?? 'idle',
   }));
@@ -123,6 +128,9 @@ export class Library {
   #installing;
   #capabilities = new Map();
   #usage;
+  // The session ids of the helper's own runs of Claude Code, the newest last. Claude Code lists every
+  // process of its own as a session that's running, these too, named for the folder they're in.
+  #ownRuns = new Set();
   // Ends an install of the SDK going on when the helper stops.
   #stopping = new AbortController();
 
@@ -172,7 +180,15 @@ export class Library {
 
   async running() {
     const { stdout } = await exec('claude', ['agents', '--json'], { timeout: AGENTS_TIMEOUT_MS, cwd: os.homedir() });
-    return readRunning(stdout);
+    return readRunning(stdout, this.#ownRuns);
+  }
+
+  // A session id for one of the helper's own runs of Claude Code, so that it's never taken for a session.
+  #ownRun() {
+    const id = randomUUID();
+    this.#ownRuns.add(id);
+    if (this.#ownRuns.size > OWN_RUNS_KEPT) this.#ownRuns.delete(this.#ownRuns.values().next().value);
+    return id;
   }
 
   async page({ limit = DEFAULT_PAGE_SIZE, offset = 0 } = {}) {
@@ -217,7 +233,7 @@ export class Library {
   async #readCapabilities(cwd) {
     const claude = findOnPath('claude');
     if (!claude) throw new HelperError('no_claude', 'Claude Code is not on the PATH.');
-    return readCapabilities(await this.#read({ op: 'capabilities', sdk: await this.prepare(), cwd, claude }));
+    return readCapabilities(await this.#read({ op: 'capabilities', sdk: await this.prepare(), cwd, claude, sessionId: this.#ownRun() }));
   }
 
   // The commands and models on offer in a folder. Pages opening together share one read.
@@ -234,7 +250,7 @@ export class Library {
   async #readLimits() {
     const claude = findOnPath('claude');
     if (!claude) return null;
-    return (await this.#read({ op: 'usage', sdk: await this.prepare(), claude })).limits ?? null;
+    return (await this.#read({ op: 'usage', sdk: await this.prepare(), claude, sessionId: this.#ownRun() })).limits ?? null;
   }
 
   // What /usage is told of the account's limits. Read once for a few minutes, with sheets and lists

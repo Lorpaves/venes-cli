@@ -202,7 +202,7 @@ async function stopCodexServer({ forget = true } = {}) {
 }
 process.on('exit', () => codexServer?.kill());
 
-function startHelper(cli = CLI, codexStart = undefined) {
+function startHelper(cli = CLI, codexStart = undefined, more = {}) {
   // Updates stay off: a test run must never touch the plugins of the Claude it borrows.
   const env = {
     ...process.env, VENES_HOME: HOME, DISABLE_UPDATES: '1', VENES_SDK_DIR: SDK_DIR, VENES_TERMINAL: inRex ? 'rex' : 'tmux',
@@ -215,6 +215,7 @@ function startHelper(cli = CLI, codexStart = undefined) {
     // Codex's own terminal is opened on a session only in the case that looks for it: it's a real one, of
     // whichever Codex this Mac has, and the other cases have no use for it.
     VENES_CODEX_TERMINAL: codexStart?.terminal ? 'on' : 'off',
+    ...more,
   };
   spawn(process.execPath, [cli, 'daemon'], { env, stdio: 'ignore', detached: true }).unref();
 }
@@ -2276,6 +2277,48 @@ T('a_running_session_ends_before_it_is_deleted', { mode: 'bypassPermissions' }, 
   assert.ok(!sessions.some(session => session.id === id), 'nor did its last hooks bring it back');
 });
 
+// Claude Code lists every process of its own among the sessions that are running, the ones the helper
+// starts itself to read the account's limits and what a folder offers too, each named for its folder.
+// Those aren't sessions, so the list leaves them out, while Claude Code's own list has them.
+// Each of the helper's own runs is held open a few seconds after it has answered, so that the list is asked
+// while it's there.
+T('the_helpers_own_runs_of_claude_code_arent_listed', { helperEnv: { VENES_HOLD_OWN_RUNS_MS: '4000' } }, async r => {
+  const { id } = await r.session();
+  const registry = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'sessions');
+  // Claude Code writes down each process of its own as it starts, and takes it away as it ends.
+  const running = () => fs.readdirSync(registry).filter(name => /^\d+\.json$/.test(name)).flatMap(name => {
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(registry, name), 'utf8'));
+      return entry.sessionId ? [entry.sessionId] : [];
+    } catch {
+      return []; // being written, or gone
+    }
+  });
+  const before = new Set([id, ...running(), ...(await r.client.request('library', { limit: 50 })).items.map(item => item.id)]);
+  const seen = new Set();
+  const listed = new Set();
+  let isLooking = true;
+  const watchClaudeCode = (async () => {
+    while (isLooking) {
+      for (const found of running()) if (!before.has(found)) seen.add(found);
+      await delay(20);
+    }
+  })();
+  // Asked of the list several at once, so that one is asked while a run lasts.
+  const watchList = Array.from({ length: 2 }, () => (async () => {
+    while (isLooking) for (const item of (await r.client.request('library', { limit: 50 })).items) if (!before.has(item.id)) listed.add(item.id);
+  })());
+  // Two of them: one in the home folder for the account's limits, and one in the session's folder for what it offers.
+  await Promise.all([r.client.request('usage', {}), r.client.request('capabilities', { sessionId: id })]);
+  // A run can outlast its reply: looked at until they've gone.
+  for (const end = Date.now() + 15000; Date.now() < end && !(seen.size >= 2 && !running().some(found => seen.has(found))); await delay(100));
+  await delay(500);
+  isLooking = false;
+  await Promise.all([watchClaudeCode, ...watchList]);
+  assert.ok(seen.size >= 2, `Claude Code wrote down the helper's runs, as it does every process of its own (${seen.size})`);
+  assert.deepEqual([...listed], [], 'and the helper left them out of the list');
+});
+
 T('a_session_running_elsewhere_is_listed_but_not_resumed', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word ELSEWHERE.');
   await r.turnEnd();
@@ -2895,7 +2938,7 @@ async function runCase(name) {
       run = new Run({ on() {} });
     } else {
       if (opts.codex) await startCodexServer();
-      startHelper(CLI, opts.codex);
+      startHelper(CLI, opts.codex, opts.helperEnv);
       client = await connect();
       run = new Run(client);
       // A Codex case's client is one that can show Codex sessions, and says so.

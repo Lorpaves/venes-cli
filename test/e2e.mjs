@@ -315,6 +315,9 @@ function launch({ mode = 'default', sources = 'project', model = MODEL, settings
     `HOME=${process.env.HOME}`, `USER=${process.env.USER}`, `PATH=${process.env.PATH}`, `VENES_HOME=${HOME}`, 'DISABLE_UPDATES=1',
     `VENES_DOWNLOADS=${DOWNLOADS}`, `VENES_AUTHORIZED_KEYS=${AUTHORIZED_KEYS}`, `VENES_CLAUDE_SETTINGS=${CLAUDE_SETTINGS}`,
     `VENES_CODEX_SOCKET=${CODEX_SOCKET}`, `VENES_REX_SERVER=${REX_SERVER}`, `VENES_TRASH=${TRASH}`, 'TERM=tmux-256color', 'LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8', ...configEnv,
+    // The shell left in the pane has this computer's own home, and what's typed into it here isn't its
+    // owner's to find in their history.
+    'HISTFILE=/dev/null',
   ];
   const claude = ['env', '-i', 'TMUX="$TMUX"', 'TMUX_PANE="$TMUX_PANE"', ...env.map(shq), shq(CLAUDE),
     '--model', model, '--permission-mode', mode, '--setting-sources', sources, ...settingsArgs(settings), '--plugin-dir', shq(PLUGIN)].join(' ');
@@ -2962,6 +2965,10 @@ async function terminalRunsCommands(r) {
   assert.deepEqual([first.stdout, first.exitCode, first.columns, first.replies], [`e2e-42\n${fs.realpathSync(WS)}`, 0, 60, false]);
   const line = r.events.find(e => e.kind === 'message.user');
   assert.deepEqual([line.text, line.clientId, line.shell], ['echo e2e-$((6*7)); pwd', 'c1', true]);
+
+  // A line being typed goes on to what was run here, and an empty one to nothing.
+  assert.equal((await r.client.request('suggest', { sessionId, text: 'echo e2e' })).suggestions[0], 'echo e2e-$((6*7)); pwd');
+  assert.deepEqual((await r.client.request('suggest', { sessionId, text: ' ' })).suggestions, []);
 
   // Its status is the folder its shell is in, with the branch checked out there once it's a repository's,
   // and what git says of the folder is the session's as any other's is.

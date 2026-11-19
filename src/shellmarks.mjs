@@ -52,6 +52,9 @@ export function shellCommand({ shellDir, mark, env = process.env, shell = shellF
     LANG: env.LANG || 'en_US.UTF-8',
     ...(env.LC_ALL && { LC_ALL: env.LC_ALL }),
     ...(env.PATH && { PATH: env.PATH }),
+    // The helper's own home, said and not left to whatever started the terminal: it's where bash looks
+    // for its startup files and keeps its history, and a shell under test has to keep to the test's.
+    ...(env.HOME && { HOME: env.HOME }),
   };
   if (shell.kind === 'zsh') {
     return {

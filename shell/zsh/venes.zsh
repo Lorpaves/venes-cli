@@ -36,5 +36,9 @@ _venes_order() {
   preexec_functions=(${preexec_functions:#_venes_preexec} _venes_preexec)
 }
 _venes_order
+# The shell says who it is, and where it keeps its history, which a line typed from afar is finished from.
 _venes_enc "$TTY"
-_venes_say "S;$$;$REPLY;zsh"
+_venes_said=$REPLY
+_venes_enc "$HISTFILE"
+_venes_say "S;$$;$_venes_said;zsh;$REPLY"
+unset _venes_said

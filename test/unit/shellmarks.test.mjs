@@ -23,14 +23,16 @@ test('zsh reads the helper\'s files ahead of the reader\'s, and bash one file in
   const zsh = shellCommand({ shellDir: '/v/shell', mark: 'abc', env: { HOME: '/Users/me', PATH: '/bin', LANG: 'zh_CN.UTF-8' }, shell: { file: '/bin/zsh', kind: 'zsh' } });
   assert.deepEqual(zsh.command, ['/bin/zsh', '-l', '-i']);
   assert.deepEqual(zsh.env, {
-    VENES_TERMINAL_MARK: 'abc', LANG: 'zh_CN.UTF-8', PATH: '/bin', ZDOTDIR: '/v/shell/zsh', VENES_USER_ZDOTDIR: '/Users/me', DISABLE_AUTO_UPDATE: 'true',
+    VENES_TERMINAL_MARK: 'abc', LANG: 'zh_CN.UTF-8', PATH: '/bin', HOME: '/Users/me', ZDOTDIR: '/v/shell/zsh', VENES_USER_ZDOTDIR: '/Users/me', DISABLE_AUTO_UPDATE: 'true',
   });
   // A reader who keeps their zsh files elsewhere has them read from there, and a helper with no language set says one.
   const moved = shellCommand({ shellDir: '/v/shell', mark: 'abc', env: { HOME: '/Users/me', ZDOTDIR: '/Users/me/.config/zsh', LC_ALL: 'C' }, shell: { file: '/bin/zsh', kind: 'zsh' } });
   assert.deepEqual([moved.env.VENES_USER_ZDOTDIR, moved.env.LANG, moved.env.LC_ALL, moved.env.PATH], ['/Users/me/.config/zsh', 'en_US.UTF-8', 'C', undefined]);
   const bash = shellCommand({ shellDir: '/v/shell', mark: 'abc', env: { HOME: '/home/me' }, shell: { file: '/usr/bin/bash', kind: 'bash' } });
   assert.deepEqual(bash.command, ['/usr/bin/bash', '--rcfile', '/v/shell/bash/bashrc', '-i']);
-  assert.deepEqual(bash.env, { VENES_TERMINAL_MARK: 'abc', LANG: 'en_US.UTF-8' });
+  // The helper's home is said, which is where bash looks for its files and keeps its history.
+  assert.deepEqual(bash.env, { VENES_TERMINAL_MARK: 'abc', LANG: 'en_US.UTF-8', HOME: '/home/me' });
+  assert.equal('HOME' in shellCommand({ shellDir: '/v/shell', mark: 'abc', env: {}, shell: { file: '/usr/bin/bash', kind: 'bash' } }).env, false);
 });
 
 test('the files a shell reads are written where it looks, under the names it looks for', t => {

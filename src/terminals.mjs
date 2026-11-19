@@ -21,6 +21,7 @@ import { promisify } from 'node:util';
 import { HelperError } from './errors.mjs';
 import { checkedFolder } from './folders.mjs';
 import { computer } from './platform.mjs';
+import { SUGGESTIONS, SUGGESTIONS_MOST, ShellHistory, TEXT_MOST, pathSuggestions, suggestionsFrom, usualHistoryFile } from './shellhistory.mjs';
 import { hidesInput, installShellFiles, recorded, settingsCommand, shellCommand, shellFor, sizeCommand } from './shellmarks.mjs';
 import { checkedOutBranch } from './status.mjs';
 import { TerminalEngine } from './termengine.mjs';
@@ -137,6 +138,8 @@ export class Terminals {
   #kill;
   #shell;
   #branch;
+  // The shells' history files, as last read.
+  #history = new ShellHistory();
   #limits;
   #sessions = new Map();
   // Whether every session kept on this computer has been read. One made after that is made here.
@@ -542,7 +545,7 @@ export class Terminals {
 
   #onEvent(t, event) {
     if (event.type === 'shell') {
-      t.shell = { pid: event.pid, tty: event.tty, name: event.name };
+      t.shell = { pid: event.pid, tty: event.tty, name: event.name, ...(event.history && { history: event.history }) };
       if (t.isReplaying) return;
       this.#save(t);
       // The terminal it started in may be another size than the page it's read on.
@@ -902,6 +905,27 @@ export class Terminals {
 
   async setMode() {
     throw new HelperError('terminal_session', 'A terminal session has no modes.');
+  }
+
+  // What a line being typed in the session's field could go on to be, best first, as a shell that
+  // suggests as you type offers it: a command run in this session, the newest first, then one from the
+  // shell's own history file, then the line with its last word finished as a path from where the shell is.
+  // Each starts as the line does and has more to it. Nothing for an empty line, or one of several lines.
+  async suggest({ sessionId, text, limit }) {
+    const t = this.#get(sessionId);
+    const typed = typeof text === 'string' ? text : '';
+    if (!typed.trim() || typed.length > TEXT_MOST || typed.includes('\n')) return { suggestions: [] };
+    const most = Number.isInteger(limit) && limit > 0 ? Math.min(limit, SUGGESTIONS_MOST) : SUGGESTIONS;
+    const own = this.#records(t).filter(item => item.role === 'user' && !item.input && typeof item.text === 'string').map(item => item.text).reverse();
+    const home = this.#env.HOME || os.homedir();
+    const shell = t.shell?.name === 'bash' ? 'bash' : 'zsh';
+    // A shell whose hooks are from before it said where its history is has it where its kind usually does.
+    const kept = this.#history.commands(t.shell?.history || usualHistoryFile(shell, home), shell);
+    const found = suggestionsFrom([own, kept], typed, most);
+    for (const line of found.length < most ? pathSuggestions(typed, { cwd: t.cwd, home, limit: most }) : []) {
+      if (found.length < most && !found.includes(line)) found.push(line);
+    }
+    return { suggestions: found };
   }
 
   // What a status sheet shows of it, as a shell's own prompt would: the folder the shell is in, and the

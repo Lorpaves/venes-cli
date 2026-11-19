@@ -57,5 +57,9 @@ if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
 else
   PROMPT_COMMAND="_venes_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}; $_venes_last"
 fi
+# The shell says who it is, and where it keeps its history, which a line typed from afar is finished from.
 _venes_enc "$_venes_tty"
-_venes_say "S;$$;$REPLY;bash"
+_venes_said=$REPLY
+_venes_enc "$HISTFILE"
+_venes_say "S;$$;$_venes_said;bash;$REPLY"
+unset _venes_said

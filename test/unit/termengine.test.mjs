@@ -133,6 +133,18 @@ test('marks that aren\'t this session\'s count for nothing, and aren\'t shown', 
   assert.equal(events.filter(event => event.type === 'prompt').length, 2);
 });
 
+test('the shell says who it is, and where it keeps its history when its hooks say that', async () => {
+  const { events, feed } = engineWith();
+  await feed(mark('S', 4242, encodeURIComponent('/dev/ttys004'), 'zsh'));
+  await feed(mark('S', 4243, encodeURIComponent('/dev/ttys005'), 'zsh', '%2FUsers%2Fme%2F.zsh_history'));
+  await feed(mark('S', 4244, encodeURIComponent('/dev/ttys006'), 'bash', ''));
+  assert.deepEqual(events.filter(event => event.type === 'shell'), [
+    { type: 'shell', pid: 4242, tty: '/dev/ttys004', name: 'zsh' },
+    { type: 'shell', pid: 4243, tty: '/dev/ttys005', name: 'zsh', history: '/Users/me/.zsh_history' },
+    { type: 'shell', pid: 4244, tty: '/dev/ttys006', name: 'bash' },
+  ]);
+});
+
 test('a program says when it isn\'t at work, and each command starts at work', async () => {
   const { events, feed } = engineWith();
   await feed(`${done(0)}${typed(1, 'agy')}\u001b]7501;state=idle:app=agy\u001b\\`);

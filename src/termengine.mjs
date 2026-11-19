@@ -162,8 +162,9 @@ export class TerminalEngine {
     const [nonce, kind, ...fields] = data.split(';');
     if (nonce !== this.#nonce) return true;
     if (kind === 'S') {
-      const [pid, tty, name] = fields;
-      this.#emit({ type: 'shell', pid: Number(pid), tty: decoded(tty ?? ''), name });
+      // Then where it keeps its history, from a shell whose hooks say (0.34.0).
+      const [pid, tty, name, ...history] = fields;
+      this.#emit({ type: 'shell', pid: Number(pid), tty: decoded(tty ?? ''), name, ...(history.length && history[0] && { history: decoded(history.join(';')) }) });
     } else if (kind === 'C') {
       const [seq, ...command] = fields;
       this.#begin(Number(seq), decoded(command.join(';')));

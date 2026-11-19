@@ -370,6 +370,23 @@ test('its status is the folder its shell is in, with the branch checked out ther
   await assert.rejects(terminals.status({ sessionId: 'nobody' }), error => error.code !== undefined);
 });
 
+test('a line being typed goes on to a command run here, then one the shell kept, then a path', real, async t => {
+  const { home, terminals, printed } = setup(t);
+  fs.writeFileSync(path.join(home, isBash ? '.bash_history' : '.zsh_history'), isBash ? 'echo kept-one\ngit status\n' : ': 1:0;echo kept-one\n: 2:0;git status\n');
+  const work = path.join(home, 'work');
+  fs.mkdirSync(path.join(work, 'sources'), { recursive: true });
+  const { sessionId } = await terminals.start({ cwd: work });
+  await terminals.send({ sessionId, text: 'echo run-here', clientId: 'c1' });
+  await until(() => printed('c1')?.running === false, 'the command ended');
+  const suggested = async (text, limit) => (await terminals.suggest({ sessionId, text, limit })).suggestions;
+  assert.deepEqual(await suggested('echo'), ['echo run-here', 'echo kept-one']);
+  assert.deepEqual(await suggested('echo', 1), ['echo run-here']);
+  assert.deepEqual(await suggested('git s'), ['git status']);
+  assert.deepEqual(await suggested('ls so'), ['ls sources/']);
+  for (const none of ['', '   ', 'echo a\nb', 'zzz', undefined]) assert.deepEqual(await suggested(none), [], String(none));
+  await assert.rejects(terminals.suggest({ sessionId: 'nobody', text: 'e' }), error => error.code !== undefined);
+});
+
 test('a terminal session takes no files, and has no model or modes', real, async t => {
   const { terminals } = setup(t);
   const { sessionId } = await terminals.start({ cwd: os.tmpdir() });

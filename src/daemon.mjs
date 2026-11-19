@@ -987,6 +987,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       if (!other?.key) throw new HelperError('no_keys', 'This session takes no keys.');
       return other.key(msg);
     },
+    // What the line being typed in a terminal session's field could go on to be: see Terminals.suggest.
+    // A session of any other kind has nothing to suggest.
+    suggest: async msg => {
+      const other = await otherOf(msg.sessionId);
+      return other?.suggest ? other.suggest(msg) : { suggestions: [] };
+    },
     cancel: msg => {
       const taken = store.takeHeld(store.get(msg.sessionId), msg.clientId);
       // Its files go back in the composer, to go with another message or be taken out.

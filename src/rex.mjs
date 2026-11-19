@@ -22,7 +22,7 @@ const SCREEN_READS = 16;
 const BLOB_READ_BYTES = 960 * 1024;
 const KEYS = {
   Enter: 'enter', Escape: 'escape', Up: 'up', Down: 'down', Left: 'left', Right: 'right', 'M-p': 'alt+p', Tab: 'tab', BTab: 'shift+tab',
-  Space: 'space', BSpace: 'backspace', 'C-k': 'ctrl+k', 'C-u': 'ctrl+u',
+  Space: 'space', BSpace: 'backspace', 'C-k': 'ctrl+k', 'C-u': 'ctrl+u', 'C-c': 'ctrl+c', 'C-d': 'ctrl+d', 'C-z': 'ctrl+z', 'C-l': 'ctrl+l',
 };
 const PROGRAM_NAME = 'claude';
 // Sessions the helper starts share this one, a window each, because Rex keeps a session in its
@@ -167,6 +167,11 @@ export async function startSession({ name, cwd, command, env }) {
   const pane = JSON.parse(output).block_ids?.[0];
   if (!pane) throw new HelperError('resume_failed', 'Rex didn\'t start a terminal for this session.');
   return { pane, rexSession };
+}
+
+// Closes the block of a window started with `startSession`, and whatever still runs in it.
+export async function closeSession(_, target) {
+  await rex(target, ['--autostart=false', 'block', 'close', ...blockTarget(target)]);
 }
 
 export async function isSessionOpen(_, target) {

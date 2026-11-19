@@ -51,6 +51,10 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     pricesFile: path.join(home, 'prices.json'),
     // The phones to notify while they aren't connected, each with its device token and key.
     pushFile: path.join(home, 'push.json'),
+    // Terminal sessions, each with what its shell has written and what was run in it.
+    terminals: path.join(home, 'terminals'),
+    // The startup files a terminal session's shell reads, ahead of the reader's own.
+    shellDir: path.join(home, 'shell'),
     // The plugin Antigravity runs the helper's hooks from.
     antigravityPlugin: pluginFolder(process.env, os.homedir()),
     // Claude Code's own settings, where the status line is set up.

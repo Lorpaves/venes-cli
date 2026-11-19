@@ -298,6 +298,9 @@ export function resumeTerminal(env = process.env) {
     foreground: session => backendOf(session).foreground(session),
     findSession: backend.findSession,
     processOf: session => backendOf(session).processOf(session),
+    // Rex sizes a block to the window it's shown in, so only tmux's can be told a size.
+    resize: (session, size) => backendOf(session).resize?.(session, size),
+    closeSession: (name, session) => backendOf(session).closeSession(name, session),
     sendText,
   };
 }

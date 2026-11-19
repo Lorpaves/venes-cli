@@ -1,0 +1,7 @@
+# Venes: read by a terminal session's shell in place of the reader's own .zprofile, which it reads first.
+# See src/shellmarks.mjs.
+VENES_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=${VENES_USER_ZDOTDIR:-$HOME}
+[[ -r $ZDOTDIR/.zprofile ]] && source $ZDOTDIR/.zprofile
+VENES_USER_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=$VENES_ZDOTDIR

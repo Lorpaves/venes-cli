@@ -1,0 +1,12 @@
+# Venes: read by a terminal session's shell in place of the reader's own .zlogin, which it reads first.
+# See src/shellmarks.mjs.
+VENES_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=${VENES_USER_ZDOTDIR:-$HOME}
+[[ -r $ZDOTDIR/.zlogin ]] && source $ZDOTDIR/.zlogin
+VENES_USER_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=$VENES_ZDOTDIR
+# Last of all: the hooks take their places again after anything this added, and the folder is the reader's
+# own from here on, for every shell started from this one.
+(( $+functions[_venes_order] )) && _venes_order
+if [[ $VENES_USER_ZDOTDIR == $HOME ]]; then unset ZDOTDIR; else ZDOTDIR=$VENES_USER_ZDOTDIR; fi
+unset VENES_USER_ZDOTDIR VENES_ZDOTDIR

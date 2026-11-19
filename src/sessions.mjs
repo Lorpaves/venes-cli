@@ -246,8 +246,9 @@ export class SessionStore extends EventEmitter {
 
   // Whether the helper could restart now without losing anything in progress. Restarting
   // forgets held messages, and turns an open request back into a terminal-only prompt.
+  // A terminal session's shell goes on without the helper, which reads what it missed when it's back.
   isQuiet(now = Date.now()) {
-    return this.liveSessions().every(s => now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s) && !this.pendingFor(s).length));
+    return this.liveSessions().every(s => s.outlivesHelper || now - s.lastEventAt > STALE_SESSION_MS || (!this.isBusy(s) && !this.pendingFor(s).length));
   }
 
   get(idOrPrefix) {
@@ -285,13 +286,15 @@ export class SessionStore extends EventEmitter {
   }
 
   // An event for such a session, after `fields` change what's known of it. A status, a model and an
-  // end go the way a hook's would, so that each is said once and does all it should.
-  report(id, kind, data = {}, fields = undefined) {
+  // end go the way a hook's would, so that each is said once and does all it should. `supersedes`
+  // takes out earlier events this one makes stale, as a command's output so far is by its output since.
+  report(id, kind, data = {}, fields = undefined, { supersedes = undefined } = {}) {
     const s = this.#sessions.get(id);
     if (!s) return;
     Object.assign(s, fields);
     s.lastEventAt = Date.now();
-    if (kind === 'session.status') this.#setStatus(s, data.status);
+    if (supersedes) this.#log = this.#log.filter(e => e.sessionId !== id || !supersedes(e));
+    if (kind === 'session.status') this.#setStatus(s, data.status, data.working);
     else if (kind === 'session.model') this.#setModel(s, data.model);
     else if (kind === 'session.ended') { if (s.status !== 'ended') this.#endSession(s, data.reason); }
     else this.#emit(s, kind, data);
@@ -996,13 +999,22 @@ export class SessionStore extends EventEmitter {
     request.finish(output);
   }
 
-  #setStatus(s, status) {
+  // A terminal session's program can be running and say it isn't at work, as one waiting for the
+  // reader's next line does: that's `working: false`, and it's said again when it changes.
+  #setStatus(s, status, working = undefined) {
     if (status === 'idle' || status === 'ended') this.#stopCompacting(s); // whatever became of it, the turn is over
+    const isAtRest = status === 'running' && working === false;
+    if (s.status === status && Boolean(s.isAtRest) !== isAtRest) {
+      s.isAtRest = isAtRest;
+      this.#emit(s, 'session.status', { status, ...(isAtRest && { working: false }) });
+      return;
+    }
+    s.isAtRest = isAtRest;
     if (s.status === status) return;
     // A turn begins, with nothing of Claude's in it yet.
     if (isAtWork(status) && !isAtWork(s.status)) Object.assign(s, { turns: (s.turns ?? 0) + 1, replied: false, turnStartedAt: Date.now() });
     s.status = status;
-    this.#emit(s, 'session.status', { status });
+    this.#emit(s, 'session.status', { status, ...(isAtRest && { working: false }) });
   }
 
   #emit(s, kind, data) {
@@ -1022,6 +1034,7 @@ export class SessionStore extends EventEmitter {
       // Always there, so that a client that joins again takes away what it showed before.
       changes: s.changes ?? null,
       ...(s.agent && { agent: s.agent }),
+      ...(s.isAtRest && { working: false }),
     };
   }
 

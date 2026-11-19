@@ -67,10 +67,10 @@ export const noTerminal = () => new HelperError('no_tmux', process.platform === 
   : `Install tmux or Rex on your ${computer} to continue this session.`);
 
 // Runs a command in a new detached session and returns its pane. The session closes with it.
-export async function startSession({ name, cwd, command, env }) {
+export async function startSession({ name, cwd, command, env, size: { columns = NEW_SESSION_COLUMNS, rows = NEW_SESSION_ROWS } = {} }) {
   const tmuxSocket = env.VENES_TMUX_SOCKET;
   const variables = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
-  const size = ['-x', String(NEW_SESSION_COLUMNS), '-y', String(NEW_SESSION_ROWS)];
+  const size = ['-x', String(columns), '-y', String(rows)];
   try {
     const output = await tmux(tmuxSocket, ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', name, ...size, '-c', cwd, ...variables, '--', ...command]);
     return { pane: output.trim(), tmuxSocket };
@@ -78,6 +78,17 @@ export async function startSession({ name, cwd, command, env }) {
     if (error.code === 'ENOENT') throw noTerminal();
     throw error;
   }
+}
+
+// The size of a pane's window, for one nobody has open at the computer: a client attached to it there
+// sizes it to its own window.
+export async function resize({ pane, tmuxSocket }, { columns, rows }) {
+  await tmux(tmuxSocket, ['resize-window', '-t', pane, '-x', String(columns), '-y', String(rows)]);
+}
+
+// Closes a session started with `startSession`, and whatever still runs in it.
+export async function closeSession(name, { tmuxSocket }) {
+  await tmux(tmuxSocket, ['kill-session', '-t', `=${name}`]);
 }
 
 export async function isSessionOpen(name, { tmuxSocket }) {

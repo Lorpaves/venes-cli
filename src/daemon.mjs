@@ -47,6 +47,7 @@ import { Prices } from './prices.mjs';
 import { UsageBook, usageReply } from './usage.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
 import { findClaudePanes } from './tmux.mjs';
+import { AGENT as TERMINAL, Terminals } from './terminals.mjs';
 import { startAutoUpdate } from './update.mjs';
 import { VERSION, isNewer } from './version.mjs';
 import { computer, isWindows } from './platform.mjs';
@@ -185,9 +186,10 @@ async function reofferPromptRows(store, request) {
   if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined, usage = undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined, usage = undefined, terminals = undefined) {
   // The agents other than Claude Code, each with sessions of its own that it runs through its own server.
-  const others = [codex, antigravity].filter(Boolean);
+  // A terminal session has no agent in it, and is kept the same way: a shell the helper runs and reads itself.
+  const others = [codex, antigravity, terminals].filter(Boolean);
   const named = agent => others.find(other => other.name === agent);
   // Event numbering restarts with the helper, so a client's `since` only means
   // something within the same boot.
@@ -663,6 +665,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
         // A client offers Codex for a new session only where there is one.
         ...(codex?.isAvailable() && { codex: true }),
         ...(antigravity?.isAvailable() && { antigravity: true }),
+        ...(terminals?.isAvailable() && { terminal: true }),
       };
     },
     // A new folder where the reader is looking, for a session to start in.
@@ -882,6 +885,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // newest there is, and whether it can be updated from here.
     cli: async ({ sessionId }) => {
       const agent = await cliAgentOf(sessionId);
+      // A terminal session runs a shell, which has no version to be behind and nothing to update.
+      if (agent.key === TERMINAL) {
+        return {
+          agent: TERMINAL, running: null, installed: null, latest: null, install: 'unknown', update: 'none', working: false,
+          restart: restarts.get(sessionId) ?? null, ...(restartErrors.has(sessionId) && { restartError: restartErrors.get(sessionId) }),
+          closable: await closableOf(agent, sessionId), close: closes.get(sessionId) ?? null, ...(closeErrors.has(sessionId) && { closeError: closeErrors.get(sessionId) }),
+        };
+      }
       const busy = agent.key === 'codex' ? await agent.other.isBusy(sessionId) : false;
       const report = await agentCli.report(agent.key, { running: await runningOf(agent, sessionId), busy });
       // At work: this session is, so a restart waits for it; for Codex, any session on its daemon is, so a
@@ -896,6 +907,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // session onto it: at once when it isn't at work, or once it isn't.
     cliUpdate: async ({ sessionId }) => {
       const agent = await cliAgentOf(sessionId);
+      if (agent.key === TERMINAL) throw new HelperError('terminal_session', 'A terminal session has nothing to update.');
       const busy = agent.key === 'codex' ? await agent.other.isBusy(sessionId) : false;
       const was = await runningOf(agent, sessionId);
       return agentCli.update(agent.key, {
@@ -963,6 +975,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       await typing(session.id, () => closePage(session));
       return {};
     }),
+    // A key for the program a terminal session is running, which takes more than lines: Esc, Tab, the arrows.
+    key: async msg => {
+      const other = await otherOf(msg.sessionId);
+      if (!other?.key) throw new HelperError('no_keys', 'This session takes no keys.');
+      return other.key(msg);
+    },
     cancel: msg => {
       const taken = store.takeHeld(store.get(msg.sessionId), msg.clientId);
       // Its files go back in the composer, to go with another message or be taken out.
@@ -1096,7 +1114,10 @@ export async function startDaemon(paths) {
   const hookServer = createHookServer(store, antigravity);
   // What the agents have used, counted from their own chats and costed by a public list of prices.
   const usage = new UsageBook({ file: paths.usageFile, pricesFile: paths.pricesFile, prices: new Prices({ file: paths.pricesFile }) });
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity, usage);
+  // Terminal sessions: the ones whose shells went on while the helper didn't are followed again.
+  const terminals = new Terminals({ store, root: paths.terminals, shellDir: paths.shellDir, terminal: resumeTerminal() });
+  await terminals.restore().catch(error => console.error(`terminals: ${error.stack}`));
+  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity, usage, terminals);
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -1112,6 +1133,7 @@ export async function startDaemon(paths) {
       transcripts.stop();
       codex.stop();
       antigravity.stop();
+      terminals.stop();
       updater.stop();
       clearInterval(heldTimer);
       for (const socket of subscribers) socket.destroy();

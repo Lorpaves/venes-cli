@@ -2922,6 +2922,160 @@ Run.prototype.waitForPane = async function waitForPane(re, ms) {
   throw new Error(`pane never matched ${re}:\n${this.pane()}`);
 };
 
+// --- Terminal sessions: a shell the helper runs itself, with no agent in it ---
+//
+// The shell is zsh with nobody's setup, so that what a command prints is all there is, and nothing a
+// case types lands in the history of whoever runs this.
+const SHELL_HOME = `${HOME}-zsh`;
+const TERMINAL = { noClaude: true, helperEnv: { SHELL: '/bin/zsh', ZDOTDIR: SHELL_HOME } };
+const printed = (r, clientId) => r.events.findLast(e => e.kind === 'message.output' && e.clientId === clientId);
+const printedAll = (r, clientId, ms = 20000) => r.wait(e => e.kind === 'message.output' && e.clientId === clientId && e.running === false, ms, `the end of ${clientId}`);
+const untilPrinted = async (r, clientId, text, ms = 20000) => {
+  for (const end = Date.now() + ms; printed(r, clientId)?.stdout !== text; await delay(60)) {
+    if (Date.now() > end) throw new Error(`${clientId} never printed ${JSON.stringify(text)}: ${JSON.stringify(printed(r, clientId)?.stdout)}`);
+  }
+};
+const untilStatus = (r, sessionId, status, ms = 20000) => r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === status, ms, `status ${status}`);
+
+async function startTerminal(r, size = { columns: 60, rows: 20 }) {
+  fs.mkdirSync(SHELL_HOME, { recursive: true });
+  const { sessionId } = await r.client.request('start', { agent: 'terminal', cwd: WS, ...size });
+  // Whatever became of the case and of its own connection, the shell goes.
+  r.after(async () => {
+    const client = await HelperClient.connect(paths.clientSocket).catch(() => undefined);
+    if (!client) return;
+    await Promise.race([client.request('delete', { sessionId }).catch(() => {}), delay(8000)]);
+    client.close();
+  });
+  return sessionId;
+}
+
+async function terminalRunsCommands(r) {
+  assert.equal((await r.client.request('folders', {})).terminal, true);
+  const sessionId = await startTerminal(r);
+  const { sessions } = await r.client.request('sessions');
+  assert.deepEqual(sessions.map(s => [s.id, s.agent, s.status]), [[sessionId, 'terminal', 'idle']]);
+
+  const sent = await r.client.request('send', { sessionId, text: 'echo e2e-$((6*7)); pwd', clientId: 'c1' });
+  assert.deepEqual(sent.queued, false);
+  const first = await printedAll(r, 'c1');
+  assert.deepEqual([first.stdout, first.exitCode, first.columns, first.replies], [`e2e-42\n${fs.realpathSync(WS)}`, 0, 60, false]);
+  const line = r.events.find(e => e.kind === 'message.user');
+  assert.deepEqual([line.text, line.clientId, line.shell], ['echo e2e-$((6*7)); pwd', 'c1', true]);
+
+  // Where the shell goes, the session goes, and a failure is said with nothing printed.
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'cd /usr && false', clientId: 'c2' });
+  const failed = await printedAll(r, 'c2');
+  assert.deepEqual([failed.stdout, failed.exitCode], ['', 1]);
+  assert.equal((await r.wait(e => e.kind === 'session.cwd', 5000, 'the folder')).cwd, '/usr');
+  assert.equal((await r.session()).cwd, '/usr');
+
+  // As wide as the page that sends: columns are the terminal's, and a table is laid out for them.
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'tput cols; printf "\\033[31mred\\033[0m\\n"', clientId: 'c3', columns: 47, rows: 30 });
+  const sized = await printedAll(r, 'c3');
+  assert.deepEqual([sized.stdout, sized.columns], ['47\n\u001b[0;31mred\u001b[0m', 47]);
+
+  const joined = await r.client.request('join', { sessionId, limit: 50 });
+  assert.deepEqual(joined.items.map(item => [item.role, item.clientId]), [['user', 'c1'], ['output', 'c1'], ['user', 'c2'], ['output', 'c2'], ['user', 'c3'], ['output', 'c3']]);
+  assert.deepEqual(joined.sessions.map(s => [s.agent, s.status]), [['terminal', 'idle']]);
+  const capabilities = await r.client.request('capabilities', { sessionId });
+  assert.deepEqual([capabilities.commands, capabilities.models, capabilities.skills], [[], [], []]);
+  const cli = await r.client.request('cli', { sessionId });
+  assert.deepEqual([cli.agent, cli.closable, cli.update], ['terminal', true, 'none']);
+
+  // A client that hasn't said it shows terminal sessions isn't told of one.
+  const other = await HelperClient.connect(paths.clientSocket);
+  r.after(() => other.close());
+  assert.deepEqual((await other.request('sessions')).sessions, []);
+}
+T('terminal_runs_commands', TERMINAL, terminalRunsCommands);
+T('in_rex_terminal_runs_commands', { ...TERMINAL, rex: true }, terminalRunsCommands);
+
+async function terminalTakesLinesAndKeys(r) {
+  const sessionId = await startTerminal(r, { columns: 40, rows: 10 });
+  await r.client.request('send', { sessionId, text: 'echo first; cat', clientId: 'c1' });
+  await untilPrinted(r, 'c1', 'first');
+  assert.equal(printed(r, 'c1').running, true);
+  assert.equal((await r.session()).status, 'running');
+
+  // A line for the program, which says it back.
+  await r.client.request('send', { sessionId, text: 'hello', clientId: 'c2' });
+  await untilPrinted(r, 'c2', 'hello\nhello');
+  const typed = r.events.findLast(e => e.kind === 'message.user');
+  assert.deepEqual([typed.text, typed.clientId, typed.input], ['hello', 'c2', true]);
+  assert.deepEqual([printed(r, 'c1').stdout, printed(r, 'c1').running], ['first', false]);
+
+  // Keys reach it too: Ctrl-D ends it.
+  await r.client.request('key', { sessionId, key: 'C-d' });
+  await untilStatus(r, sessionId, 'idle');
+  assert.deepEqual([printed(r, 'c2').running, printed(r, 'c2').exitCode], [false, 0]);
+  await assert.rejects(r.client.request('key', { sessionId, key: 'F13' }), /isn't a key/);
+
+  // A program with the screen to itself shows its screen, and what it leaves once it gives it back.
+  r.mark();
+  await r.client.request('send', { sessionId, text: `printf '\\e[?1049h\\e[HTOP\\e[10;1H\\e[7mBAR\\e[0m'; read -k1 key; printf '\\e[?1049l'; echo left`, clientId: 'c3' });
+  const screen = await r.wait(e => e.kind === 'message.output' && e.clientId === 'c3' && e.screen, 20000, 'the screen');
+  assert.deepEqual([screen.stdout, screen.rows, screen.running], [`TOP${'\n'.repeat(9)}\u001b[0;7mBAR\u001b[0m`, 10, true]);
+  await r.client.request('key', { sessionId, key: 'Enter' });
+  assert.equal((await printedAll(r, 'c3')).stdout, 'left');
+
+  // And one that won't end is stopped.
+  r.mark();
+  await r.client.request('send', { sessionId, text: 'sleep 60', clientId: 'c4' });
+  await untilStatus(r, sessionId, 'running');
+  await r.client.request('interrupt', { sessionId });
+  assert.equal((await printedAll(r, 'c4')).exitCode, 130);
+}
+T('terminal_takes_lines_and_keys', TERMINAL, terminalTakesLinesAndKeys);
+T('in_rex_terminal_takes_lines_and_keys', { ...TERMINAL, rex: true }, terminalTakesLinesAndKeys);
+
+async function terminalComesBack(r) {
+  const sessionId = await startTerminal(r);
+  await r.client.request('send', { sessionId, text: 'echo before', clientId: 'c1' });
+  await printedAll(r, 'c1');
+  await r.client.request('send', { sessionId, text: 'echo going; cat', clientId: 'c2' });
+  await untilPrinted(r, 'c2', 'going');
+  await r.client.request('send', { sessionId, text: 'kept', clientId: 'c3' });
+  await untilPrinted(r, 'c3', 'kept\nkept');
+
+  // The helper goes, and the shell goes on.
+  r.client.close();
+  await stopHelper();
+  startHelper(CLI, undefined, TERMINAL.helperEnv);
+  const client = await connect();
+  r.after(() => client.close());
+  const again = new Run(client);
+  await client.request('subscribe', { agents: ['terminal'] });
+  const joined = await client.request('join', { sessionId });
+  assert.deepEqual(joined.sessions.map(s => [s.agent, s.status]), [['terminal', 'running']]);
+  assert.deepEqual(joined.items.map(item => [item.role, item.clientId, item.stdout ?? item.text, ...(item.running ? ['running'] : [])]), [
+    ['user', 'c1', 'echo before'], ['output', 'c1', 'before'], ['user', 'c2', 'echo going; cat'], ['output', 'c2', 'going'],
+    ['user', 'c3', 'kept'], ['output', 'c3', 'kept\nkept', 'running'],
+  ]);
+  await client.request('send', { sessionId, text: 'more', clientId: 'c4' });
+  await untilPrinted(again, 'c4', 'more\nmore');
+  await client.request('key', { sessionId, key: 'C-d' });
+  await untilStatus(again, sessionId, 'idle');
+
+  // Closed, it's still listed, with what was run in it, and a message opens it again.
+  assert.equal((await client.request('close', { sessionId })).close, 'now');
+  await again.wait(e => e.kind === 'session.ended' && e.sessionId === sessionId, 15000, 'the session ended');
+  const library = await client.request('library', {});
+  assert.deepEqual(library.items.filter(item => item.agent === 'terminal').map(item => [item.id, item.status]), [[sessionId, null]]);
+  again.mark();
+  await client.request('send', { sessionId, text: 'echo back', clientId: 'c5' });
+  assert.equal((await printedAll(again, 'c5')).stdout, 'back');
+  assert.deepEqual((await client.request('join', { sessionId })).items.map(item => item.clientId), ['c1', 'c1', 'c2', 'c2', 'c3', 'c3', 'c4', 'c4', 'c5', 'c5']);
+
+  await client.request('delete', { sessionId });
+  await again.wait(e => e.kind === 'session.deleted' && e.sessionId === sessionId, 5000, 'the session deleted');
+  assert.equal(fs.existsSync(path.join(HOME, 'terminals', sessionId)), false);
+}
+T('terminal_comes_back_after_a_restart', TERMINAL, terminalComesBack);
+T('in_rex_terminal_comes_back_after_a_restart', { ...TERMINAL, rex: true }, terminalComesBack);
+
 async function runCase(name) {
   const { opts, fn } = cases[name];
   for (const f of fs.readdirSync(WS)) if (f.startsWith('e2e-')) fs.rmSync(path.join(WS, f));
@@ -2942,12 +3096,14 @@ async function runCase(name) {
       client = await connect();
       run = new Run(client);
       // A Codex case's client is one that can show Codex sessions, and says so.
-      await client.request('subscribe', opts.codex ? { agents: ['codex'] } : {});
+      // And a terminal case's is one that can show terminal sessions.
+      await client.request('subscribe', opts.codex ? { agents: ['codex'] } : opts.noClaude ? { agents: ['terminal'] } : {});
     }
-    // A Codex case has no Claude Code session to wait for.
-    if (opts.rex) launchInRex(opts);
-    else if (!opts.codex) launch(opts);
-    if (!opts.codex) await ready(run);
+    // A Codex case has no Claude Code session to wait for, and nor has a terminal's.
+    const hasClaude = !opts.codex && !opts.noClaude;
+    if (opts.rex && hasClaude) launchInRex(opts);
+    else if (hasClaude) launch(opts);
+    if (hasClaude) await ready(run);
     await fn(run);
     console.log(`ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
     return true;

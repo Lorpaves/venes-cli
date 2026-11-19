@@ -1,0 +1,11 @@
+# Venes: read by a terminal session's shell in place of the reader's own .zshrc, which it reads first.
+# See src/shellmarks.mjs.
+# macOS's /etc/zshrc names the history file after ZDOTDIR, which is the helper's by then, and a command
+# typed from the phone belongs in the reader's own history.
+HISTFILE=${VENES_USER_ZDOTDIR:-$HOME}/.zsh_history
+VENES_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=${VENES_USER_ZDOTDIR:-$HOME}
+[[ -r $ZDOTDIR/.zshrc ]] && source $ZDOTDIR/.zshrc
+VENES_USER_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=$VENES_ZDOTDIR
+source "$ZDOTDIR/venes.zsh"

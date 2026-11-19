@@ -76,6 +76,7 @@ Over SSH, the code holds this Mac's name, address and host key, and a one-time k
 - **It stands in as your status line.** A plugin can't set Claude Code's status line, and what Claude Code tells a status line is the only place a session's limits are, so the helper sets `statusLine` in `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) to `~/.venes/venes statusline`. That keeps what Claude Code sends in `~/.venes/status`, a file a session for a week, and runs the status line you had with the same input, so your terminal shows what it did. The one you had is kept in `~/.venes/statusline.json`. With none before, it shows nothing, and Claude Code then leaves out the key hints it shows under the box when there's no status line. `~/.venes/venes statusline off` puts yours back and keeps it there; `statusline on` stands in again. A settings file that isn't plain JSON is left alone.
 - **It can let your phone in over SSH.** The app asks to, to send files over SSH, and the helper adds the phone's own public key to `~/.ssh/authorized_keys`, as pairing over SSH does. That only works while Remote Login is on.
 - **It follows Antigravity, if you use it.** On a Mac that has Google's Antigravity (a `~/.gemini` folder), the helper puts a plugin of its own in `~/.gemini/config/plugins/venes`, whose hooks hand what an Antigravity session does to the helper, as the Claude Code plugin's do. No hook of it is asked whether a tool may run, so Antigravity decides that as it would without it, and with no helper running the hooks do nothing. A session you start from the app runs `agy` in Rex or tmux, and `agy acp` once, for a moment, to make the empty conversation. While you look at a session's status it runs `agy -p /usage` every few minutes, for your limits. It reads Antigravity's own list of your conversations and their transcripts, and changes what Antigravity keeps only when you delete a session from the app, which moves that conversation to the Trash. See [Antigravity sessions](#antigravity-sessions).
+- **It runs a shell for you, if you ask.** A terminal session started from the app is a shell of your own in Rex or tmux, with your own setup, which the app types commands into. What its terminal prints is kept in `~/.venes/terminals`, with what was run, until you delete the session. See [Terminal sessions](#terminal-sessions).
 - **It talks to Codex, if you use it.** Codex keeps a server of its own on this Mac for its apps, and the helper connects to it over the socket in `~/.codex/app-server-control`, to list your Codex sessions and work them. It only starts that server, with `codex app-server daemon start`, when you start or open a Codex session from the app. See [Codex sessions](#codex-sessions).
 - **It counts what you've used.** For the app's usage card, it reads the token counts Claude Code, Codex and Antigravity write in their own chats (`~/.claude/projects`, `~/.codex/sessions`, `~/.gemini/antigravity-cli/conversations`), adds them up by day, and keeps the sums, and no content, in `~/.venes/usage.json`. To say what those tokens would cost, it downloads a public list of model prices, [LiteLLM's](https://github.com/BerriAI/litellm), from GitHub once a day into `~/.venes/prices.json`, and sends nothing with the request. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` or `VENES_NO_PRICES` turns the download off, and the prices are then those this version came with.
 - **It never touches your Claude or Codex credentials.**
@@ -327,7 +328,7 @@ Files the session changed stay as they are, and so does anything else Claude Cod
 
 ### Starting a session
 
-`folders` lists, newest first, the folders where the last 200 stored sessions ran, up to 20 of them, leaving out any that have gone. Each has its `path`, `name`, `running` (how many sessions are going in it now) and `trusted`. Beside them is `codex: true` when Codex is on this Mac, for a client to offer a [Codex session](#codex-sessions) there. With `path`, it lists the folders in that one, as Claude Code's `@` lists a folder: hidden ones left out unless `hidden` is true, by name as Finder sorts them, up to 1,000 with `truncated` past that. Each entry has its `name` and `path`.
+`folders` lists, newest first, the folders where the last 200 stored sessions ran, up to 20 of them, leaving out any that have gone. Each has its `path`, `name`, `running` (how many sessions are going in it now) and `trusted`. Beside them is `codex: true` when Codex is on this Mac, for a client to offer a [Codex session](#codex-sessions) there, and `terminal: true` where a [terminal session](#terminal-sessions) can be started. With `path`, it lists the folders in that one, as Claude Code's `@` lists a folder: hidden ones left out unless `hidden` is true, by name as Finder sorts them, up to 1,000 with `truncated` past that. Each entry has its `name` and `path`.
 
 `folderCreate` makes a folder named `name` in the one at `path`, for a session to start somewhere new, and replies with its `name`, its `path` and whether it's `trusted`. A name is one name: not empty, not `.` or `..`, with no `/` or `:` in it, and no longer than 255 bytes, or it's refused with `bad_name`. A name that's taken there, by a file or a folder, is refused with `name_taken`, and what's there is left as it is. A folder nothing can be made in is refused with `unwritable_folder`. `folderFileCreate` makes an empty file there the same way, by the same rules, and replies with it as `files` lists a file: its `name`, `path`, `kind` and `size`.
 
@@ -445,6 +446,39 @@ When the helper starts again, a session whose terminal still runs Antigravity is
 - Its pictures are told as a Claude Code session's are, in `history` and `join` and with `tool.images` and `message.images`. A call that looked at a picture, or made one, has it as a file among the conversation's own (`media` in its step, under the conversation's `logs/media`), and that's the call's picture: only a file inside Antigravity's own folders is one. A message's are the files its first lines name, where each is a picture that's there, which is how a client's attached pictures are typed, and its words are then told without those lines. `image` reads one where its step says it is, so it's `unknown_image` once the file has gone, and for one bigger than 20 MB.
 - `page`, `pageKey`, `pageText`, `pageClose` and `taskOutput` have nothing for an Antigravity session.
 - Antigravity's hooks are the same in its desktop app, which reads the same plugin folder, so a conversation there would be followed and read. The desktop app wasn't on the Mac this was made on, so that's untried.
+
+### Terminal sessions
+
+A terminal session has no agent in it: it's a shell of your own, in Rex or tmux as any session is, where a message is a command and what's shown under it is what the terminal printed. A client says it can show one with `agents: ["terminal"]`, as it does for Codex, and the session says what it is with `agent: "terminal"`. `folders` has `terminal: true` where one can be started: a Mac or Linux with Rex or tmux, and zsh or bash.
+
+**How it's read.** The shell is your own, started as your terminal starts it, with your prompt and setup: zsh if that's your shell or bash if that is, and otherwise whichever is there. It runs under `script(1)`, which keeps everything written to the terminal in a file as well (`~/.venes/terminals/<id>/stream`), and the helper reads that file as it grows through a terminal emulator of its own (xterm.js's, without a screen: `src/vendor`), so it knows the screen as it stands at every byte. Two hooks added to the shell (`shell/` here, copied to `~/.venes/shell`) write a mark before each command and before each prompt, an escape sequence no terminal shows, with the command, how it ended and where the shell is. Where a mark falls on the screen is where a command's output starts and ends. Nothing is cleared or looked for on the screen, the terminal at the computer shows what any terminal would, and a command typed there is told to clients like one sent from them.
+
+| Command | For a terminal session |
+|---|---|
+| `start` | With `agent: "terminal"`: a new shell in `cwd`, in a terminal of its own at the computer. `columns` and `rows` are the size of the page it'll be read on. Replies with `sessionId` once the first prompt is up |
+| `send` | `text` is typed at the prompt and run. While a command runs, it's typed into that command instead, as a line for it. `columns` and `rows` make the terminal the size of the page first, so that what's printed is laid out for it. No `attachments`. One sent to a session whose shell has gone starts a new shell where it was |
+| `key` | `key` is pressed in the terminal, for a program that takes more than lines: `Escape`, `Tab`, `BTab`, `Up`, `Down`, `Left`, `Right`, `Enter`, `Space`, `BSpace`, `C-c`, `C-d`, `C-z`, `C-l`. Any other is `bad_key`, and a session of another kind answers `no_keys` |
+| `interrupt` | Ctrl-C, while a command runs |
+| `join`, `history` | What was run, each line a `user` item with `shell: true` and its `clientId`, and what it printed an `output` item under it with the same `clientId`. A command still going has what it shows so far, with `running: true`. `join` takes `columns` and `rows` as `send` does. A page starts at a command |
+| `close`, `restart` | The shell is told to go, at once, whatever runs in it; `restart` starts a new one where it was. What was run stays |
+| `delete` | The shell is closed and the session's folder in `~/.venes/terminals` goes |
+| `capabilities` | Nothing: no commands, models or skills. `configure` and `setMode` are `terminal_session` |
+
+**What it says.** A command is `message.user` with `shell: true` and the `clientId` it was sent with, or one of the helper's for a command typed at the computer, with the text as the shell read it. Then `session.status` is `running`, and the output comes as `message.output` with that `clientId`: `stdout` with only the escape sequences that colour it, each line starting and ending plain, `running`, `columns` (the terminal's width when it was printed), and `replies: false`. While the command runs it's sent again whole as it changes, each one in place of the last, and at most its last 100 lines; when the command is over it's sent once more with `running: false` and the `exitCode`, up to 2,000 lines. A command that printed nothing and ended well sends none, and an empty one after one that wasn't takes it away. Lines the terminal wrapped are one line.
+
+A line sent while a command runs is `message.user` with `input: true` too, and what the program prints from the row it was typed on is that line's own output; the part before it is sent with `running: false`, though the program goes on. When a program reads a line without showing it, as for a password, the line is told as `••••••`. A program that draws over what an earlier line printed, as one that redraws itself does, has it all under the last line, and the earlier line's output is taken away.
+
+A program with the screen to itself, as an editor or a pager has, shows its screen as the output, with `screen: true` and `rows`, every row a line. When it gives the screen back, what's left is what a terminal leaves.
+
+`session.status` has `working: false` beside `running` while the program in front says it isn't at work, as Claude Code, Codex and Antigravity say with the [program status protocol](https://www.superlogical.com/rex/docs/build/program-status.md). `session.cwd` has `cwd` when the shell has moved, which is the session's folder from then, for its files and git.
+
+**Size.** The terminal is as wide as the page of whoever sent last. The helper sets the size of the terminal the shell is on (with `stty`, which tells every program on it), and tmux's window too. Rex sizes a block to the window it's shown in, so there the window at the computer keeps its own size, and a long line drawn for a narrower page can look wrong in it while a phone is typing.
+
+**A restart.** The shell goes on without the helper. When the helper starts again it reads the terminal's writing from its start, so the screen, the command going on and the lines typed into it are as they were, and what was run meanwhile is told. A session whose shell has gone is in the library, with what was run in it. The terminal's writing is started afresh at a prompt once it's past 8 MB, and past 64 MB whatever is running, which costs only the helper's memory of that one command if the helper starts again before it ends.
+
+**Starting.** `start` answers once the shell's first prompt is up, and fails with `start_failed` after 20 seconds without one, with the last thing its terminal said: a shell's setup that asks something before its first prompt has nobody there to answer. oh-my-zsh's question about updating itself is switched off for the session's shell (`DISABLE_AUTO_UPDATE`).
+
+**Not there.** fish and other shells: the session runs zsh or bash. A shell replaced with `exec`, or one started inside the session's, writes no marks, and is a program like any other. Windows has no terminal sessions.
 
 ### What was used
 
@@ -598,18 +632,19 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 
 | `kind` | Fields |
 |---|---|
-| `session.discovered` | `cwd`, and `agent` for a session that isn't Claude Code's: `codex` |
+| `session.discovered` | `cwd`, and `agent` for a session that isn't Claude Code's: `codex`, `antigravity` or `terminal` |
 | `session.started` | `source`, `model`, `cwd` |
 | `session.attached` | `pane` |
-| `session.status` | `status`: `idle`, `running`, `waiting` or `ended` |
+| `session.status` | `status`: `idle`, `running`, `waiting` or `ended`, and `working: false` for a terminal session whose program is running and not at work |
+| `session.cwd` | `cwd`: a terminal session's shell has moved |
 | `session.mode` | `permissionMode`, `permissionModes` |
 | `session.changes` | `files`, `added`, `removed`: how much has changed in its repository, `files: 0` for nothing |
 | `session.model` | `model` |
 | `session.effort` | `effort` |
 | `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
 | `session.deleted` | |
-| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`) |
-| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed |
+| `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`, and every line of a terminal session), `input` (a line typed into a terminal session's running command) |
+| `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed. In a terminal session also `running`, `exitCode`, `columns`, and `screen` with `rows`: see [Terminal sessions](#terminal-sessions) |
 | `message.assistant.delta` | `messageId`, `index`, `text`, `final`, `agentId`, and `phase` for a Codex session |
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |

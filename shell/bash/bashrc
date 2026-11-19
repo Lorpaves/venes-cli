@@ -1,0 +1,61 @@
+# Venes: read by a terminal session's bash in place of the reader's own files, which it reads first, as a
+# login shell would. See src/shellmarks.mjs.
+#
+# Before a command, bash 4.4 and later write PS0, which is the mark itself: its number is counted where
+# it's written, and its words are the line bash has just put in its history. An older bash has no PS0,
+# and is told of a command by the trap that runs before each one, the first after a prompt. A line that
+# ran nothing, as an empty one or one bash couldn't read, has no mark either way.
+if [ -z "$_venes_hooked" ]; then
+  [ -r /etc/profile ] && . /etc/profile
+  for _venes_file in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    [ -r "$_venes_file" ] && { . "$_venes_file"; break; }
+  done
+  unset _venes_file
+fi
+[ -n "$VENES_TERMINAL_MARK" ] && [ -z "$_venes_hooked" ] || return 0
+_venes_hooked=1 _venes_mark=$VENES_TERMINAL_MARK _venes_seq=0 _venes_tty=$(tty)
+unset VENES_TERMINAL_MARK
+# What a mark's words are written as: nothing in them may end the mark early, or be read by a terminal as
+# anything else.
+_venes_enc() {
+  local s=${1//\%/%25}
+  s=${s//$'\n'/%0A}; s=${s//$'\r'/%0D}; s=${s//$'\e'/%1B}; s=${s//$'\a'/%07}; s=${s//$'\t'/%09}
+  REPLY=${s//[[:cntrl:]]/}
+}
+_venes_say() { printf '\033]7773;%s;%s\007' "$_venes_mark" "$1" >"$_venes_tty" 2>/dev/null; }
+_venes_line() {
+  local line
+  line=$(HISTTIMEFORMAT= builtin history 1)
+  [[ $line =~ ^[[:space:]]*[0-9]+\*?[[:space:]]+(.*)$ ]] && line=${BASH_REMATCH[1]}
+  _venes_enc "${line:0:8192}"
+}
+_venes_precmd() {
+  local code=$?
+  _venes_enc "$PWD"
+  _venes_say "P;$_venes_seq;$code;$REPLY"
+  return $code
+}
+if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
+  _venes_command() { _venes_line; printf %s "$REPLY"; }
+  PS0=$PS0'\033]7773;'$_venes_mark';C;$((_venes_seq+=1));$(_venes_command)\007'
+  _venes_last=:
+else
+  _venes_preexec() {
+    [ -z "$COMP_LINE" ] && [ "$_venes_at_prompt" = 1 ] || return
+    _venes_at_prompt=0
+    # The first thing after a prompt is this file's own, when the line that was read ran nothing.
+    [[ $BASH_COMMAND == _venes_precmd* ]] && return
+    _venes_seq=$((_venes_seq+1))
+    _venes_line
+    _venes_say "C;$_venes_seq;$REPLY"
+  }
+  trap '_venes_preexec' DEBUG
+  _venes_last='_venes_at_prompt=1'
+fi
+if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+  PROMPT_COMMAND=(_venes_precmd "${PROMPT_COMMAND[@]}" "$_venes_last")
+else
+  PROMPT_COMMAND="_venes_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}; $_venes_last"
+fi
+_venes_enc "$_venes_tty"
+_venes_say "S;$$;$REPLY;bash"

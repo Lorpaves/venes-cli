@@ -10,6 +10,8 @@ import { referenceTo } from './uploads.mjs';
 
 const START_LIMIT_MS = 20_000;
 const CHECK_MS = 500;
+// How long a session seen to end here is waited for to be gone, before it's taken as running somewhere else.
+const GONE_LIMIT_MS = 6000;
 // tmux refuses a command of about 16 KB, and the first message travels in one. Later ones are
 // pasted, so they have no such limit.
 const FIRST_MESSAGE_LIMIT_BYTES = 12_000;
@@ -171,12 +173,17 @@ export function askAgain({ store, terminal, limit = START_LIMIT_MS, check = CHEC
 // A session running anywhere else can't be resumed here: the two would write into one transcript.
 // The first message's attachments can't be pasted, so each is a reference, pictures too.
 export async function resumeSession({
-  store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS, askedCheck = ASKED_CHECK_MS,
+  store, library, terminal, env = process.env, limit = START_LIMIT_MS, check = CHECK_MS, askedCheck = ASKED_CHECK_MS, goneLimit = GONE_LIMIT_MS,
 }, sessionId, { clientId, text, attachments = [] }, chosen) {
   const prompt = [...attachments.map(referenceTo), text].filter(Boolean).join(' ');
   if (Buffer.byteLength(prompt) > FIRST_MESSAGE_LIMIT_BYTES) throw new HelperError('message_too_long', 'Send something shorter first, to start this session.');
-  const running = await library.running();
-  if (running.some(session => session.id === sessionId)) throw notTypable();
+  const isRunning = async () => (await library.running()).some(session => session.id === sessionId);
+  // Claude Code says a session has ended a moment before its process has gone, which is still listed
+  // then. One seen to end here is given that moment, and only one still going after it is elsewhere.
+  if (await isRunning()) {
+    const hasEnded = store.find(sessionId)?.status === 'ended';
+    if (!hasEnded || !(await until(async () => !(await isRunning()), goneLimit, check))) throw notTypable();
+  }
   const info = await library.info(sessionId);
   if (!info) throw new HelperError('unknown_session', `No stored session ${sessionId}`);
   const session = store.reopen(sessionId, { cwd: info.cwd, startedAt: info.createdAt });

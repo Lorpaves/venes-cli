@@ -87,6 +87,11 @@ function fakeCodex() {
     'thread/name/set': ({ threadId, name }) => { server.threads.get(threadId).name = name; return {}; },
     'thread/fork': ({ threadId }) => ({ thread: stored(`fork-of-${threadId}`) }),
     'thread/archive': () => ({}),
+    // As Codex's own does: the thread stays loaded, for whoever else has it, until it's deleted.
+    'thread/unsubscribe': ({ threadId }) => {
+      if (server.fails.unsubscribe) throw rpcError('no such thread');
+      return { status: server.loaded.has(threadId) ? 'unsubscribed' : 'notLoaded' };
+    },
     'turn/interrupt': () => ({}),
     'model/list': () => ({ data: server.models }),
     'skills/list': ({ cwds = [] }) => {
@@ -1608,35 +1613,63 @@ function codexWindow({ program = 'codex', stays = false } = {}) {
   return { terminal, killed, kill };
 }
 
-test('closing a Codex session quits Codex\'s own terminal on it, and leaves the thread to Codex\'s server', async () => {
+test('closing a Codex session quits Codex\'s own terminal on it and lets the thread go, and a message loads it again', async () => {
   const { terminal, killed, kill } = codexWindow();
-  const { server, codex } = setup({ threads: [stored('t1')], loaded: ['t1'], terminal, kill });
+  const { server, codex, store } = setup({ threads: [stored('t1')], loaded: ['t1'], terminal, kill });
   await codex.restore();
-  assert.equal(await codex.isClosable('t1'), true);
+  assert.equal(codex.isClosable('t1'), true);
   await codex.closeNow('t1');
   assert.deepEqual(killed, [4242]);
   assert.equal(terminal.asked[0][0], 'venes-codex-t1');
-  assert.equal(await codex.isClosable('t1'), false);
-  assert.equal(server.restarts, 0);
-  assert.ok(server.loaded.has('t1'), 'the thread is still loaded');
+  assert.deepEqual(server.called('thread/unsubscribe'), [{ threadId: 't1' }]);
+  assert.equal(server.restarts, 0, 'Codex\'s server goes on');
+  assert.equal(store.get('t1').status, 'ended');
+  assert.equal(codex.isClosable('t1'), false);
+  await assert.rejects(codex.closeNow('t1'), { code: 'not_open' });
+  await codex.send({ sessionId: 't1', text: 'again' });
+  assert.ok(server.called('thread/resume').some(params => params.threadId === 't1'), 'joined again by a message');
+  assert.notEqual(store.get('t1').status, 'ended');
 });
 
-test('a Codex session with no terminal of Codex\'s on it has nothing to close', async () => {
-  const { codex } = setup({ threads: [stored('t1')], loaded: ['t1'] });
+test('a Codex session closed here stays closed while Codex\'s server only keeps it, and opens again with a turn there', async () => {
+  const { server, codex, store } = setup({ threads: [stored('t1')], loaded: ['t1'] });
   await codex.restore();
-  assert.equal(await codex.isClosable('t1'), false);
-  await assert.rejects(codex.closeNow('t1'), { code: 'not_open' });
-  const left = codexWindow({ program: '-zsh' });
-  const other = setup({ threads: [stored('t1')], loaded: ['t1'], terminal: left.terminal, kill: left.kill });
-  await other.codex.restore();
-  assert.equal(await other.codex.isClosable('t1'), false, 'Codex has left it for its shell');
+  await codex.closeNow('t1');
+  server.say('thread/status/changed', { threadId: 't1', status: { type: 'idle' } });
+  server.drop();
+  await new Promise(resolve => { setTimeout(resolve, 30); });
+  await codex.restore();
+  assert.equal(store.get('t1').status, 'ended', 'still loaded in Codex\'s server, and still closed here');
+  server.say('thread/status/changed', { threadId: 't1', status: { type: 'active', activeFlags: [] } });
+  await new Promise(resolve => { setTimeout(resolve, 10); });
+  assert.notEqual(store.get('t1').status, 'ended', 'another app\'s turn opens it again');
+});
+
+test('a Codex session with no window of Codex\'s on it closes all the same, and one that isn\'t open has nothing to close', async () => {
+  const { server, codex, store } = setup({ threads: [stored('t1'), stored('t2')], loaded: ['t1'] });
+  await codex.restore();
+  assert.equal(codex.isClosable('t1'), true);
+  await codex.closeNow('t1');
+  assert.deepEqual(server.called('thread/unsubscribe'), [{ threadId: 't1' }]);
+  assert.equal(store.get('t1').status, 'ended');
+  assert.equal(codex.isClosable('t2'), false);
+  await assert.rejects(codex.closeNow('t2'), { code: 'not_open' });
+});
+
+test('a Codex that won\'t let the session go is said to, and the session stays open', async () => {
+  const { server, codex, store } = setup({ threads: [stored('t1')], loaded: ['t1'] });
+  await codex.restore();
+  server.fails.unsubscribe = true;
+  await assert.rejects(codex.closeNow('t1'), { code: 'close_failed' });
+  assert.notEqual(store.get('t1').status, 'ended');
 });
 
 test('a Codex that won\'t quit is said to', async () => {
   const { terminal, kill } = codexWindow({ stays: true });
-  const { codex } = setup({ threads: [stored('t1')], loaded: ['t1'], terminal, kill, quitLimitMs: 30 });
+  const { codex, server } = setup({ threads: [stored('t1')], loaded: ['t1'], terminal, kill, quitLimitMs: 30 });
   await codex.restore();
   await assert.rejects(codex.closeNow('t1'), { code: 'session_running' });
+  assert.deepEqual(server.called('thread/unsubscribe'), [], 'the thread isn\'t let go while its window stays');
 });
 
 test('closing waits for its own thread\'s turn, and no other', async () => {

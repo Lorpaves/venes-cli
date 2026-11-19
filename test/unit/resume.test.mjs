@@ -410,3 +410,23 @@ test('Claude Code asked to quit in its terminal says whether it has', async () =
   assert.equal(await quitInTerminal({ ...deps, exitLimit: 30 }, store.find(ID)), true, 'it goes');
   assert.deepEqual(typed, [['%3', '/exit'], ['%3', '/exit']]);
 });
+
+test('a session seen to end is given a moment to be gone before it\'s taken as running elsewhere', async () => {
+  const { deps, store, started } = setUp({ onStart: s => prompt(s, 'again') });
+  startIn(store, '%3');
+  quitIn(store, '%3');
+  let looks = 0;
+  deps.library.running = async () => (looks++ < 2 ? [{ id: ID, status: 'idle' }] : []);
+  assert.deepEqual(await resumeSession({ ...deps, goneLimit: 200 }, ID, { text: 'again' }), { queued: false, resumed: true });
+  assert.equal(started.length, 1);
+});
+
+test('one that hasn\'t gone by then, or wasn\'t seen to end, is running elsewhere', async () => {
+  const ended = setUp();
+  startIn(ended.store, '%3');
+  quitIn(ended.store, '%3');
+  ended.deps.library.running = async () => [{ id: ID, status: 'idle' }];
+  await assert.rejects(resumeSession({ ...ended.deps, goneLimit: 30 }, ID, { text: 'x' }), { code: 'no_pane' });
+  const elsewhere = setUp({ running: [{ id: ID, status: 'idle' }] });
+  await assert.rejects(resumeSession({ ...elsewhere.deps, goneLimit: 30 }, ID, { text: 'x' }), { code: 'no_pane' });
+});

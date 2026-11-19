@@ -2395,15 +2395,19 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
       try { started = tmux('list-panes', '-t', terminalName, '-F', '#{pane_start_command}').trim(); } catch { /* not opened yet */ }
     }
     assert.match(started, new RegExp(`codex --remote unix://\\S+ resume ${sessionId}`), started);
-    // Closed from here, it's Codex's own terminal that goes, and the thread goes on in Codex's server, as the
-    // commands below show.
+    // Closed from here, Codex's own terminal goes and the thread is let go, while Codex's server goes on.
+    // The commands below load it again.
     assert.equal((await r.client.request('cli', { sessionId })).closable, true);
+    r.mark();
     assert.equal((await r.client.request('close', { sessionId })).close, 'now');
-    let closable = true;
-    for (const deadline = Date.now() + 10000; Date.now() < deadline && closable; await delay(200)) {
-      closable = (await r.client.request('cli', { sessionId })).closable;
-    }
-    assert.equal(closable, false, 'Codex has gone from its terminal');
+    await r.wait(e => e.kind === 'session.ended' && e.sessionId === sessionId, 15000, 'its end');
+    assert.equal((await r.client.request('cli', { sessionId })).closable, false);
+    let left = null;
+    try { left = tmux('display-message', '-p', '-t', terminalName, '#{pane_current_command}').trim(); } catch { /* the terminal went with it */ }
+    assert.ok(!left || /^-?(zsh|bash|sh|fish)$/.test(left), `Codex has gone from its terminal (${left})`);
+    // Codex's server keeps the thread loaded, as it does every thread until it's deleted. Here it stays closed.
+    await delay(1500);
+    assert.equal((await r.client.request('cli', { sessionId })).closable, false, 'still closed a moment later');
   } finally {
     try { tmux('kill-session', '-t', terminalName); } catch { /* it had gone by itself */ }
   }

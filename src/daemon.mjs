@@ -67,6 +67,10 @@ const REGISTRY_SAVE_MS = 2000;
 // How long after a turn ends a restart that waited for it goes: a message queued for the next turn
 // starts that turn first, and the session is at work again.
 const RESTART_SETTLE_MS = 1500;
+// How long a closed Claude Code's process has to go after it says it has ended, and how often it's looked for.
+const CLOSE_GONE_MS = 10_000;
+const CLOSE_CHECK_MS = 300;
+const delay = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 // How long a status waits for the account's per-model limits the first time they're read.
 const MODEL_LIMITS_WAIT_MS = 2500;
 // What may have changed a session's repository: a tool, a turn, a line for the shell, and its start, when
@@ -559,6 +563,10 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     const s = store.find(sessionId);
     if (s?.pane) {
       if (!(await quitInTerminal({ store, terminal: resumeTerminal() }, s))) throw new HelperError('session_running', CLAUDE_CLOSE.wouldnt);
+      // It says it has ended a moment before its process has gone: closing is done once that has too.
+      for (const end = Date.now() + CLOSE_GONE_MS; (await library.running().catch(() => [])).some(found => found.id === sessionId); await delay(CLOSE_CHECK_MS)) {
+        if (Date.now() >= end) throw new HelperError('session_running', CLAUDE_CLOSE.wouldnt);
+      }
       return;
     }
     if (!(await stopSession({ library }, sessionId, CLAUDE_CLOSE)) && store.find(sessionId)?.status !== 'ended') {

@@ -645,6 +645,10 @@ export class Codex {
   #link;
   #opening;
   #threads = new Map();
+  // Threads closed from here, which Codex's server keeps loaded all the same: it unloads one only once it's
+  // deleted, or the server goes. They stay closed until a message loads one, or another of Codex's apps
+  // starts a turn in it.
+  #closed = new Set();
   #toldStarted = new Set();
   // Where each session's pictures are, by the ids its pages were given for them.
   #pictures = new Map();
@@ -715,28 +719,37 @@ export class Codex {
     return Boolean(this.#threads.get(threadId)?.turnId) || known?.status === 'running' || known?.status === 'waiting';
   }
 
-  // A Codex session's command line is Codex's own terminal on its thread at the Mac. Its server is every
-  // Codex session's, and isn't closed.
-  async isClosable(threadId) {
-    return Boolean(await this.#cliOn(threadId));
+  // A Codex session is open while Codex's server has its thread loaded, whether or not a window of Codex's
+  // own is on it at the Mac.
+  isClosable(threadId) {
+    const session = this.#store.find(threadId);
+    return Boolean(session && session.agent === AGENT && session.status !== 'ended');
   }
 
-  // Closes Codex's own terminal on the thread: the command line in it is told to go. The thread goes on in
-  // Codex's server, for this app and Codex's others.
+  // Closes the session: the window Codex's own terminal has on it at the Mac goes, and the thread is let
+  // go, which Codex's server then unloads unless another of its apps has it open. The server goes on, for
+  // every other Codex session. A message loads the thread again.
   async closeNow(threadId) {
+    if (!this.isClosable(threadId)) throw new HelperError('not_open', "This session isn't open, so there's nothing to close.");
     const open = await this.#cliOn(threadId);
-    if (!open) throw new HelperError('not_open', `Codex isn't open on this conversation on the ${computer}.`);
-    if (open.running.pid) {
+    if (open?.running.pid) {
       try {
         this.#kill(open.running.pid);
       } catch (error) {
         if (error.code !== 'ESRCH') throw error; // it has just gone by itself
       }
     }
-    for (const end = Date.now() + this.#quitLimitMs; ; await pause(QUIT_CHECK_MS)) {
-      if (!(await this.#cliOn(threadId))) return;
+    for (const end = Date.now() + this.#quitLimitMs; open && await this.#cliOn(threadId); await pause(QUIT_CHECK_MS)) {
       if (Date.now() >= end) throw new HelperError('session_running', "Codex wouldn't quit.");
     }
+    const link = await this.#open({ start: false }).catch(() => undefined);
+    try {
+      await link?.request('thread/unsubscribe', { threadId });
+    } catch (error) {
+      throw new HelperError('close_failed', `Codex wouldn't let the session go: ${error.message}`);
+    }
+    this.#closed.add(threadId);
+    this.#end(threadId, 'closed');
   }
 
   // Codex's own terminal on the thread, while Codex runs in it and not the shell it leaves.
@@ -878,6 +891,7 @@ export class Codex {
       if (session.agent === AGENT && !loaded.includes(session.id)) this.#store.report(session.id, 'session.ended', { reason: 'closed' });
     }
     for (const threadId of loaded) {
+      if (this.#closed.has(threadId)) continue;
       const read = await link.request('thread/read', { threadId, includeTurns: false }).catch(() => undefined);
       if (read?.thread && isListed(read.thread)) {
         this.#adopt(read.thread);
@@ -1017,8 +1031,14 @@ export class Codex {
     const report = (kind, data, fields) => this.#store.report(threadId, kind, data, fields);
     switch (method) {
       case 'thread/status/changed':
-        if (params.status?.type === 'notLoaded') this.#end(threadId, 'closed');
-        else {
+        if (params.status?.type === 'notLoaded') {
+          this.#closed.delete(threadId);
+          this.#end(threadId, 'closed');
+        } else {
+          if (this.#closed.has(threadId)) {
+            if (params.status?.type !== 'active') break;
+            this.#closed.delete(threadId);
+          }
           if (session.status === 'ended') this.#store.adopt(threadId);
           // Told by the turn itself for a thread that's joined, and only by this for one that isn't yet.
           if (!thread.isSubscribed) {
@@ -1354,6 +1374,7 @@ export class Codex {
   async #load(link, threadId) {
     try {
       const joined = await link.request('thread/resume', { threadId, excludeTurns: true });
+      this.#closed.delete(threadId);
       const thread = this.#adopt(joined.thread, { model: joined.model, effort: joined.reasoningEffort ?? undefined, permissionMode: this.#noteAccess(threadId, joined) });
       thread.isSubscribed = true;
       thread.wantsTerminal = true;

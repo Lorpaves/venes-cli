@@ -76,7 +76,8 @@ const delay = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 const MODEL_LIMITS_WAIT_MS = 2500;
 // What may have changed a session's repository: a tool, a turn, a line for the shell, and its start, when
 // nothing has been counted yet. The count waits this long, so that a run of them is counted once.
-const RECOUNTED_AFTER = new Set(['tool.end', 'turn.end', 'message.output', 'session.started', 'session.discovered', 'session.attached']);
+// A terminal session's shell goes from folder to folder, and each may be another repository's.
+const RECOUNTED_AFTER = new Set(['tool.end', 'turn.end', 'message.output', 'session.started', 'session.discovered', 'session.attached', 'session.cwd']);
 const RECOUNT_WAIT_MS = 700;
 // The longest a client waits for the count with the session it asked for.
 const JOIN_COUNT_MS = 1500;
@@ -857,8 +858,13 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const ofClaude = async () => {
         const late = new Promise(resolve => { setTimeout(resolve, MODEL_LIMITS_WAIT_MS, 'late').unref(); });
         const asked = await Promise.race([library.accountLimits().catch(() => undefined), late]);
-        if (asked === 'late') return { ...accountLimits(statusDir), reading: true };
-        return asked ?? accountLimits(statusDir);
+        // A status line isn't told the plan, so with its limits the plan is as Claude Code last said it.
+        const told = () => {
+          const said = accountLimits(statusDir);
+          return said && library.plan ? { ...said, plan: library.plan } : said;
+        };
+        if (asked === 'late') return { ...told(), reading: true };
+        return asked ?? told();
       };
       const [read, ofCodex, ofAntigravity, ofClaudeCode] = await Promise.all([usage.read(zone), said(codex), said(antigravity), ofClaude()]);
       return usageReply({
@@ -1105,7 +1111,7 @@ export async function startDaemon(paths) {
   codex.restore().catch(error => console.error(`codex: ${error.message}`));
   // Antigravity's, each in a terminal as Claude Code's are, and told of by the hooks of a plugin put
   // where Antigravity finds it. A Mac with no Antigravity gets none.
-  const antigravity = new Antigravity({ store, terminal: resumeTerminal() });
+  const antigravity = new Antigravity({ store, terminal: resumeTerminal(), account: paths.antigravityAccount });
   try {
     installHooks(paths.antigravityPlugin, { always: Boolean(process.env.VENES_AGY_CONFIG) });
   } catch (error) {

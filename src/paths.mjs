@@ -55,6 +55,8 @@ export function helperPaths(home = process.env.VENES_HOME || path.join(os.homedi
     terminals: path.join(home, 'terminals'),
     // The startup files a terminal session's shell reads, ahead of the reader's own.
     shellDir: path.join(home, 'shell'),
+    // The plan Antigravity's account is on, as its terminal last said it: it's said nowhere else.
+    antigravityAccount: path.join(home, 'antigravity-account.json'),
     // The plugin Antigravity runs the helper's hooks from.
     antigravityPlugin: pluginFolder(process.env, os.homedir()),
     // Claude Code's own settings, where the status line is set up.

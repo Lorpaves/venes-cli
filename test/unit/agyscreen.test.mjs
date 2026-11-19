@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPrompt, readReview, questionOf, asksWriteIn, reviewsWaiting, showsDialog, showsPage } from '../../src/agyscreen.mjs';
+import {
+  asksTrust, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPlan, readPrompt, readReview, questionOf, asksWriteIn, reviewsWaiting, showsDialog, showsPage,
+} from '../../src/agyscreen.mjs';
 import { choicesOf } from '../../src/prompt.mjs';
 
 // Screens as Antigravity's terminal drew them (1.5.8), 110 columns across.
@@ -144,4 +146,20 @@ test('the model\'s question to the reader is read as a question, with its rows a
 test('the line to write an answer on is told from the list it opens under', () => {
   const open = asking(['Question 1/1: Pick a size'], ['  1. Small', '  2. Medium', '  3. Large', '> 4. Write-in...', '  Your answer:'], '  enter Submit · esc Back');
   assert.deepEqual([asksWriteIn(open), asksWriteIn(asking(['Question 1/1: Pick a size']))], [true, false]);
+});
+
+// The lines it greets with, as 1.5.12 drew them.
+const GREETING = [
+  '      ▄▀▀▄        Antigravity CLI 1.5.12', '     ▀▀▀▀▀▀       someone@example.com (Google AI Pro)', '    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (XHigh)',
+  '   ▄▀▀    ▀▀▄     ~/w',
+];
+
+test('the plan is read beside the account on the lines it greets with, and nowhere else', () => {
+  assert.equal(readPlan([...GREETING, IDLE].join('\n')), 'Google AI Pro');
+  // Words like it further down are something said in the conversation.
+  assert.equal(readPlan(['  write to someone@example.com (Google AI Ultra)', IDLE].join('\n')), undefined);
+  // An account with no plan beside it, and a greeting cut off at the foot of the screen.
+  assert.equal(readPlan([GREETING[0], '     ▀▀▀▀▀▀       someone@example.com', IDLE].join('\n')), undefined);
+  assert.equal(readPlan(GREETING[0]), undefined);
+  for (const none of ['', undefined, null]) assert.equal(readPlan(none), undefined);
 });

@@ -28,10 +28,24 @@ const WRITE_IN = /^Write-in\b/;
 const WRITE_IN_OPEN = /^\s*Your answer:/m;
 const TRUST_PICKED = /^\s*>\s*Yes, I trust this folder/m;
 
+// The lines it greets with (1.5.12): its name and version, and under them the account with its plan
+// in brackets, "name@example.com (Google AI Pro)".
+const GREETING = /\bAntigravity CLI \d+\.\d+/;
+const ACCOUNT = /\S+@\S+\.\S+[ \t]+\(([^()]{1,40})\)[ \t]*$/;
+
 const linesOf = screen => {
   const lines = screen.trimEnd().split('\n');
   return lines.slice(-SEARCH_LINES);
 };
+
+// The plan the account is on, which Antigravity says in one place only: beside the account, on the lines
+// it greets with. Its `/usage` lists the limits and not the plan they're for. Nothing once the greeting
+// has gone off the screen, or where the line under it isn't an account's.
+export function readPlan(screen) {
+  const lines = `${screen ?? ''}`.split('\n');
+  const at = lines.findIndex(line => GREETING.test(line));
+  return (at < 0 ? undefined : ACCOUNT.exec(lines[at + 1] ?? '')?.[1].trim()) || undefined;
+}
 
 // The bar at the foot of the screen: whether it's waiting for a message (`idle`), working or asking
 // (`busy`), or neither says so, as while something's typed in its box. Then the mode, the model as

@@ -88,6 +88,10 @@ export function readModelLimits(limits, now = Date.now()) {
   });
 }
 
+// The plan an account is on, as Claude Code names it, without the "Claude" each of its names starts with:
+// it's shown beside Claude Code's own name. Nothing for an account with none.
+export const planName = said => (typeof said === 'string' ? said.trim().replace(/^Claude\s+(?=\S)/i, '') : '') || undefined;
+
 // All the account's limits from what /usage is told, for a list of what's used: the five hours' and the
 // week's, then each model's week by its name, each with its share in tenths and when it resets. None
 // for an account with none, as an API's.
@@ -128,6 +132,7 @@ export class Library {
   #installing;
   #capabilities = new Map();
   #usage;
+  #plan;
   // The session ids of the helper's own runs of Claude Code, the newest last. Claude Code lists every
   // process of its own as a session that's running, these too, named for the folder they're in.
   #ownRuns = new Set();
@@ -250,7 +255,15 @@ export class Library {
   async #readLimits() {
     const claude = findOnPath('claude');
     if (!claude) return null;
-    return (await this.#read({ op: 'usage', sdk: await this.prepare(), claude, sessionId: this.#ownRun() })).limits ?? null;
+    const read = await this.#read({ op: 'usage', sdk: await this.prepare(), claude, sessionId: this.#ownRun() });
+    // The plan stays as it was last said when a read comes back without one.
+    this.#plan = planName(read.plan) ?? this.#plan;
+    return read.limits ?? null;
+  }
+
+  // The plan the account is on, once Claude Code has been asked its limits, and nothing before that.
+  get plan() {
+    return this.#plan;
   }
 
   // What /usage is told of the account's limits. Read once for a few minutes, with sheets and lists
@@ -268,10 +281,10 @@ export class Library {
     return readModelLimits(await this.#limits(now), now);
   }
 
-  // All of them, for a list of what's used, with when they were read: nothing for an account with none,
+  // All of them, for a list of what's used, with the plan they come with and when they were read: nothing for an account with none,
   // or where Claude Code can't be asked.
   async accountLimits(now = Date.now()) {
     const limits = readAccountLimits(await this.#limits(now), now);
-    return limits.length ? { limits, updatedAt: Math.floor((this.#usage?.at ?? now) / 1000) } : undefined;
+    return limits.length ? { limits, ...(this.#plan && { plan: this.#plan }), updatedAt: Math.floor((this.#usage?.at ?? now) / 1000) } : undefined;
   }
 }

@@ -53,6 +53,8 @@ export class TerminalEngine {
   #nextPart = 0;
   #isReady = false;
   #isWorking = true;
+  // What the program going on said of itself, where it says: at work, or waiting.
+  #said;
   #held;
 
   constructor({ columns = 80, rows = 24, nonce, emit = () => {} }) {
@@ -174,16 +176,27 @@ export class TerminalEngine {
 
   #onStatus(data) {
     const state = /(?:^|:)state=([^:]*)/.exec(data)?.[1];
-    if (state !== undefined) this.#setWorking(state === 'working');
+    if (state !== undefined) {
+      this.#said = state === 'working';
+      this.#noteWork();
+    }
     // Not handled here alone: the terminal it's meant for reads it too.
     return false;
   }
 
-  #setWorking(isWorking) {
+  // Whether the command going on is at work, or only waits for whoever is at it: as the program says of
+  // itself, where it does, and otherwise by whether it has the screen to itself. One that takes the whole
+  // screen, as an editor or a pager does, shows there what it's doing and waits to be told what's next.
+  // Any other is taken to be at work until it ends.
+  #noteWork() {
+    const isWorking = this.#said ?? !this.isFullScreen;
     if (this.#isWorking === isWorking) return;
     this.#isWorking = isWorking;
     if (this.#run) this.#emit({ type: 'working', seq: this.#run.seq, working: isWorking });
   }
+
+  // Whether the command going on only waits, as last looked at.
+  get isAtRest() { return this.#run !== undefined && !this.#isWorking; }
 
   get #normal() { return this.#term.buffer.normal; }
 
@@ -197,6 +210,7 @@ export class TerminalEngine {
   #begin(seq, command) {
     // A command whose end was never said is over now.
     if (this.#run) this.#finish(undefined);
+    this.#said = undefined;
     this.#isWorking = true;
     const start = this.#markHere();
     const top = this.#markHere(-this.#normal.cursorY);
@@ -316,6 +330,9 @@ export class TerminalEngine {
   flush() {
     const run = this.#run;
     if (!run) return;
+    // Looked at here, and not as the screen changes hands: a program that gives the screen back as it
+    // ends is over by the next look, and nothing is said of work it never went back to.
+    this.#noteWork();
     this.#checkAbove();
     if (!this.isFullScreen) this.#mergeRedrawn();
     const end = this.#lastRow() + 1;

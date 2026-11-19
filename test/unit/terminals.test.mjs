@@ -145,13 +145,16 @@ test('a line a program reads without showing isn\'t shown', real, async t => {
 });
 
 test('a program with the screen to itself shows its screen, and takes keys', real, async t => {
-  const { store, terminals, printed } = setup(t);
+  const { store, terminals, printed, of } = setup(t);
   const { sessionId } = await terminals.start({ cwd: os.tmpdir(), columns: 40, rows: 10 });
   await terminals.send({ sessionId, text: `printf '\\e[?1049h\\e[HTOP\\e[10;1H\\e[7mBAR\\e[0m'; ${readsAKey}; printf '\\e[?1049l'; echo pressed $key`, clientId: 'c1' });
   await until(() => printed('c1')?.screen, 'the screen was shown');
   const screen = printed('c1');
   assert.deepEqual([screen.running, screen.rows, screen.columns], [true, 10, 40]);
   assert.equal(screen.stdout, `TOP${'\n'.repeat(9)}\u001b[0;7mBAR\u001b[0m`);
+  // It only waits there, and the session is said to: running, and not at work.
+  await until(() => of('session.status').at(-1)?.working === false, 'the session was said to wait');
+  assert.equal(of('session.status').at(-1).status, 'running');
   await terminals.key({ sessionId, key: 'Tab' });
   await until(isIdle(store, sessionId), 'the program ended');
   assert.deepEqual([printed('c1').stdout, printed('c1').screen, printed('c1').exitCode], ['pressed', undefined, 0]);
@@ -347,6 +350,24 @@ test('a session that isn\'t a terminal\'s is nobody\'s here', async t => {
   assert.deepEqual(await terminals.library(), []);
   assert.equal(terminals.isAvailable(), false);
   await assert.rejects(terminals.start({ cwd: os.tmpdir() }), { code: 'no_tmux' });
+});
+
+test('its status is the folder its shell is in, with the branch checked out there', real, async t => {
+  const { dir, terminals, of } = setup(t);
+  const repo = path.join(dir, 'repo');
+  fs.mkdirSync(repo);
+  execFileSync('git', ['-C', repo, 'init', '-q']);
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/trunk']);
+  const { sessionId } = await terminals.start({ cwd: repo });
+  const { status } = await terminals.status({ sessionId });
+  assert.deepEqual([status.project, status.branch], ['repo', 'trunk']);
+  assert.ok(Math.abs(status.updatedAt - Date.now() / 1000) < 5);
+  // Out of the repository there's no branch to tell.
+  await terminals.send({ sessionId, text: 'cd ..', clientId: 'c1' });
+  await until(() => of('session.cwd').length, 'the folder was said');
+  const moved = (await terminals.status({ sessionId })).status;
+  assert.deepEqual([moved.project, 'branch' in moved], [path.basename(dir), false]);
+  await assert.rejects(terminals.status({ sessionId: 'nobody' }), error => error.code !== undefined);
 });
 
 test('a terminal session takes no files, and has no model or modes', real, async t => {

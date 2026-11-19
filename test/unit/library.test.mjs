@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dropParentSession, restoreSessions } from '../../src/daemon.mjs';
 import { writeRegistry } from '../../src/registry.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
-import { Library, joinedStatus, libraryPage, readAccountLimits, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
+import { Library, joinedStatus, libraryPage, planName, readAccountLimits, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -209,7 +209,11 @@ export function query({ options }) {
   setInterval(() => {}, 1000);
   if (process.env.FAKE_SDK_FAILS) throw Object.assign(new Error('no'), { code: 'nope' });
   return {
-    initializationResult: async () => ({ commands: [{ name: 'model' }], models: [{ value: 'opus', supportedEffortLevels: ['low'] }], account: {} }),
+    initializationResult: async () => ({
+      commands: [{ name: 'model' }], models: [{ value: 'opus', supportedEffortLevels: ['low'] }],
+      // The account, with the name of its plan where the test gave one.
+      account: process.env.FAKE_SDK_PLAN ? { subscriptionType: process.env.FAKE_SDK_PLAN } : {},
+    }),
     // What /usage is told, as the test set it, on an SDK that has the call for it.
     ...(process.env.FAKE_SDK_USAGE && {
       usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async opts => {
@@ -237,6 +241,7 @@ function fakeSdk(t, { hasClaude = true } = {}) {
     delete process.env.FAKE_SDK_LOG;
     delete process.env.FAKE_SDK_FAILS;
     delete process.env.FAKE_SDK_USAGE;
+    delete process.env.FAKE_SDK_PLAN;
     fs.rmSync(dir, { recursive: true });
   });
   const lines = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []);
@@ -369,6 +374,23 @@ test('all the account\'s limits are read the same way, for a list of what\'s use
   // An account with none has nothing to say.
   process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits_available: false, rate_limits: null });
   assert.equal(await library.accountLimits(now + 200_000), undefined);
+});
+
+test('the plan an account is on comes with its limits, by the name Claude Code gives it', async t => {
+  assert.deepEqual(['Claude Ultra', ' claude max ', 'Pro', 'Claude', '', undefined, 7].map(planName), ['Ultra', 'max', 'Pro', 'Claude', undefined, undefined, undefined]);
+  const { library } = fakeSdk(t);
+  assert.equal(library.plan, undefined);
+  process.env.FAKE_SDK_PLAN = 'Claude Ultra';
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ subscription_type: 'max', rate_limits: { five_hour: { utilization: 1 } } });
+  assert.equal((await library.accountLimits(0)).plan, 'Ultra');
+  assert.equal(library.plan, 'Ultra');
+  // With no name for it, the kind of subscription /usage is told.
+  delete process.env.FAKE_SDK_PLAN;
+  assert.equal((await library.accountLimits(200_000)).plan, 'max');
+  // A read that says neither leaves it as it was last said.
+  process.env.FAKE_SDK_USAGE = JSON.stringify({ rate_limits: { five_hour: { utilization: 2 } } });
+  const later = await library.accountLimits(400_000);
+  assert.deepEqual([later.plan, later.limits[0].percent], ['max', 2]);
 });
 
 test('with an SDK that has no such call, or that fails, there are none, and it isn\'t asked again at once', async t => {

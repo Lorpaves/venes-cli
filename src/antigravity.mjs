@@ -25,7 +25,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import {
-  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, asksWriteIn, hasTrustPicked, hasTyped, isIdle, isUp, readBar, questionOf, readPrompt, readReview, reviewsWaiting, showsDialog, showsPage,
+  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, asksWriteIn, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPlan, questionOf, readPrompt, readReview, reviewsWaiting, showsDialog,
+  showsPage,
 } from './agyscreen.mjs';
 import { mediaTypeOf, moveToTrash } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
@@ -546,6 +547,17 @@ async function listedModels() {
   return modelsFrom(stdout);
 }
 
+// The plan kept in a file, from the last time a terminal said it.
+function keptPlan(file) {
+  if (!file) return undefined;
+  try {
+    const { plan } = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return typeof plan === 'string' && plan ? plan : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function blankSession() {
   return {
     // The turn going on, the steps of the transcript already told, and the calls under way by their step.
@@ -582,6 +594,9 @@ export class Antigravity {
   #kill;
   #version;
   #usage = { at: 0, limits: [], reading: undefined };
+  // The plan the account is on, as a terminal's greeting last said it, and the file it's kept in.
+  #plan;
+  #account;
   #data;
   #env;
   #timing;
@@ -608,6 +623,8 @@ export class Antigravity {
     // The commands a conversation in a folder can be given, asked of Antigravity itself.
     commands = undefined,
     usage = usageReport,
+    // A file to keep the account's plan in: without one it's known only while this runs.
+    account = undefined,
     // What a deleted conversation's files are moved to the Trash with, what takes it out of Antigravity's
     // own lists, and what tells Antigravity to go.
     trash = moveToTrash,
@@ -626,6 +643,8 @@ export class Antigravity {
     this.#models = models;
     this.#listCommands = commands ?? (folder => listedCommands(folder, { data, forget }));
     this.#readUsage = usage;
+    this.#account = account;
+    this.#plan = keptPlan(account);
     this.#trash = trash;
     this.#forget = forget;
     this.#kill = kill;
@@ -1025,6 +1044,7 @@ export class Antigravity {
       this.#end(id, 'closed'); // its terminal has gone
       return;
     }
+    this.#notePlan(screen);
     if (!isUp(screen)) {
       // Something else is on the screen now: a page of Antigravity's own, or its shell once it has
       // quit. The terminal says which, by what it's running, where it can.
@@ -1313,6 +1333,7 @@ export class Antigravity {
     for (const deadline = Date.now() + startLimit; Date.now() < deadline; await pause(startCheck)) {
       if (!(await this.#terminal.isSessionOpen(name, target))) throw new HelperError('start_failed', 'Antigravity quit before the session started.');
       const screen = await this.#terminal.readScreen(target).catch(() => '');
+      this.#notePlan(screen);
       if (asksTrust(screen) && !isAnswered) {
         if (trust !== true) {
           // Esc is its "No, exit".
@@ -1349,7 +1370,24 @@ export class Antigravity {
   // model by, and what the bar says is read again each time the terminal is looked at.
   async #readBar(known) {
     await Promise.race([this.#knownModels().catch(() => []), pause(this.#timing.modelsWait)]);
-    this.#noteBar(known.id, readBar(await this.#terminal.readScreen(known).catch(() => '')));
+    const screen = await this.#terminal.readScreen(known).catch(() => '');
+    this.#notePlan(screen);
+    this.#noteBar(known.id, readBar(screen));
+  }
+
+  // The plan the account is on, from a screen with Antigravity's greeting on it, which is the only place
+  // it's said. It's kept, since a screen has the greeting only until the conversation has gone on past it.
+  #notePlan(screen) {
+    const plan = readPlan(screen);
+    if (!plan || plan === this.#plan) return;
+    this.#plan = plan;
+    if (!this.#account) return;
+    try {
+      fs.mkdirSync(path.dirname(this.#account), { recursive: true });
+      fs.writeFileSync(this.#account, JSON.stringify({ plan }));
+    } catch (error) {
+      console.error(`antigravity plan: ${error.message}`);
+    }
   }
 
   // A new conversation in a folder, in a terminal of its own at the Mac.
@@ -1647,13 +1685,15 @@ export class Antigravity {
     return kept.limits;
   }
 
-  // The account's limits for a list of what's used, as a status sheet has them, and `reading` while
-  // they're being asked for: the first read takes Antigravity a while, and comes with a later ask.
+  // The account's limits for a list of what's used, as a status sheet has them, with the plan they're
+  // for once a terminal has said it, and `reading` while they're being asked for: the first read takes Antigravity a while, and comes with a later ask.
   // Nothing where Antigravity isn't installed.
   async limits() {
     if (!this.#installed()) return undefined;
     const limits = (await this.#limits()) ?? [];
-    return { limits, reading: Boolean(this.#usage.reading), ...(limits.length && { updatedAt: Math.floor(this.#usage.at / 1000) }) };
+    return {
+      limits, reading: Boolean(this.#usage.reading), ...(this.#plan && { plan: this.#plan }), ...(limits.length && { updatedAt: Math.floor(this.#usage.at / 1000) }),
+    };
   }
 
   // What a status sheet shows of a session the helper follows, and nothing for one it doesn't: what it

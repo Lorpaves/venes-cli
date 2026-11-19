@@ -669,7 +669,9 @@ const AGENTS = ['claude', 'codex', 'antigravity'];
 // each agent that has anything to show with its tokens and cost by day, and under `hourly` by hour,
 // where it keeps count, and its account's `limits`, where it has them. `shown` says which
 // agents the client takes. `limits` are each agent's as it says them now: `{ limits, plan, credits,
-// limitResets, updatedAt, reading }`.
+// limitResets, updatedAt, reading }`. The plan is in each agent's own words: Codex's kind of plan
+// ("plus"), the name Claude Code gives the account's ("Ultra"), and what Antigravity's greeting says
+// beside the account ("Google AI Pro").
 export function usageReply({ read, limits = {}, shown = () => true, now = Date.now() }) {
   const agents = AGENTS.filter(shown).flatMap(agent => {
     const used = read.agents?.[agent];

@@ -151,7 +151,7 @@ const LISTED = [
   { name: 'two words', description: 'not a command a line can start with' }, { description: 'no name' },
 ];
 
-function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined, installed = true } = {}) {
+function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined, installed = true, account = undefined } = {}) {
   const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
   t.after(() => fs.rmSync(data, { recursive: true, force: true }));
   fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ trustedWorkspaces: trusted }));
@@ -180,7 +180,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     store, terminal, data, installed: () => installed, rows: async () => rows,
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
-    usage,
+    usage, account,
     commands: commands ?? (async folder => { asked.push(folder); return commandsFrom(LISTED); }),
     trash: async folder => { trashed.push([path.basename(folder), fs.readdirSync(folder).sort()]); },
     forget: async id => { forgotten.push(id); },
@@ -803,6 +803,27 @@ test('a status has what the session runs on and the account\'s limits, asked for
   const none = setup(t, { timing: { watch: 100_000 }, usage: () => answer() });
   await none.hook('SessionStart');
   assert.equal('limits' in (await none.agent.status({ sessionId: ID })).status, false);
+});
+
+test('the plan the account is on is read off a session\'s greeting, told with its limits, and kept', async t => {
+  const kept = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-plan-')), 'state', 'account.json');
+  t.after(() => fs.rmSync(path.dirname(path.dirname(kept)), { recursive: true, force: true }));
+  const greeting = ['      ▄▀▀▄        Antigravity CLI 1.5.12', '     ▀▀▀▀▀▀       someone@example.com (Google AI Pro)'].join('\n');
+  const { agent, hook, terminal, until } = setup(t, { account: kept });
+  assert.equal('plan' in await agent.limits(), false, 'not known before a terminal has said it');
+  terminal.screen = `${greeting}\n${IDLE}`;
+  await hook('SessionStart');
+  await until(() => fs.existsSync(kept), 'the plan was kept');
+  assert.equal((await agent.limits()).plan, 'Google AI Pro');
+  assert.deepEqual(JSON.parse(fs.readFileSync(kept, 'utf8')), { plan: 'Google AI Pro' });
+  // Once the greeting has gone off the screen the plan is as it was, and the next run starts with it.
+  terminal.screen = IDLE;
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  assert.equal((await agent.limits()).plan, 'Google AI Pro');
+  assert.equal((await setup(t, { account: kept }).agent.limits()).plan, 'Google AI Pro');
+  // A file that says nothing of use is no plan.
+  fs.writeFileSync(kept, '{"plan":7}');
+  assert.equal('plan' in await setup(t, { account: kept }).agent.limits(), false);
 });
 
 test('the account\'s limits are told for a list of what\'s used, with no session to ask for', async t => {

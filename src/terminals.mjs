@@ -22,6 +22,7 @@ import { HelperError } from './errors.mjs';
 import { checkedFolder } from './folders.mjs';
 import { computer } from './platform.mjs';
 import { hidesInput, installShellFiles, recorded, settingsCommand, shellCommand, shellFor, sizeCommand } from './shellmarks.mjs';
+import { checkedOutBranch } from './status.mjs';
 import { TerminalEngine } from './termengine.mjs';
 import { plain } from './termtext.mjs';
 
@@ -135,6 +136,7 @@ export class Terminals {
   #isAlive;
   #kill;
   #shell;
+  #branch;
   #limits;
   #sessions = new Map();
   // Whether every session kept on this computer has been read. One made after that is made here.
@@ -146,6 +148,8 @@ export class Terminals {
     // What a session's terminal is started in and typed into: none, and nothing can be started.
     terminal = undefined, env = process.env, timing = {}, exec = promisify(execFile),
     isAlive = isRunning, kill = (pid, signal) => process.kill(pid, signal), shell = () => shellFor(env), limits = {},
+    // The branch checked out in a folder, where it's in a repository.
+    branch = checkedOutBranch,
   }) {
     this.#limits = { ...LIMITS, ...limits };
     this.#store = store;
@@ -158,6 +162,7 @@ export class Terminals {
     this.#isAlive = isAlive;
     this.#kill = kill;
     this.#shell = shell;
+    this.#branch = branch;
   }
 
   get name() {
@@ -696,7 +701,8 @@ export class Terminals {
     t.offset = data.length;
     if (t.run) {
       for (const clientId of t.run.outputs.keys()) t.run.said.add(clientId);
-      this.#store.report(t.id, 'session.status', { status: 'running' });
+      // A program that only waits, as an editor left open does, is said to.
+      this.#store.report(t.id, 'session.status', { status: 'running', ...(t.engine.isAtRest && { working: false }) });
     } else if (t.last && !t.last.done && t.last.cut) {
       // A command whose start is no longer in the terminal's writing still runs, until a prompt says otherwise.
       this.#store.report(t.id, 'session.status', { status: 'running' });
@@ -898,9 +904,12 @@ export class Terminals {
     throw new HelperError('terminal_session', 'A terminal session has no modes.');
   }
 
+  // What a status sheet shows of it, as a shell's own prompt would: the folder the shell is in, and the
+  // branch checked out there, where the folder is in a repository.
   async status({ sessionId }) {
     const t = this.#get(sessionId);
-    return { status: { project: path.basename(t.cwd) || t.cwd, updatedAt: Math.floor(Date.now() / 1000) } };
+    const branch = await Promise.resolve(this.#branch(t.cwd)).catch(() => undefined);
+    return { status: { project: path.basename(t.cwd) || t.cwd, ...(branch && { branch }), updatedAt: Math.floor(Date.now() / 1000) } };
   }
 
   image() {

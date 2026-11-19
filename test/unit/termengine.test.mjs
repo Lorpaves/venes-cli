@@ -143,6 +143,27 @@ test('a program says when it isn\'t at work, and each command starts at work', a
   ]);
 });
 
+test('a program with the screen to itself only waits, and is at work again if it gives the screen back and goes on', async () => {
+  const { engine, events, feed } = engineWith({ columns: 20, rows: 4 });
+  const working = () => events.filter(event => event.type === 'working').map(event => [event.seq, event.working]);
+  await feed(`${done(0)}${typed(1, 'vi')}\u001b[?1049h\u001b[H~`);
+  assert.deepEqual(working(), [[1, false]]);
+  assert.equal(engine.isAtRest, true);
+  await feed('\u001b[?1049lbuilding\r\n');
+  assert.deepEqual(working(), [[1, false], [1, true]]);
+  assert.equal(engine.isAtRest, false);
+  // One that gives the screen back as it ends has no work to go back to, and nothing is said of any.
+  await feed(`${done(1)}${typed(2, 'less')}\u001b[?1049h\u001b[Hpage`);
+  await feed(`\u001b[?1049l${done(2)}`);
+  assert.deepEqual(working(), [[1, false], [1, true], [2, false]]);
+  assert.equal(engine.isAtRest, false);
+  // What a program says of itself counts for more than what it has of the screen.
+  await feed(`${typed(3, 'agy')}\u001b[?1049h\u001b]7501;state=working\u001b\\`);
+  assert.deepEqual(working().filter(([seq]) => seq === 3), []);
+  await feed('\u001b]7501;state=idle\u001b\\\u001b[?1049l');
+  assert.deepEqual(working().filter(([seq]) => seq === 3), [[3, false]]);
+});
+
 test('a long output is its end while it runs, and more of it once it\'s over', async () => {
   const { feed, outputs } = engineWith({ columns: 20, rows: 5 });
   const lines = Array.from({ length: 1000 }, (_, index) => `line ${index}`);

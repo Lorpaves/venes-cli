@@ -62,7 +62,7 @@ async function capabilities({ sdk, cwd, claude, sessionId }) {
 }
 
 // The limits Claude Code's /usage shows, which has some a status line isn't told, such as a week's
-// use of one model. From a session that's never given anything to do, as `capabilities` is. The SDK
+// use of one model, with the plan the account is on. From a session that's never given anything to do, as `capabilities` is. The SDK
 // calls this experimental, so it's asked only where it's there, and a helper is released with the
 // version of the SDK it was tried with.
 async function usage({ sdk, claude, sessionId }) {
@@ -75,10 +75,13 @@ async function usage({ sdk, claude, sessionId }) {
     },
   });
   try {
-    await session.initializationResult();
+    // The plan is the account's, by the name Claude Code gives it, and failing that the kind of
+    // subscription /usage is told. An account with neither, as an API key's, has none.
+    const { account } = await session.initializationResult();
     const read = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
-    if (typeof read !== 'function') return { limits: null };
-    return { limits: (await read.call(session, { skipBehaviors: true }))?.rate_limits ?? null };
+    if (typeof read !== 'function') return { limits: null, plan: account?.subscriptionType };
+    const said = await read.call(session, { skipBehaviors: true });
+    return { limits: said?.rate_limits ?? null, plan: account?.subscriptionType ?? said?.subscription_type };
   } finally {
     await hold();
     session.close();

@@ -2963,6 +2963,26 @@ async function terminalRunsCommands(r) {
   const line = r.events.find(e => e.kind === 'message.user');
   assert.deepEqual([line.text, line.clientId, line.shell], ['echo e2e-$((6*7)); pwd', 'c1', true]);
 
+  // Its status is the folder its shell is in, with the branch checked out there once it's a repository's,
+  // and what git says of the folder is the session's as any other's is.
+  assert.deepEqual(Object.keys((await r.client.request('statusLine', { sessionId })).status).sort(), ['project', 'updatedAt']);
+  assert.equal((await r.client.request('git', { sessionId })).git, null);
+  r.mark();
+  const repo = path.join(WS, 'terminal-repo');
+  // Taken away here, and not when the case is over: the next case clears the folder of files only.
+  fs.rmSync(repo, { recursive: true, force: true });
+  await r.client.request('send', { sessionId, text: 'mkdir terminal-repo && cd terminal-repo && git init -q && git symbolic-ref HEAD refs/heads/trunk && touch new.txt && echo made', clientId: 'c0' });
+  try {
+    assert.equal((await printedAll(r, 'c0')).stdout, 'made');
+    const { status } = await r.client.request('statusLine', { sessionId });
+    assert.deepEqual([status.project, status.branch], ['terminal-repo', 'trunk']);
+    const { git } = await r.client.request('git', { sessionId });
+    assert.deepEqual([git.branch, git.changes.map(file => file.path)], ['trunk', ['new.txt']]);
+    await r.wait(e => e.kind === 'session.changes' && e.files === 1, 8000, 'the change was counted');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+
   // Where the shell goes, the session goes, and a failure is said with nothing printed.
   r.mark();
   await r.client.request('send', { sessionId, text: 'cd /usr && false', clientId: 'c2' });
@@ -2978,7 +2998,9 @@ async function terminalRunsCommands(r) {
   assert.deepEqual([sized.stdout, sized.columns], ['47\n\u001b[0;31mred\u001b[0m', 47]);
 
   const joined = await r.client.request('join', { sessionId, limit: 50 });
-  assert.deepEqual(joined.items.map(item => [item.role, item.clientId]), [['user', 'c1'], ['output', 'c1'], ['user', 'c2'], ['output', 'c2'], ['user', 'c3'], ['output', 'c3']]);
+  assert.deepEqual(joined.items.map(item => [item.role, item.clientId]), [
+    ['user', 'c1'], ['output', 'c1'], ['user', 'c0'], ['output', 'c0'], ['user', 'c2'], ['output', 'c2'], ['user', 'c3'], ['output', 'c3'],
+  ]);
   assert.deepEqual(joined.sessions.map(s => [s.agent, s.status]), [['terminal', 'idle']]);
   const capabilities = await r.client.request('capabilities', { sessionId });
   assert.deepEqual([capabilities.commands, capabilities.models, capabilities.skills], [[], [], []]);
@@ -3018,6 +3040,8 @@ async function terminalTakesLinesAndKeys(r) {
   await r.client.request('send', { sessionId, text: `printf '\\e[?1049h\\e[HTOP\\e[10;1H\\e[7mBAR\\e[0m'; read -k1 key; printf '\\e[?1049l'; echo left`, clientId: 'c3' });
   const screen = await r.wait(e => e.kind === 'message.output' && e.clientId === 'c3' && e.screen, 20000, 'the screen');
   assert.deepEqual([screen.stdout, screen.rows, screen.running], [`TOP${'\n'.repeat(9)}\u001b[0;7mBAR\u001b[0m`, 10, true]);
+  // It only waits there, so the session is running and not at work, and no page says it's working.
+  await r.wait(e => e.kind === 'session.status' && e.sessionId === sessionId && e.status === 'running' && e.working === false, 20000, 'the session waits');
   await r.client.request('key', { sessionId, key: 'Enter' });
   assert.equal((await printedAll(r, 'c3')).stdout, 'left');
 

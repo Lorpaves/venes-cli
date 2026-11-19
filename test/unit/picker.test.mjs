@@ -43,6 +43,34 @@ test('the picker is read as Claude Code draws it', () => {
   assert.equal(effort, 'medium');
 });
 
+// As Claude Code 2.1.327 draws it: the effort on a line of its own, and how to adjust it in the footer.
+const PICKER_327 = `
+ ▐▛███▛█   Claude Code v2.1.327
+▝▜██████▀  Haiku 5.5 · Claude Team
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Select model
+  Your pick is the default for new sessions. For other models, use --model.
+    1. Default (recommended)  Use the default model (currently Opus 5.5) · $4/$20 per Mtok
+    2. Opus                   Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok
+    3. Fable                  Fable 5.2 · Most capable for your hardest and longest-running tasks
+    4. Sonnet                 Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok
+  ❯ 5. Haiku ✔                Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok ($0.50/$2.50 for prompts
+                              over 100k)
+  ◐ Medium effort (default)
+  Use /fast to turn on fast mode (Opus 5.5).
+  ←/→ to adjust · s to use this session only · Enter to save · Esc to cancel
+`;
+
+test('the picker is read as Claude Code 2.1.327 draws it, its effort on a line of its own', () => {
+  const { number, text, effort } = readPicker(PICKER_327);
+  assert.deepEqual([number, effort], [5, 'medium']);
+  assert.match(text, /^Haiku ✔ +Haiku 5\.5/);
+  for (const [line, level] of [['○ Low effort', 'low'], ['● High effort', 'high'], ['◉ xHigh effort', 'xhigh'], ['◈ Max effort', 'max']]) {
+    assert.equal(readPicker(PICKER_327.replace('◐ Medium effort (default)', line)).effort, level, line);
+  }
+  assert.equal(readPicker(PICKER_327.replace('◐ Medium effort (default)', '○ Effort not supported for Haiku 4.5')).effort, undefined);
+});
+
 test('a numbered message further up isn\'t the highlight', () => {
   assert.equal(readPicker(PICKER.replace('❯ Reply with only the word READY.', '❯ 1. Fix the header')).number, 5);
 });

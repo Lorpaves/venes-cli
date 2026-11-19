@@ -16,7 +16,9 @@ const HIGHLIGHTED_ROW = /^\s*❯\s*(\d+)\.\s+(.*?)\s*$/;
 // there, and only there, Enter isn't the key that saves a default.
 const FOLD_ROW = /^\s*❯\s*([▸▾])\s+(.*?)\s*$/;
 const FOLD_HINT = /\bEnter to (expand|collapse)\b/;
-const EFFORT_LINE = /\b(low|medium|high|xhigh|max) effort\b.*to adjust/i;
+// The level on a line of its own, after its mark: "◐ Medium effort (default)". Until Claude Code 2.1.327 the line
+// also said "←/→ to adjust", which is in the footer since.
+const EFFORT_LINE = /^\s*\S?\s*(low|medium|high|xhigh|max) effort\b/i;
 const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CURRENT_MARK = ' ✔';
 // Enough to go through every row, of which there were 13 when measured.

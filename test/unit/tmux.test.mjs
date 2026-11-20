@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { hasTmux, startPane } from '../pane.mjs';
-import { closePage, hasOpenDialog, pressPageKey, readPage, settleCommand, showsDialog, typeOnPage } from '../../src/terminal.mjs';
+import { closePage, hasOpenDialog, hasTerminal, pressPageKey, readPage, settleCommand, showsDialog, typeOnPage } from '../../src/terminal.mjs';
+import { openPanes } from '../../src/tmux.mjs';
 
 const FAST = { limit: 400, check: 10, requestSettle: 20, pageSettle: 60 };
 const screen = (...lines) => [...lines, '────', '❯ ', '────', '  ⏸ manual mode on · ? for shortcuts', '', ''].join('\n');
@@ -163,3 +168,30 @@ test('what\'s open is read with its colours, from under the edge it opened under
   assert.ok(lines[1].some(run => run.color === '#afd7ff' && run.text.includes('docs')));
 });
 
+test('a pane is there while its server lists it, and gone with the pane or with the server', { skip: !hasTmux }, async t => {
+  const { session } = await paneShowing(t, 'plain');
+  assert.ok((await openPanes(session)).has(session.pane));
+  assert.equal(await hasTerminal(session), true);
+  assert.equal(await hasTerminal({ ...session, pane: '%999' }), false);
+  // The last pane's end is the server's too, as when what ran in it is killed.
+  execFileSync('tmux', ['-S', session.tmuxSocket, 'kill-server']);
+  assert.deepEqual([...(await openPanes(session))], []);
+  assert.equal(await hasTerminal(session), false);
+});
+
+test('a server that can\'t be asked says nothing of its panes, and what it said once does for every session there', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-notmux-'));
+  const calls = path.join(dir, 'calls');
+  fs.writeFileSync(path.join(dir, 'tmux'), `#!/bin/sh\necho x >> ${calls}\necho 'lost server' >&2\nexit 1\n`, { mode: 0o755 });
+  const { PATH } = process.env;
+  process.env.PATH = `${dir}:${PATH}`;
+  t.after(() => {
+    process.env.PATH = PATH;
+    fs.rmSync(dir, { recursive: true });
+  });
+  assert.equal(await openPanes({ tmuxSocket: '/nowhere/s' }), undefined);
+  const asked = new Map();
+  assert.equal(await hasTerminal({ pane: '%1', tmuxSocket: '/nowhere/s' }, asked), undefined);
+  assert.equal(await hasTerminal({ pane: '%2', tmuxSocket: '/nowhere/s' }, asked), undefined);
+  assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 2, 'asked once by itself, and once for the two sessions');
+});

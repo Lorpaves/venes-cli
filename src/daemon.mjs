@@ -34,8 +34,9 @@ import { readRegistry, writeRegistry } from './registry.mjs';
 import { followTranscripts, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
 import {
-  closePage, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
+  closePage, hasTerminal, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
 } from './terminal.mjs';
+import { TerminalWatch } from './terminalwatch.mjs';
 import { choicesOf, chooseRow, isAbout, knownTexts, readPrompt } from './prompt.mjs';
 import {
   MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
@@ -256,6 +257,17 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
 
   const heldTimer = setInterval(() => { for (const session of store.liveSessions()) deliverHeld(session); }, HELD_CHECK_MS);
   heldTimer.unref();
+
+  // A session whose terminal closed with nothing said is over: see TerminalWatch.
+  const terminalWatch = new TerminalWatch({
+    store,
+    hasTerminal,
+    isRunning: async (session, asked) => {
+      if (!asked.has('running')) asked.set('running', library.running());
+      return (await asked.get('running')).some(found => found.id === session.id);
+    },
+  });
+  const stopWatching = terminalWatch.start();
 
   store.on('event', event => {
     if (RECOUNTED_AFTER.has(event.kind)) recount(event.sessionId);
@@ -953,6 +965,9 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       if (left === 'open') askAgain({ store, terminal: resumeTerminal() }, known);
       if (left === 'gone') return resume({ ...msg, text, attachments });
       const session = sessionWithPane(msg.sessionId);
+      // Its terminal can have closed with nothing said, before that's been noticed. The session is over,
+      // and the message picks it up again, as it would any that had ended.
+      if (await terminalWatch.endIfGone(session)) return resume({ ...msg, text, attachments });
       const message = { clientId: msg.clientId, text, lane: msg.lane ?? 'next', attachments };
       if (store.mustHold(session, msg.lane)) {
         store.hold(session, message);
@@ -1041,7 +1056,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       }
     });
   });
-  return { server, subscribers, heldTimer };
+  return { server, subscribers, heldTimer, stopWatching };
 }
 
 function lastWords(file) {
@@ -1129,7 +1144,7 @@ export async function startDaemon(paths) {
   // Terminal sessions: the ones whose shells went on while the helper didn't are followed again.
   const terminals = new Terminals({ store, root: paths.terminals, shellDir: paths.shellDir, terminal: resumeTerminal() });
   await terminals.restore().catch(error => console.error(`terminals: ${error.stack}`));
-  const { server: clientServer, subscribers, heldTimer } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity, usage, terminals);
+  const { server: clientServer, subscribers, heldTimer, stopWatching } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity, usage, terminals);
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);
@@ -1148,6 +1163,7 @@ export async function startDaemon(paths) {
       terminals.stop();
       updater.stop();
       clearInterval(heldTimer);
+      stopWatching();
       for (const socket of subscribers) socket.destroy();
       hookServer.closeAllConnections();
       hookServer.close();

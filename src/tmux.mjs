@@ -91,6 +91,16 @@ export async function closeSession(name, { tmuxSocket }) {
   await tmux(tmuxSocket, ['kill-session', '-t', `=${name}`]);
 }
 
+// Every pane the server has now, by id. None when the server has gone, which takes its panes with it, and
+// nothing when it couldn't be asked, which says nothing about them.
+export async function openPanes({ tmuxSocket }) {
+  try {
+    return new Set((await tmux(tmuxSocket, ['list-panes', '-a', '-F', '#{pane_id}'])).split('\n').filter(Boolean));
+  } catch (error) {
+    return /no server running|error connecting to/.test(`${error.stderr ?? ''}${error.message}`) ? new Set() : undefined;
+  }
+}
+
 export async function isSessionOpen(name, { tmuxSocket }) {
   try {
     await tmux(tmuxSocket, ['has-session', '-t', `=${name}`]);

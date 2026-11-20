@@ -277,6 +277,8 @@ Every event up to `seq` is covered by the reply, and every later one follows it 
 
 `send` to a session that isn't running runs `claude --resume` in the session's folder, with the message as its first prompt: in a window labelled `venes-<id>` of a Rex session called `Venes` if Rex is on this Mac, and otherwise in a tmux session named `venes-<id>`. The helper keeps that Rex session's id in `~/.venes/rex-session` and gives it its name back, because Rex can have a Claude Code in it rename it after its task. The reply has `resumed: true` once Claude has the message, and from then on it's a session like any other, with the same id. It keeps the permission mode [Claude Code gives a resumed session](https://code.claude.com/docs/en/sessions#permission-mode-on-resume). A session running outside both is refused with `no_pane`, because resuming it would put two processes on one transcript.
 
+**A terminal that closes with nothing said.** Claude Code says when a session ends, and a session whose terminal closes doesn't always get to: Rex gives what ran in a closed terminal a second before it kills it, which is about what Claude Code takes to end there, and one killed outright says nothing. So every ten seconds the helper looks for the terminal of each Claude Code session it can type into, among the panes of its tmux server or the blocks of its Rex server. One that's twice not there, a second apart, with the session no longer among those `claude agents` lists as running, ends the session: `session.ended` with `reason: "terminal_closed"`. A `send` to such a session looks first too, so it resumes the session where it would have failed in a terminal that wasn't there. A terminal server that can't be asked ends nothing, and nor does a terminal the session only names: one started from an editor that was itself started in a terminal carries that terminal's name, and goes on after it closes.
+
 ### Commands and models
 
 `capabilities` comes from the Agent SDK's `initializationResult()`, in a session that's never given anything to do. It's read once per folder and kept for five minutes, so a new skill can take that long to show up.
@@ -645,7 +647,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `session.changes` | `files`, `added`, `removed`: how much has changed in its repository, `files: 0` for nothing |
 | `session.model` | `model` |
 | `session.effort` | `effort` |
-| `session.ended` | `reason` (`replaced` after `/clear` or `/resume`) |
+| `session.ended` | `reason` (`replaced` after `/clear` or `/resume`, `terminal_closed` when the helper found the session's terminal gone with nothing said) |
 | `session.deleted` | |
 | `message.user` | `text`, `clientId`, `attachments` (only when it has files), `shell` (only for a line run with `!`, and every line of a terminal session), `input` (a line typed into a terminal session's running command) |
 | `message.output` | `stdout`, `stderr`, `replies`, `clientId`: what the line run with `!` before it printed. In a terminal session also `running`, `exitCode`, `columns`, and `screen` with `rows`: see [Terminal sessions](#terminal-sessions) |

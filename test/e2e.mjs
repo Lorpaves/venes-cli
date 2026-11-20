@@ -2244,6 +2244,46 @@ T('a_close_asked_during_a_turn_waits_for_its_end', { mode: 'bypassPermissions' }
   await r.kind('session.ended', 20000);
 });
 
+// Claude Code killed outright says nothing, and its terminal goes with it. The helper finds the terminal
+// gone, which ends the session, and a message picks it up again. (A terminal closed in Rex can end the
+// same way: Rex gives Claude Code a second before it kills it, which is about what Claude Code takes to end.)
+const claudePid = () => (inRex
+  ? JSON.parse(rex('block', 'call', '-s', inRex.session, '-b', inRex.block, 'process', '{}')).foreground.pid
+  : Number(tmux('display-message', '-p', '-t', 'run', '#{pane_pid}').trim()));
+async function killedOutright(r) {
+  await r.type('Reply with only the word STORED.');
+  await r.turnEnd();
+  const { id } = await ownSession(r);
+  r.after(() => quitRestarted(r, id));
+  r.mark();
+  process.kill(claudePid(), 'SIGKILL');
+  return id;
+}
+const answersAgain = (r, id) => r.wait(e => e.kind === 'turn.end' && e.sessionId === id && /AGAIN/.test(e.lastMessage), 40000, 'turn.end AGAIN');
+
+async function aSessionKilledOutrightIsOver(r) {
+  const id = await killedOutright(r);
+  const ended = await r.wait(e => e.kind === 'session.ended' && e.sessionId === id, 20000, 'session.ended');
+  assert.equal(ended.reason, 'terminal_closed');
+  assert.equal((await r.client.request('sessions')).sessions.find(s => s.id === id).status, 'ended');
+  assert.equal((await r.client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.' })).resumed, true);
+  await answersAgain(r, id);
+}
+T('a_session_killed_outright_is_over', { mode: 'bypassPermissions' }, aSessionKilledOutrightIsOver);
+T('in_rex_a_session_killed_outright_is_over', { rex: true, mode: 'bypassPermissions' }, aSessionKilledOutrightIsOver);
+
+// A message that gets there before the helper has looked finds the terminal gone itself.
+async function aMessageRightAfterResumesIt(r) {
+  const id = await killedOutright(r);
+  // Its terminal closes a moment after it.
+  await delay(1500);
+  assert.equal((await r.client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.' })).resumed, true);
+  await answersAgain(r, id);
+  assert.ok(r.events.some(e => e.kind === 'session.ended' && e.sessionId === id && e.reason === 'terminal_closed'), 'and the session was said to be over first');
+}
+T('a_message_for_a_session_killed_outright_resumes_it', { mode: 'bypassPermissions' }, aMessageRightAfterResumesIt);
+T('in_rex_a_message_for_a_session_killed_outright_resumes_it', { rex: true, mode: 'bypassPermissions' }, aMessageRightAfterResumesIt);
+
 T('a_stopped_session_can_be_deleted_for_good', { mode: 'bypassPermissions' }, async r => {
   await r.type('Reply with only the word STORED.');
   await r.turnEnd();

@@ -183,6 +183,17 @@ export async function isSessionOpen(_, target) {
   }
 }
 
+// Every block the server has now, by id, in whichever session: a block can be moved to another. None
+// when Rex isn't running, which takes its blocks with it, and nothing when it couldn't be asked, as by a
+// Rex too old to list them all.
+export async function openPanes(target) {
+  try {
+    return new Set((await rex(target, ['--autostart=false', 'block', 'ls', '-A', '-q', '--short=false'])).split('\n').map(id => id.trim()).filter(Boolean));
+  } catch (error) {
+    return /no Rex server is running/.test(`${error.stderr ?? ''}${error.message}`) ? new Set() : undefined;
+  }
+}
+
 // The block of a window started with `startSession`, by the label it was given, or nothing when it has
 // gone. Only the helper's own session is looked in, and none is made to look in.
 export async function findSession(name) {

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { cachedAccount, isInstalled, isSessionOpen, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
-import { resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom, sendMessage } from '../../src/terminal.mjs';
+import { cachedAccount, isInstalled, isSessionOpen, openPanes, paste, pressKey, readScreen, runsClaude, startSession, tailnetAccountOf } from '../../src/rex.mjs';
+import { hasTerminal, resumeTerminal, sendEscape, sendText, settleCommand, terminalFrom, sendMessage } from '../../src/terminal.mjs';
 
 const SESSION = { pane: 'block:1', rexSession: 'session:1' };
 
@@ -17,6 +17,7 @@ const keep = id => (id === undefined ? fs.rmSync(KEPT, { force: true }) : fs.wri
 const kept = () => (fs.existsSync(KEPT) ? fs.readFileSync(KEPT, 'utf8').trim() : undefined);
 
 // A rex command that writes down how it was called, and answers from `replies` by the words in it.
+// `fail` fails as an unknown block does, and `fail:` with what follows as its error.
 function fakeRex(t, replies = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-rex-'));
   const log = path.join(dir, 'calls');
@@ -28,7 +29,7 @@ const input = args.at(-1) === '-' ? fs.readFileSync(0, 'utf8') : undefined;
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, input, server: process.env.REX_SERVER }) + '\\n');
 const replies = ${JSON.stringify(replies)};
 const reply = Object.entries(replies).find(([words]) => words.split(' ').every(word => args.includes(word)));
-if (reply?.[1] === 'fail') { console.error('no such block'); process.exit(3); }
+if (typeof reply?.[1] === 'string' && reply[1].startsWith('fail')) { console.error(reply[1].slice(5) || 'no such block'); process.exit(3); }
 if (reply) process.stdout.write(reply[1]);
 `, { mode: 0o755 });
   const { PATH } = process.env;
@@ -192,6 +193,35 @@ test('it\'s open while its block is, because Rex keeps a session after its last 
 test('with no session left to look in, it has closed', async t => {
   fakeRex(t, { block: 'fail' });
   assert.equal(await isSessionOpen('venes-1', SESSION), false);
+});
+
+test('a block is there while the server lists it, in whichever session', async t => {
+  const calls = fakeRex(t, { ls: 'block:1\nblock:9\n' });
+  assert.deepEqual([...(await openPanes(SESSION))], ['block:1', 'block:9']);
+  assert.deepEqual(calls()[0].args, ['--autostart=false', 'block', 'ls', '-A', '-q', '--short=false']);
+  const asked = new Map();
+  assert.equal(await hasTerminal(SESSION, asked), true);
+  assert.equal(await hasTerminal({ ...SESSION, rexSession: 'session:2', pane: 'block:9' }, asked), true, 'one moved to another session is still there');
+  assert.equal(await hasTerminal({ ...SESSION, pane: 'block:2' }, asked), false);
+  assert.equal(calls().length, 2, 'the server is asked once for the three');
+});
+
+test('a server with no blocks has none of them', async t => {
+  fakeRex(t, { ls: '' });
+  assert.deepEqual([...(await openPanes(SESSION))], []);
+  assert.equal(await hasTerminal(SESSION), false);
+});
+
+test('with Rex not running its blocks have gone, and a Rex that can\'t be asked says nothing of them', async t => {
+  fakeRex(t, { ls: 'fail:Error: no Rex server is running at /tmp/rex.sock, and autostart is disabled' });
+  assert.deepEqual([...(await openPanes(SESSION))], []);
+  assert.equal(await hasTerminal(SESSION), false);
+});
+
+test('a Rex too old to list every block says nothing of them', async t => {
+  fakeRex(t, { ls: "fail:Error: unknown shorthand flag: 'A' in -A" });
+  assert.equal(await openPanes(SESSION), undefined);
+  assert.equal(await hasTerminal(SESSION), undefined);
 });
 
 test('a block from before a restart is only kept if Claude is still in it', async t => {

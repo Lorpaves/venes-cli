@@ -51,6 +51,15 @@ export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 export const isShell = program => /^-?(zsh|bash|fish|sh|dash|ksh|tcsh|csh|nu|pwsh|powershell|cmd)(\.exe)?$/i.test(String(program ?? '').split(/[\\/]/).pop());
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
 const backendOf = session => (session.rexSession ? rex : tmux);
+// Whether the terminal a session is in is still there: false once it has closed, and nothing when that
+// can't be told. `asked` keeps what each terminal's server said, for the sessions that share one.
+const serverOf = session => (session.rexSession ? `rex ${session.rexServer ?? ''}` : `tmux ${session.tmuxSocket ?? ''}`);
+export async function hasTerminal(session, asked = new Map()) {
+  const server = serverOf(session);
+  if (!asked.has(server)) asked.set(server, backendOf(session).openPanes(session));
+  const panes = await asked.get(server);
+  return panes ? panes.has(session.pane) : undefined;
+}
 export const readScreen = session => backendOf(session).readScreen(session);
 // With the escape sequences that colour it.
 export const readStyledScreen = session => backendOf(session).readStyledScreen(session);

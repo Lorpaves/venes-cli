@@ -2857,6 +2857,94 @@ T('a_change_is_staged_committed_and_the_branch_switched', { mode: 'bypassPermiss
   }
 });
 
+// A branch made from afar, pushed to a remote and pulled from it, and what has changed thrown away. The
+// remote is a folder of the test's own, so nothing goes over the network.
+T('a_branch_is_made_pushed_and_pulled_and_changes_are_thrown_away', { mode: 'bypassPermissions' }, async r => {
+  const { id: sessionId } = await r.session();
+  if (fs.existsSync(path.join(WS, '.git'))) throw new Error(`${WS} is a repository of its own, which this would commit to`);
+  const folder = prefix => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  const [remote, other] = [folder('venes-e2e-remote-'), folder('venes-e2e-other-')];
+  const run = (...args) => execFileSync('git', ['-c', 'user.name=E2E', '-c', 'user.email=e2e@example.com', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' });
+  const git = (...args) => run('-C', WS, ...args);
+  const theirs = (name, text) => {
+    fs.writeFileSync(path.join(other, name), text);
+    run('-C', other, 'add', '-A');
+    run('-C', other, 'commit', '-q', '-m', `E2E: theirs, ${name}`);
+    run('-C', other, 'push', '-q');
+  };
+  const kept = path.join(WS, 'e2e-kept.txt');
+  const state = async () => (await r.client.request('git', { sessionId })).git;
+  try {
+    run('init', '-q', '--bare', '-b', 'e2e-main', remote);
+    git('init', '-q', '-b', 'e2e-main');
+    for (const [key, value] of [
+      ['user.name', 'E2E'], ['user.email', 'e2e@example.com'], ['commit.gpgsign', 'false'], ['core.hooksPath', '/dev/null'], ['pull.rebase', 'false'],
+      ['push.default', 'simple'],
+    ]) git('config', key, value);
+    fs.writeFileSync(path.join(WS, '.git', 'info', 'exclude'), '/*\n!/e2e-*\n');
+    fs.writeFileSync(kept, 'one\n');
+    git('add', 'e2e-kept.txt');
+    git('commit', '-q', '-m', 'E2E: the first');
+
+    // With no remote there's nowhere to push, and once there's one the branch is made on it.
+    assert.equal((await state()).remote, undefined);
+    await assert.rejects(r.client.request('gitPush', { sessionId }), { code: 'no_remote' });
+    await assert.rejects(r.client.request('gitPull', { sessionId }), { code: 'no_upstream' });
+    git('remote', 'add', 'origin', remote);
+    assert.deepEqual([(await state()).remote, (await state()).upstream], ['origin', undefined]);
+    const pushed = await r.client.request('gitPush', { sessionId });
+    assert.deepEqual([pushed.branch, pushed.upToDate], ['e2e-main', false]);
+    assert.deepEqual([(await state()).upstream, (await state()).ahead], ['origin/e2e-main', 0]);
+    assert.equal((await r.client.request('gitPush', { sessionId })).upToDate, true);
+
+    // A new branch, which the folder moves to, and which a push makes on the remote too.
+    assert.equal((await r.client.request('gitBranchCreate', { sessionId, name: 'e2e-topic' })).branch, 'e2e-topic');
+    assert.equal((await state()).branch, 'e2e-topic');
+    await assert.rejects(r.client.request('gitBranchCreate', { sessionId, name: 'e2e-topic' }), { code: 'branch_exists' });
+    await assert.rejects(r.client.request('gitBranchCreate', { sessionId, name: 'not a name' }), { code: 'bad_branch' });
+    assert.equal((await r.client.request('gitPush', { sessionId })).upToDate, false);
+    assert.equal((await state()).upstream, 'origin/e2e-topic');
+
+    // What has changed is thrown away: a changed file is as it was committed, a new one is gone, and
+    // both are in the Trash, which is a folder of the test's own.
+    const before = new Set(fs.readdirSync(TRASH));
+    fs.writeFileSync(kept, 'changed\n');
+    fs.writeFileSync(path.join(WS, 'e2e-new.txt'), 'new\n');
+    assert.deepEqual((await state()).changes.map(file => file.path).sort(), ['e2e-kept.txt', 'e2e-new.txt']);
+    await r.client.request('gitDiscard', { sessionId, paths: ['e2e-kept.txt'] });
+    assert.equal(fs.readFileSync(kept, 'utf8'), 'one\n');
+    await r.client.request('gitDiscard', { sessionId, all: true });
+    assert.equal(fs.existsSync(path.join(WS, 'e2e-new.txt')), false);
+    assert.deepEqual((await state()).changes, []);
+    const trashed = fs.readdirSync(TRASH).filter(name => !before.has(name)).map(name => name.replace(/^\d+-/, '')).sort();
+    assert.deepEqual(trashed, ['e2e-kept.txt', 'e2e-new.txt']);
+    await assert.rejects(r.client.request('gitDiscard', { sessionId, paths: ['../outside'] }), { code: 'bad_path' });
+
+    // Someone else pushes to the branch, and a pull brings it in.
+    run('clone', '-q', '-b', 'e2e-topic', remote, other);
+    theirs('e2e-theirs.txt', 'theirs\n');
+    assert.equal((await r.client.request('gitPull', { sessionId })).upToDate, false);
+    assert.equal(fs.readFileSync(path.join(WS, 'e2e-theirs.txt'), 'utf8'), 'theirs\n');
+    assert.equal((await r.client.request('gitPull', { sessionId })).upToDate, true);
+
+    // A pull that would stop on a conflict is taken back, and the folder is as it was.
+    theirs('e2e-kept.txt', 'theirs\n');
+    fs.writeFileSync(kept, 'mine\n');
+    git('commit', '-q', '-am', 'E2E: mine');
+    const head = git('rev-parse', 'HEAD');
+    await assert.rejects(r.client.request('gitPull', { sessionId }), error => {
+      assert.equal(error.code, 'pull_conflict');
+      assert.deepEqual(error.details, { paths: ['e2e-kept.txt'] });
+      return true;
+    });
+    assert.deepEqual([git('rev-parse', 'HEAD'), fs.readFileSync(kept, 'utf8'), fs.existsSync(path.join(WS, '.git', 'MERGE_HEAD'))], [head, 'mine\n', false]);
+    // And a push the remote has moved on from is refused, in git's words.
+    await assert.rejects(r.client.request('gitPush', { sessionId }), { code: 'git_failed' });
+  } finally {
+    for (const gone of [path.join(WS, '.git'), remote, other]) fs.rmSync(gone, { recursive: true, force: true });
+  }
+});
+
 // A page published with the Artifact tool is private to its account on claude.ai, so a phone has it from the
 // file it was made from. Nothing is published here: the call is written into the session's own transcript the
 // way Claude Code writes one, which is all the helper goes by.

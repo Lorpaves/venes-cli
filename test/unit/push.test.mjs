@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PushDevices, noticeFor, notify, payloadFor, seal, titleFor } from '../../src/push.mjs';
+import { PushDevices, noticeFor, notify, payloadFor, requestLine, seal, titleFor } from '../../src/push.mjs';
 
 const KEY = crypto.randomBytes(32).toString('base64');
 const TOKEN = 'ab'.repeat(32);
@@ -43,6 +43,20 @@ test('a request and a turn that ends are worth one, as in the app', () => {
   assert.equal([...noticeFor({ kind: 'turn.end', sessionId: 's1', lastMessage: '写'.repeat(400) }, 'T').body].length, 180);
   assert.equal(noticeFor({ kind: 'turn.start', sessionId: 's1' }, 'T'), undefined);
   assert.equal(noticeFor({ kind: 'turn.end' }, 'T'), undefined);
+});
+
+test('a request\'s notice says which it is and what it asks leave for, in a line', () => {
+  const request = { id: 'r1', sessionId: 's1', kind: 'permission', toolName: 'Bash', input: { command: 'npm test\n# and then more', description: 'Run the tests' } };
+  assert.deepEqual(noticeFor({ kind: 'request.opened', sessionId: 's1', request }, 'Fix'), {
+    kind: 'needsInput', session: 's1', title: 'Fix', body: '', request: { id: 'r1', kind: 'permission', tool: 'Bash', about: 'npm test' },
+  });
+  // A question has nothing of the kind to say in a line.
+  const question = { id: 'r2', kind: 'question', toolName: 'AskUserQuestion', input: { questions: [{ question: 'Which?' }] } };
+  assert.deepEqual(noticeFor({ kind: 'request.opened', sessionId: 's1', request: question }, 'Fix').request, { id: 'r2', kind: 'question', tool: 'AskUserQuestion' });
+  assert.equal(requestLine({ input: { file_path: '/w/app/src/main.swift' } }), '/w/app/src/main.swift');
+  assert.equal(requestLine({ input: { description: 'Look it up', url: 'https://example.com/a' } }), 'https://example.com/a');
+  assert.equal([...requestLine({ input: { command: '写'.repeat(500) } })].length, 180);
+  for (const none of [undefined, {}, { input: 'no' }, { input: { command: '  ' } }, { input: { command: ['ls'] } }]) assert.equal(requestLine(none), undefined);
 });
 
 test('a session is named as the app names it', () => {

@@ -1,8 +1,9 @@
 // What git says of a session's folder, for someone following the work from afar: the branch, what has
 // changed and by how much, a file's diff, the commits, and the branches. That's all read, with the forms
 // git keeps stable for programs, and `--no-optional-locks` keeps even `git status` from taking the
-// index's lock, which the session's own git may want. At the foot are the few things a reader can do
-// from afar: stage and unstage files, commit what's staged, and switch to another branch.
+// index's lock, which the session's own git may want. At the foot are the things a reader can do from
+// afar: stage and unstage files, throw a file's changes away, commit what's staged, push and pull the
+// branch, switch to another branch, and make one.
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,6 +16,14 @@ const exec = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
 // A commit runs the repository's hooks, and a switch writes the folder's files.
 const CHANGE_TIMEOUT_MS = 60_000;
+// A push and a pull go to the remote and back.
+const NETWORK_TIMEOUT_MS = 120_000;
+// The files a pull stopped on that are named.
+const CONFLICTS = 20;
+// As long as a branch's name is let be.
+const BRANCH_CHARS = 200;
+// How many things go to the Trash at a time.
+const TRASHED_AT_ONCE = 8;
 // How much of what git said goes back to the reader when it wouldn't do something.
 const REASON_CHARS = 600;
 const MESSAGE_BYTES = 64 * 1024;
@@ -46,6 +55,7 @@ const UNSTAGED = { M: 'modified', D: 'deleted', T: 'modified', A: 'added' };
 export function parseStatus(text) {
   const state = { ahead: 0, behind: 0, staged: [], changes: [] };
   let commit;
+  let isCounted = false;
   const fields = text.split('\0');
   for (let at = 0; at < fields.length; at++) {
     const entry = fields[at];
@@ -53,6 +63,7 @@ export function parseStatus(text) {
     else if (entry.startsWith('# branch.head ')) state.branch = entry.slice('# branch.head '.length);
     else if (entry.startsWith('# branch.upstream ')) state.upstream = entry.slice('# branch.upstream '.length);
     else if (entry.startsWith('# branch.ab ')) {
+      isCounted = true;
       const [, ahead, behind] = /\+(\d+) -(\d+)/.exec(entry) ?? [];
       state.ahead = Number(ahead) || 0;
       state.behind = Number(behind) || 0;
@@ -68,6 +79,9 @@ export function parseStatus(text) {
       if (tree !== '.') state.changes.push({ path: file, status: UNSTAGED[tree] ?? 'modified' });
     }
   }
+  // Git counts a branch against the one it follows only while that one is there. With no count, the
+  // one it follows is gone from the remote, or was never fetched.
+  if (state.upstream && !isCounted) state.upstreamGone = true;
   // With no branch checked out, the commit it's at stands in, as git's own prompt has it.
   if (state.branch === '(detached)') {
     state.branch = commit && commit !== '(initial)' ? commit.slice(0, SHORT_COMMIT) : undefined;
@@ -154,9 +168,11 @@ export function parseBranches(text) {
   });
 }
 
-function git(cwd, args, { ok = [] } = {}) {
+// With `literal`, paths are named as they are, with none of git's patterns read into them.
+function git(cwd, args, { ok = [], literal = false } = {}) {
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
-  return exec('git', ['--no-optional-locks', '-c', 'core.quotePath=false', '-C', cwd, ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env })
+  const options = ['--no-optional-locks', '-c', 'core.quotePath=false', ...(literal ? ['--literal-pathspecs'] : []), '-C', cwd];
+  return exec('git', [...options, ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env })
     .then(({ stdout }) => stdout, error => {
       // `git diff --no-index` says there's a difference with its exit code, which is no failure.
       if (ok.includes(error.code) && typeof error.stdout === 'string') return error.stdout;
@@ -246,16 +262,28 @@ function linesOf(file) {
   }
 }
 
+// The remote a branch that follows none is pushed to: the one git is set to push to, the only one there
+// is, or origin. None where the repository has no remote.
+async function pushRemote(root) {
+  const names = (await git(root, ['remote']).catch(() => '')).split('\n').filter(Boolean);
+  if (names.length < 2) return names[0];
+  const set = (await git(root, ['config', '--get', 'remote.pushDefault']).catch(() => '')).trim();
+  if (names.includes(set)) return set;
+  return names.includes('origin') ? 'origin' : names[0];
+}
+
 // The branch, how far it is from the one it follows, and what has changed: `staged` is what the next
 // commit would take, `changes` what's only in the folder, each file with how many lines it gained and
-// lost. Undefined outside a repository.
+// lost. `remote` is where a push would make a branch for one that follows none. Undefined outside a
+// repository.
 export async function status(cwd) {
   const root = await repositoryOf(cwd);
   if (!root) return undefined;
-  const [porcelain, unstaged, staged] = await Promise.all([
+  const [porcelain, unstaged, staged, remote] = await Promise.all([
     git(root, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all']),
     git(root, ['diff', '--numstat', '-z', '-M']),
     git(root, ['diff', '--cached', '--numstat', '-z', '-M']),
+    pushRemote(root),
   ]);
   const state = parseStatus(porcelain);
   const [inFolder, inIndex] = [parseNumstat(unstaged), parseNumstat(staged)];
@@ -263,7 +291,10 @@ export async function status(cwd) {
     ...file, ...(file.status === 'untracked' ? linesOf(path.join(root, file.path)) : counts.get(file.path)),
   }));
   const isTruncated = state.staged.length > CHANGED_FILES || state.changes.length > CHANGED_FILES;
-  return { root, ...state, staged: counted(state.staged, inIndex), changes: counted(state.changes, inFolder), ...(isTruncated && { truncated: true }) };
+  return {
+    root, ...state, ...(remote && { remote }), staged: counted(state.staged, inIndex), changes: counted(state.changes, inFolder),
+    ...(isTruncated && { truncated: true }),
+  };
 }
 
 // How much has changed since the last commit, for one line to say: the files a status lists, staged or not,
@@ -363,13 +394,23 @@ export async function branches(cwd) {
   return { branches: parseBranches(await git(root, ['for-each-ref', '--sort=-committerdate', `--format=${format}`, 'refs/heads'])) };
 }
 
+// What keeps git, and the ssh it runs, from asking anyone anything on the way to a remote: no password,
+// no passphrase, no message to edit. There's no one at the computer to answer, and a question would
+// only hold things up until their time ran out. What's kept for git already, in a keychain or with an
+// agent, is used as it would be in a terminal.
+const UNATTENDED = {
+  GIT_ASKPASS: '', SSH_ASKPASS: '', SSH_ASKPASS_REQUIRE: 'never', GCM_INTERACTIVE: 'never', GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true',
+  GIT_MERGE_AUTOEDIT: 'no',
+};
+
 // Git, to change something: it takes the locks it needs, and what it says when it won't is for the reader.
-async function change(root, args, { literal = false } = {}) {
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+// With `network`, it's something that goes to a remote.
+async function change(root, args, { literal = false, network = false } = {}) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', ...(network && UNATTENDED) };
   // Paths are named as they are, with none of git's patterns read into them.
-  const options = ['-c', 'core.quotePath=false', ...(literal ? ['--literal-pathspecs'] : []), '-C', root];
+  const options = ['-c', 'core.quotePath=false', ...(network ? ['-c', 'core.askPass='] : []), ...(literal ? ['--literal-pathspecs'] : []), '-C', root];
   try {
-    return (await exec('git', [...options, ...args], { timeout: CHANGE_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env })).stdout;
+    return (await exec('git', [...options, ...args], { timeout: network ? NETWORK_TIMEOUT_MS : CHANGE_TIMEOUT_MS, maxBuffer: OUTPUT_BYTES, env })).stdout;
   } catch (error) {
     if (error.killed) throw new HelperError('git_failed', 'Git took too long, and was stopped.');
     const said = `${error.stderr ?? ''}`.trim() || `${error.stdout ?? ''}`.trim() || error.message;
@@ -425,4 +466,110 @@ export async function switchBranch(cwd, { branch } = {}) {
   if (typeof branch !== 'string' || !names.includes(branch)) throw new HelperError('no_branch', 'This repository has no such branch.');
   await change(root, ['switch', '--no-guess', branch]);
   return { branch };
+}
+
+// Throws away what has changed in the folder and isn't staged, for the paths named, or with `all` for
+// the whole repository: a file git follows is as the next commit has it again, and one git doesn't
+// follow is gone, a new folder whole. Nothing is lost for good: what a changed file was, and whatever
+// git didn't follow, goes to the Trash first, through `trash(root, path)`. What's staged stays staged,
+// and what git ignores is left where it is.
+//
+// `keeps` are folders that are never cleared out, the home folder being one: in a repository whose top
+// is one of them, or above one, `all` leaves what git doesn't follow where it is, which there is
+// everything else the folder has in it.
+export async function discard(cwd, { paths, all } = {}, { trash, keeps = [] } = {}) {
+  const root = await rootOf(cwd);
+  const named = namedPaths(root, paths, all);
+  const among = named.length ? named : ['.'];
+  const list = async args => (await git(root, [...args, '-z', '--', ...among], { literal: true })).split('\0').filter(Boolean);
+  const holds = kept => { const inside = path.relative(root, path.resolve(kept)); return !inside.startsWith('..') && !path.isAbsolute(inside); };
+  const isKept = all === true && keeps.some(holds);
+  const [untracked, unmerged, ...tracked] = await Promise.all([
+    isKept ? [] : list(['ls-files', '--others', '--exclude-standard', '--directory', '--no-empty-directory']),
+    list(['diff', '--name-only', '--diff-filter=U']),
+    list(['diff', '--name-only', '--diff-filter=MT']),
+    list(['diff', '--name-only', '--diff-filter=D']),
+  ]);
+  // A file two sides changed is listed as changed too, and is neither thrown away nor put back.
+  const [changed, gone] = tracked.map(names => names.filter(name => !unmerged.includes(name)));
+  // A few at a time: a folder of new files can be hundreds.
+  const leaving = [...changed, ...untracked.map(name => name.replace(/\/$/, ''))];
+  for (let at = 0; at < leaving.length; at += TRASHED_AT_ONCE) {
+    await Promise.all(leaving.slice(at, at + TRASHED_AT_ONCE).map(name => trash(root, name)));
+  }
+  const restored = [...changed, ...gone];
+  if (restored.length) await change(root, ['restore', '--worktree', '--', ...restored], { literal: true });
+  // A file two sides changed isn't one to put back: git says so, in its own words.
+  if (unmerged.length) await change(root, ['restore', '--worktree', '--', ...unmerged], { literal: true });
+  return {};
+}
+
+// Whether a push sent nothing, from what git prints for programs: a line for each branch, which
+// starts with `=` for one the remote had already.
+export function pushedNothing(printed) {
+  const told = printed.split('\n').filter(line => /^[ +\-*!=]\t/.test(line));
+  return told.length > 0 && told.every(line => line.startsWith('='));
+}
+
+async function onBranch(root) {
+  const state = parseStatus(await git(root, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=no']));
+  if (state.detached || !state.branch) throw new HelperError('detached_head', 'You’re not on a branch right now.');
+  return state;
+}
+
+// Sends the branch the folder is on to the branch it follows. One that follows none is made on the
+// repository's remote under its own name, and follows that from then on. Nothing is forced: where the
+// remote has commits this branch hasn't, git refuses, and says so.
+export async function push(cwd) {
+  const root = await rootOf(cwd);
+  const state = await onBranch(root);
+  const args = ['push', '--porcelain'];
+  if (!state.upstream) {
+    const remote = await pushRemote(root);
+    if (!remote) throw new HelperError('no_remote', 'No remote is set up for this repository.');
+    args.push('--set-upstream', remote, `refs/heads/${state.branch}:refs/heads/${state.branch}`);
+  }
+  const printed = await change(root, args, { network: true });
+  return { branch: state.branch, upToDate: pushedNothing(printed) };
+}
+
+// Brings in what the branch it follows has that this one hasn't, the way git is set up to on this
+// computer: by a merge, a rebase, or only where nothing has to be put together. A pull that stops on
+// a conflict is taken back, which leaves the folder as it was: there's no one at the computer to settle
+// it, and a session working there would find its files half merged. A merge or a rebase that was under
+// way before is its owner's: git refuses to pull then, and nothing is taken back.
+export async function pull(cwd) {
+  const root = await rootOf(cwd);
+  const state = await onBranch(root);
+  if (!state.upstream) throw new HelperError('no_upstream', 'This branch isn’t tracking a remote branch.');
+  const gitFolder = path.resolve(root, (await git(root, ['rev-parse', '--git-dir'])).trim());
+  const underWay = () => ['MERGE_HEAD', 'rebase-merge', 'rebase-apply'].filter(name => fs.existsSync(path.join(gitFolder, name)));
+  const head = () => git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).then(printed => printed.trim(), () => '');
+  const [before, was] = [underWay(), await head()];
+  try {
+    await change(root, ['pull', '--no-edit'], { network: true });
+  } catch (error) {
+    const left = underWay().filter(name => !before.includes(name));
+    if (!left.length) throw error;
+    const clashed = (await git(root, ['diff', '--name-only', '--diff-filter=U', '-z']).catch(() => '')).split('\0').filter(Boolean);
+    await change(root, [left.includes('MERGE_HEAD') ? 'merge' : 'rebase', '--abort']);
+    const where = clashed.length ? clashed.slice(0, CONFLICTS).join(', ') : 'some files';
+    throw new HelperError('pull_conflict', `Local and remote changes conflict in ${where}. The pull was undone, so nothing changed.`, { paths: clashed.slice(0, CONFLICTS) });
+  }
+  return { upToDate: (await head()) === was };
+}
+
+// Makes a branch where the folder is, and moves the folder to it. What has changed in the folder
+// stays as it is.
+export async function createBranch(cwd, { name } = {}) {
+  const root = await rootOf(cwd);
+  const wanted = typeof name === 'string' ? name.trim() : '';
+  const bad = () => new HelperError('bad_branch', 'That’s not a valid Git branch name.');
+  // Git reads `@{-1}` as the branch the folder was on before, and a dash as an option.
+  if (!wanted || wanted.length > BRANCH_CHARS || wanted.startsWith('-') || wanted.includes('@{')) throw bad();
+  await git(root, ['check-ref-format', '--branch', wanted]).catch(() => { throw bad(); });
+  const names = (await git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'])).split('\n').filter(Boolean);
+  if (names.includes(wanted)) throw new HelperError('branch_exists', 'A branch with that name already exists.');
+  await change(root, ['switch', '-c', wanted]);
+  return { branch: wanted };
 }

@@ -5,9 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  branches, changedPaths, commit, commitStaged, countChanges, diff, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat, parseRefs, parseStatus,
-  repositoriesOf, repositoriesUnder, repositoryOf, stage, status, switchBranch, unstage,
+  branches, changedPaths, commit, commitStaged, countChanges, createBranch, diff, discard, hunksOf, log, parseBranches, parseLog, parseNameStatus, parseNumstat,
+  parseRefs, parseStatus, pull, push, pushedNothing, repositoriesOf, repositoriesUnder, repositoryOf, stage, status, switchBranch, unstage,
 } from '../../src/git.mjs';
+
+const ON_WINDOWS = process.platform === 'win32';
 
 // A repository of the test's own, with nothing of this Mac's git settings in it.
 function repository(t) {
@@ -24,7 +26,44 @@ function repository(t) {
   for (const [key, value] of [['user.name', 'Ada'], ['user.email', 'ada@example.com'], ['commit.gpgsign', 'false'], ['core.hooksPath', '/dev/null']]) {
     git('config', key, value);
   }
-  return { root, git, write };
+  return { root, git, write, env };
+}
+
+// A repository with a remote beside it that its branch follows, and someone else's copy of that remote,
+// to move it on from: `theirs(name, text)` commits a file there and pushes it.
+function withRemote(t) {
+  const made = committed(t);
+  const folder = prefix => {
+    const made = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+    t.after(() => fs.rmSync(made, { recursive: true, force: true }));
+    return made;
+  };
+  const [remote, other] = [folder('venes-git-remote-'), folder('venes-git-other-')];
+  const run = (...args) => execFileSync('git', ['-c', 'user.name=Bo', '-c', 'user.email=bo@example.com', '-c', 'commit.gpgsign=false', ...args], { env: made.env, encoding: 'utf8' });
+  run('init', '-q', '--bare', '-b', 'main', remote);
+  made.git('remote', 'add', 'origin', remote);
+  // As git is set up here for the tests, whatever this Mac's own settings are.
+  for (const [key, value] of [['pull.rebase', 'false'], ['push.default', 'simple'], ['merge.ff', 'true']]) made.git('config', key, value);
+  made.git('push', '-q', '-u', 'origin', 'main');
+  run('clone', '-q', remote, other);
+  const theirs = (name, text) => {
+    fs.writeFileSync(path.join(other, name), text);
+    run('-C', other, 'add', '-A');
+    run('-C', other, 'commit', '-q', '-m', `Theirs: ${name}`);
+    run('-C', other, 'push', '-q');
+  };
+  return { ...made, remote, theirs };
+}
+
+// A Trash of the test's own: what went there, by its path in the repository, with what a file had in it.
+function fakeTrash(root) {
+  const went = [];
+  const trash = async (folder, name) => {
+    const target = path.join(folder, name);
+    went.push([path.relative(root, target), fs.statSync(target).isFile() ? fs.readFileSync(target, 'utf8') : null]);
+    fs.rmSync(target, { recursive: true });
+  };
+  return { went, trash };
 }
 
 function committed(t) {
@@ -424,4 +463,211 @@ test('a session that moves about keeps its repositories: where it is, where it h
   // Home has too much in it to look through.
   assert.deepEqual(await repositoriesOf({ now: top, start: top, home: top }), []);
   assert.deepEqual((await repositoriesOf({ now: ios, start: top, home: top })).map(root => path.basename(root)), ['ios']);
+});
+
+test('a branch whose own on the remote is gone says so, where git has no count for it', () => {
+  const gone = parseStatus(['# branch.oid abc', '# branch.head topic', '# branch.upstream origin/topic', ''].join('\0'));
+  assert.deepEqual([gone.upstream, gone.upstreamGone, gone.ahead, gone.behind], ['origin/topic', true, 0, 0]);
+  const counted = parseStatus(['# branch.oid abc', '# branch.head topic', '# branch.upstream origin/topic', '# branch.ab +0 -0', ''].join('\0'));
+  assert.equal(counted.upstreamGone, undefined);
+  assert.equal(parseStatus(['# branch.oid abc', '# branch.head topic', ''].join('\0')).upstreamGone, undefined);
+});
+
+test('a push that sent nothing is told from what git prints for programs', () => {
+  assert.equal(pushedNothing('To /tmp/remote\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n'), true);
+  assert.equal(pushedNothing('To /tmp/remote\n \trefs/heads/main:refs/heads/main\tabc..def\nDone\n'), false);
+  assert.equal(pushedNothing('To /tmp/remote\n*\trefs/heads/new:refs/heads/new\t[new branch]\nDone\n'), false);
+  assert.equal(pushedNothing(''), false);
+});
+
+test('a branch is pushed to the one it follows, and one that follows none is made on the remote', { skip: ON_WINDOWS }, async t => {
+  const { root, git, write } = withRemote(t);
+  assert.equal((await status(root)).remote, 'origin');
+  // Level with the branch it follows, there's nothing to send.
+  assert.deepEqual(await push(root), { branch: 'main', upToDate: true });
+  write('README.md', '# Venes\n\nmore\n');
+  git('commit', '-q', '-am', 'More');
+  assert.equal((await status(root)).ahead, 1);
+  assert.deepEqual(await push(root), { branch: 'main', upToDate: false });
+  assert.equal((await status(root)).ahead, 0);
+  // A new branch follows none: it's made on the remote under its own name, and follows that.
+  git('switch', '-q', '-c', 'feature/x');
+  const before = await status(root);
+  assert.deepEqual([before.upstream, before.remote], [undefined, 'origin']);
+  assert.deepEqual(await push(root), { branch: 'feature/x', upToDate: false });
+  const after = await status(root);
+  assert.deepEqual([after.upstream, after.ahead, after.upstreamGone], ['origin/feature/x', 0, undefined]);
+  assert.deepEqual(await push(root), { branch: 'feature/x', upToDate: true });
+});
+
+test('a push the remote has moved on from is refused in git\'s words, and nothing is forced', { skip: ON_WINDOWS }, async t => {
+  const { root, git, write, theirs, remote } = withRemote(t);
+  theirs('theirs.txt', 'theirs\n');
+  const there = execFileSync('git', ['-C', remote, 'rev-parse', 'main'], { encoding: 'utf8' });
+  write('mine.txt', 'mine\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'Mine');
+  await assert.rejects(push(root), error => error.code === 'git_failed' && /rejected|fetch first|failed to push/.test(error.message));
+  assert.equal(execFileSync('git', ['-C', remote, 'rev-parse', 'main'], { encoding: 'utf8' }), there);
+});
+
+test('with no remote there\'s nowhere to push, with no branch followed nothing to pull, and on no branch neither', { skip: ON_WINDOWS }, async t => {
+  const { root, git } = committed(t);
+  assert.equal((await status(root)).remote, undefined);
+  await assert.rejects(push(root), { code: 'no_remote' });
+  await assert.rejects(pull(root), { code: 'no_upstream' });
+  git('checkout', '-q', '--detach');
+  await assert.rejects(push(root), { code: 'detached_head' });
+  await assert.rejects(pull(root), { code: 'detached_head' });
+});
+
+test('a pull brings in what the branch it follows has, and says when there was nothing to bring', { skip: ON_WINDOWS }, async t => {
+  const { root, theirs } = withRemote(t);
+  assert.deepEqual(await pull(root), { upToDate: true });
+  theirs('theirs.txt', 'theirs\n');
+  assert.deepEqual(await pull(root), { upToDate: false });
+  assert.equal(fs.readFileSync(path.join(root, 'theirs.txt'), 'utf8'), 'theirs\n');
+  assert.deepEqual(await pull(root), { upToDate: true });
+});
+
+for (const rebase of ['false', 'true']) {
+  test(`a pull that stops on a conflict is taken back, and the folder is as it was (pull.rebase ${rebase})`, { skip: ON_WINDOWS }, async t => {
+    const { root, git, write, theirs } = withRemote(t);
+    git('config', 'pull.rebase', rebase);
+    theirs('README.md', '# Theirs\n');
+    write('README.md', '# Mine\n');
+    git('commit', '-q', '-am', 'Mine');
+    write('left alone.txt', 'not committed\n');
+    const head = git('rev-parse', 'HEAD');
+    await assert.rejects(pull(root), error => {
+      assert.equal(error.code, 'pull_conflict');
+      assert.deepEqual(error.details, { paths: ['README.md'] });
+      assert.equal(error.message, 'Local and remote changes conflict in README.md. The pull was undone, so nothing changed.');
+      return true;
+    });
+    assert.equal(git('rev-parse', 'HEAD'), head);
+    assert.equal(fs.readFileSync(path.join(root, 'README.md'), 'utf8'), '# Mine\n');
+    assert.equal(git('status', '--porcelain'), '?? "left alone.txt"\n');
+    for (const name of ['MERGE_HEAD', 'rebase-merge', 'rebase-apply']) assert.equal(fs.existsSync(path.join(root, '.git', name)), false, name);
+  });
+}
+
+test('a merge that was under way before a pull is its owner\'s, and isn\'t taken back', { skip: ON_WINDOWS }, async t => {
+  const { root, git, write } = withRemote(t);
+  git('switch', '-q', '-c', 'side');
+  write('README.md', '# Side\n');
+  git('commit', '-q', '-am', 'Side');
+  git('switch', '-q', 'main');
+  write('README.md', '# Main\n');
+  git('commit', '-q', '-am', 'Main');
+  assert.throws(() => git('merge', 'side'));
+  await assert.rejects(pull(root), { code: 'git_failed' });
+  assert.ok(fs.existsSync(path.join(root, '.git', 'MERGE_HEAD')), 'the merge is still under way');
+});
+
+test('a file\'s changes are thrown away, and what it was goes to the Trash', { skip: ON_WINDOWS }, async t => {
+  const { root, git, write } = committed(t);
+  const { went, trash } = fakeTrash(root);
+  write('README.md', 'changed\n');
+  write('new.txt', 'new\n');
+  write('src/app.js', 'staged\n');
+  git('add', 'src/app.js');
+  write('src/app.js', 'staged, then changed\n');
+  fs.rmSync(path.join(root, 'old name.txt'));
+  await discard(root, { paths: ['README.md'] }, { trash });
+  assert.equal(fs.readFileSync(path.join(root, 'README.md'), 'utf8'), '# Venes\n\none\ntwo\nthree\n');
+  assert.deepEqual(went, [['README.md', 'changed\n']]);
+  // A new file goes, one that was deleted comes back, and one that's staged goes back to what's staged.
+  await discard(root, { paths: ['new.txt', 'old name.txt', 'src/app.js'] }, { trash });
+  assert.equal(fs.existsSync(path.join(root, 'new.txt')), false);
+  assert.equal(fs.readFileSync(path.join(root, 'old name.txt'), 'utf8'), 'kept as it is\nline two\nline three\n');
+  assert.equal(fs.readFileSync(path.join(root, 'src/app.js'), 'utf8'), 'staged\n');
+  assert.deepEqual(went.slice(1).sort(), [['new.txt', 'new\n'], ['src/app.js', 'staged, then changed\n']]);
+  const after = await status(root);
+  assert.deepEqual([after.staged.map(file => file.path), after.changes], [['src/app.js'], []]);
+  // With nothing changed in what's named, nothing is done.
+  await discard(root, { paths: ['README.md'] }, { trash });
+  assert.equal(went.length, 3);
+});
+
+test('everything that isn\'t staged is thrown away at once, a new folder whole, and what git ignores is left', { skip: ON_WINDOWS }, async t => {
+  const { root, git, write } = committed(t);
+  const { went, trash } = fakeTrash(root);
+  write('.gitignore', 'ignored.log\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'Ignore the log');
+  write('ignored.log', 'kept\n');
+  write('fresh/a.txt', 'a\n');
+  write('fresh/deep/b.txt', 'b\n');
+  write('README.md', 'changed\n');
+  write('staged.txt', 'staged\n');
+  git('add', 'staged.txt');
+  await discard(root, { all: true }, { trash });
+  assert.deepEqual(went.sort(), [['README.md', 'changed\n'], ['fresh', null]]);
+  assert.equal(fs.readFileSync(path.join(root, 'ignored.log'), 'utf8'), 'kept\n');
+  const after = await status(root);
+  assert.deepEqual([after.staged.map(file => file.path), after.changes], [['staged.txt'], []]);
+});
+
+test('in a repository that holds a folder that\'s kept, as the home folder is, all leaves what git doesn\'t follow', { skip: ON_WINDOWS }, async t => {
+  const { root, write } = committed(t);
+  const { went, trash } = fakeTrash(root);
+  write('Documents/letter.txt', 'not git\'s\n');
+  write('README.md', 'changed\n');
+  // The repository's top is the folder that's kept, and then is above it.
+  for (const kept of [root, path.join(root, 'Documents')]) {
+    write('README.md', 'changed\n');
+    await discard(root, { all: true }, { trash, keeps: [kept] });
+    assert.equal(fs.readFileSync(path.join(root, 'Documents/letter.txt'), 'utf8'), 'not git\'s\n');
+    assert.equal(fs.readFileSync(path.join(root, 'README.md'), 'utf8'), '# Venes\n\none\ntwo\nthree\n');
+  }
+  assert.deepEqual(went, [['README.md', 'changed\n'], ['README.md', 'changed\n']]);
+  // One named is still thrown away, and so is everything where the folder kept is somewhere else.
+  await discard(root, { paths: ['Documents/letter.txt'] }, { trash, keeps: [root] });
+  assert.equal(fs.existsSync(path.join(root, 'Documents/letter.txt')), false);
+  write('Documents/letter.txt', 'again\n');
+  await discard(root, { all: true }, { trash, keeps: [path.dirname(root)] });
+  assert.equal(fs.existsSync(path.join(root, 'Documents')), false);
+});
+
+test('only what\'s named is thrown away, as it\'s named, and only inside the repository', { skip: ON_WINDOWS }, async t => {
+  const { root, write } = committed(t);
+  const { went, trash } = fakeTrash(root);
+  // A name with one of git's pattern letters in it is that file, and no other.
+  write('a*.txt', 'star\n');
+  write('ab.txt', 'other\n');
+  await discard(root, { paths: ['a*.txt'] }, { trash });
+  assert.deepEqual(went, [['a*.txt', 'star\n']]);
+  assert.equal(fs.readFileSync(path.join(root, 'ab.txt'), 'utf8'), 'other\n');
+  await assert.rejects(discard(root, { paths: ['../outside'] }, { trash }), { code: 'bad_path' });
+  await assert.rejects(discard(root, {}, { trash }), { code: 'bad_path' });
+  await assert.rejects(discard(root, { paths: [] }, { trash }), { code: 'bad_path' });
+});
+
+test('a file both sides changed isn\'t put back, and git says so', { skip: ON_WINDOWS }, async t => {
+  const { root, git, write } = committed(t);
+  const { went, trash } = fakeTrash(root);
+  git('switch', '-q', '-c', 'side');
+  write('README.md', '# Side\n');
+  git('commit', '-q', '-am', 'Side');
+  git('switch', '-q', 'main');
+  write('README.md', '# Main\n');
+  git('commit', '-q', '-am', 'Main');
+  assert.throws(() => git('merge', 'side'));
+  await assert.rejects(discard(root, { paths: ['README.md'] }, { trash }), error => error.code === 'git_failed' && /unmerged/.test(error.message));
+  assert.deepEqual(went, []);
+});
+
+test('a branch is made where the folder is, and the folder moves to it with what has changed', async t => {
+  const { root, write } = committed(t);
+  write('README.md', 'changed\n');
+  assert.deepEqual(await createBranch(root, { name: ' feature/new ' }), { branch: 'feature/new' });
+  const state = await status(root);
+  assert.deepEqual([state.branch, state.changes.map(file => file.path)], ['feature/new', ['README.md']]);
+  await assert.rejects(createBranch(root, { name: 'main' }), { code: 'branch_exists' });
+  await assert.rejects(createBranch(root, { name: 'feature/new' }), { code: 'branch_exists' });
+  for (const name of ['', ' ', 'a b', '-x', 'a..b', '@{-1}', 'x.lock', 'a~1', 'x'.repeat(201), 7, undefined]) {
+    await assert.rejects(createBranch(root, { name }), { code: 'bad_branch' }, String(name));
+  }
+  assert.equal((await status(root)).branch, 'feature/new');
 });

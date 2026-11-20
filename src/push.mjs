@@ -29,11 +29,28 @@ export function titleFor({ id, title, cwd }) {
   return firstLine(title) ?? (cwd ? path.basename(cwd) : undefined) ?? id.slice(0, 8);
 }
 
+// What a request asks leave for, in a line: the command, the file, the address, or what's looked for.
+// It's for a phone to say under its question, so that an answer given from the notification itself
+// isn't given blind.
+export function requestLine(request) {
+  const input = request?.input && typeof request.input === 'object' ? request.input : {};
+  const said = [input.command, input.file_path, input.path, input.notebook_path, input.url, input.query, input.pattern, input.description]
+    .find(value => typeof value === 'string' && value.trim());
+  const line = said && firstLine(said);
+  return line ? [...line].slice(0, BODY_LENGTH).join('') : undefined;
+}
+
 // Which events are worth a notification, as the app decides for its own, with what a turn that's done
-// said, if anything.
+// said, if anything. One for a request says which request it is, of what kind and for what, so that a
+// phone can ask in the notification and answer from it.
 export function noticeFor(event, title) {
   if (typeof event?.sessionId !== 'string') return undefined;
-  if (event.kind === 'request.opened') return { kind: 'needsInput', session: event.sessionId, title, body: '' };
+  if (event.kind === 'request.opened') {
+    const { id, kind, toolName } = event.request ?? {};
+    const about = requestLine(event.request);
+    const request = typeof id === 'string' ? { id, ...(kind && { kind }), ...(toolName && { tool: toolName }), ...(about && { about }) } : undefined;
+    return { kind: 'needsInput', session: event.sessionId, title, body: '', ...(request && { request }) };
+  }
   if (event.kind === 'turn.end') {
     const said = typeof event.lastMessage === 'string' ? event.lastMessage.trim() : '';
     return { kind: 'finished', session: event.sessionId, title, body: [...said].slice(0, BODY_LENGTH).join('') };

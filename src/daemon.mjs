@@ -15,8 +15,9 @@ import { checkedToolUse, readArtifact } from './artifact.mjs';
 import { lineOf, onLines } from './lines.mjs';
 import { createEntry, listAnywhere, listFolder, readChunk, readFile, trashEntry, writeFile } from './files.mjs';
 import {
-  branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, diff as gitDiff, log as gitLog, repositoriesOf, stage as gitStage,
-  countChanges, status as gitStatus, switchBranch as gitSwitch, unstage as gitUnstage,
+  branches as gitBranches, commit as gitCommit, commitStaged as gitCommitStaged, createBranch as gitCreateBranch, diff as gitDiff, discard as gitDiscard,
+  log as gitLog, pull as gitPull, push as gitPush, repositoriesOf, stage as gitStage, countChanges, status as gitStatus, switchBranch as gitSwitch,
+  unstage as gitUnstage,
 } from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
@@ -763,6 +764,14 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     gitUnstage: async ({ sessionId, root, paths, all }) => thenRecount(sessionId, gitUnstage(await repositoryFor(sessionId, root), { paths, all })),
     gitCommitStaged: async ({ sessionId, root, message }) => thenRecount(sessionId, gitCommitStaged(await repositoryFor(sessionId, root), { message })),
     gitSwitch: async ({ sessionId, root, branch }) => thenRecount(sessionId, gitSwitch(await repositoryFor(sessionId, root), { branch })),
+    gitBranchCreate: async ({ sessionId, root, name }) => thenRecount(sessionId, gitCreateBranch(await repositoryFor(sessionId, root), { name })),
+    // What's thrown away goes to the Trash, as a file deleted from here does.
+    gitDiscard: async ({ sessionId, root, paths, all }) => thenRecount(sessionId, gitDiscard(await repositoryFor(sessionId, root), { paths, all }, {
+      trash: (folder, name) => trashEntry(folder, name, { keeps: [homeFolder()] }), keeps: [homeFolder()],
+    })),
+    // The branch, to its remote and from it. A pull can change the folder's files, and a push none.
+    gitPush: async ({ sessionId, root }) => gitPush(await repositoryFor(sessionId, root)),
+    gitPull: async ({ sessionId, root }) => thenRecount(sessionId, gitPull(await repositoryFor(sessionId, root))),
     // The mode a session asks permission in. A Claude Code session's is changed in its terminal, as a
     // person changes it, and a Codex session's through Codex's server, from its next turn.
     setMode: forOther('setMode', async ({ sessionId, mode }) => {

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { SessionStore } from '../../src/sessions.mjs';
 import {
-  accessOf, approvalRequest, Codex, collaborationOf, commandOf, COMMANDS, historyOf, IMPLEMENT_PROMPT, planRequest, inputOf, picturesOf, pictureSourcesOf, readPicture, withoutPictures, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
+  accessOf, approvalRequest, Codex, collaborationOf, commandOf, COMMANDS, hasSaid, historyOf, IMPLEMENT_PROMPT, planRequest, inputOf, picturesOf, pictureSourcesOf, readPicture, withoutPictures, isListed, isShellLine, isTool, isTrustedByCodex, libraryItem, MODE_IDS, modelsOf,
   creditsOf, limitResetsOf, mergedLimits, modeOf, otherLimitsOf, permissionsRequest, questionRequest, shellWords, skillsNamed, skillsOf, statusLineOf, terminalCommand, textOf, thinkingOf, trustedFolders,
   turnsOf, unwrapped,
 } from '../../src/codex.mjs';
@@ -129,7 +129,7 @@ function fakeCodex() {
 
 function setup({
   threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {}, kill = undefined, quitLimitMs = 60, listWaitMs = 200,
-  listLifetimeMs = 60_000,
+  listLifetimeMs = 60_000, lookMs = 60_000,
 } = {}) {
   const server = fakeCodex();
   server.isRunning = isRunning;
@@ -141,7 +141,7 @@ function setup({
   const codex = new Codex({
     store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, restartDaemon: server.restartDaemon, retryMs: 5, trusts,
     installed: () => isRunning, terminal, env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on', ...env }, keyLimitMs: 40,
-    ...(kill && { kill }), quitLimitMs, listWaitMs, listLifetimeMs,
+    ...(kill && { kill }), quitLimitMs, listWaitMs, listLifetimeMs, lookMs,
   });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
@@ -1210,26 +1210,37 @@ test('the library has Codex\'s stored threads, and says which are going on', asy
   assert.deepEqual(items.map(item => [item.id, item.status, item.agent]), [['live', 'running', 'codex'], ['old', null, 'codex']]);
 });
 
-test('a list Codex takes long over doesn\'t hold the library up: the last one serves, and the new one next time', async () => {
+test('a list Codex takes long over doesn\'t hold the library up once there\'s one to serve: the last one serves, and the new one next time', async () => {
   const { codex, server } = setup({ threads: [stored('old')], listWaitMs: 15 });
   const ids = async () => (await codex.library()).map(item => item.id);
   server.listDelay = 60;
-  // With none yet, it's waited for a moment and no longer.
-  const started = Date.now();
-  assert.deepEqual(await ids(), []);
-  assert.ok(Date.now() - started < 55, 'not for the whole of Codex\'s time');
-  await pause(70);
-  // The one that came meanwhile serves at once, and Codex isn't asked again while nothing has changed.
+  // With none had yet there's nothing to serve in its place, so the first is waited for, however long.
+  assert.deepEqual(await ids(), ['old']);
+  // It serves at once from then, and Codex isn't asked again while nothing has changed.
   assert.deepEqual(await ids(), ['old']);
   assert.equal(server.called('thread/list').length, 1);
   // Something changed: a new list is asked for, and the last one serves while it's on its way.
   server.threads.set('newer', stored('newer'));
   server.say('thread/status/changed', { threadId: 'newer', status: { type: 'idle' } });
+  const started = Date.now();
   assert.deepEqual(await ids(), ['old']);
+  assert.ok(Date.now() - started < 55, 'not for the whole of Codex\'s time');
   assert.equal(server.called('thread/list').length, 2);
   await pause(70);
   assert.deepEqual(await ids(), ['old', 'newer']);
   assert.equal(server.called('thread/list').length, 2);
+});
+
+test('the list of what\'s stored is asked for as soon as Codex is reached, ahead of the first reader', async () => {
+  const { codex, server } = setup({ threads: [stored('old')], listWaitMs: 15 });
+  server.listDelay = 40;
+  await codex.restore();
+  assert.equal(server.called('thread/list').length, 1);
+  await pause(60);
+  const started = Date.now();
+  assert.deepEqual((await codex.library()).map(item => item.id), ['old']);
+  assert.ok(Date.now() - started < 30, 'it was there already');
+  assert.equal(server.called('thread/list').length, 1);
 });
 
 test('a short list is waited for, so what just changed is in it', async () => {
@@ -1300,24 +1311,90 @@ test('whose a session is gets asked of Codex once', async () => {
   assert.equal(server.called('thread/read').length, 2);
 });
 
-test('a thread another client starts on the daemon is a session too, joined at its first turn', async () => {
+test('a thread another client starts on the daemon is a session once something is said in it, and joined then', async () => {
   const { codex, store, server } = setup();
   await codex.restore();
   const thread = stored('theirs', { isNew: true, preview: '' });
   server.threads.set('theirs', thread);
   server.loaded.add('theirs');
+  // Codex's terminal starts one as it opens, and may never say a word in it.
   server.say('thread/started', { thread });
   await settle();
-  assert.equal(store.get('theirs').agent, 'codex');
-  thread.isNew = false;
+  assert.equal(store.find('theirs'), undefined);
+  Object.assign(thread, { isNew: false, preview: 'hello', status: { type: 'active', activeFlags: [] } });
   server.say('thread/status/changed', { threadId: 'theirs', status: { type: 'active', activeFlags: [] } });
-  await settle();
+  await pause(5);
+  assert.equal(store.get('theirs').agent, 'codex');
   assert.equal(store.get('theirs').status, 'running');
-  assert.equal(server.called('thread/resume').filter(params => params.threadId === 'theirs').length, 2);
+  assert.equal(server.called('thread/resume').filter(params => params.threadId === 'theirs').length, 1);
   server.say('thread/status/changed', { threadId: 'theirs', status: { type: 'idle' } });
   // Joined by now, so the turn's own end says so, and this says nothing more.
   server.say('turn/completed', { threadId: 'theirs', turn: { id: 't', status: 'completed' } });
   assert.equal(store.get('theirs').status, 'idle');
+});
+
+test('a stored thread another of Codex\'s apps loads is a session at the next look, though Codex tells no one', async () => {
+  const { codex, store, server } = setup({ threads: [stored('older')], lookMs: 10 });
+  await codex.restore();
+  assert.equal(store.find('older'), undefined);
+  // Codex's terminal goes on with an older session: the thread is loaded, and nothing is said of it.
+  server.loaded.add('older');
+  await pause(40);
+  assert.equal(store.get('older').status, 'idle');
+  assert.equal(server.called('thread/resume').filter(params => params.threadId === 'older').length, 1);
+  // It's followed from then, as any other is.
+  server.say('turn/started', { threadId: 'older', turn: { id: 'turn-1' } });
+  server.say('item/started', { threadId: 'older', turnId: 'turn-1', item: { type: 'userMessage', id: 'u1', content: [{ type: 'text', text: 'carry on' }] } });
+  assert.equal(store.get('older').status, 'running');
+  // And a look asks nothing more of one that's followed.
+  const reads = server.called('thread/read').length;
+  await pause(40);
+  assert.equal(server.called('thread/read').length, reads);
+  codex.stop();
+});
+
+test('a thread started elsewhere with nothing said in it is no session, when Codex is first asked or at a look', async () => {
+  const empty = stored('empty', { isNew: true, preview: '' });
+  const { codex, store } = setup({ threads: [empty, stored('said')], loaded: ['empty', 'said'], lookMs: 10 });
+  await codex.restore();
+  assert.equal(store.find('empty'), undefined);
+  assert.equal(store.get('said').status, 'idle');
+  await pause(40);
+  assert.equal(store.find('empty'), undefined);
+  // Its first words make it one.
+  Object.assign(empty, { isNew: false, preview: 'hello' });
+  await pause(40);
+  assert.equal(store.get('empty').status, 'idle');
+  codex.stop();
+});
+
+test('a thread the daemon no longer has is over at the next look, though Codex said nothing', async () => {
+  const { codex, store, server, last } = setup({ threads: [stored('one')], loaded: ['one'], lookMs: 10 });
+  await codex.restore();
+  assert.equal(store.get('one').status, 'idle');
+  server.loaded.delete('one');
+  await pause(40);
+  assert.equal(store.get('one').status, 'ended');
+  assert.equal(last('session.ended').reason, 'closed');
+  codex.stop();
+});
+
+test('a session started from here is one before its first word, and still is after a look', async () => {
+  const { codex, store, kinds } = setup({ lookMs: 10 });
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  assert.equal(store.get(sessionId).status, 'idle');
+  assert.equal(kinds().filter(kind => kind === 'session.started').length, 1);
+  await pause(40);
+  assert.equal(store.get(sessionId).status, 'idle');
+  assert.equal(kinds().filter(kind => kind === 'session.started').length, 1);
+  codex.stop();
+});
+
+test('a thread has had something said in it once it has its first words, or a turn going', () => {
+  assert.equal(hasSaid(stored('a', { preview: '' })), false);
+  assert.equal(hasSaid(stored('a', { preview: 'hello' })), true);
+  assert.equal(hasSaid(stored('a', { preview: '', status: { type: 'active', activeFlags: [] } })), true);
+  assert.equal(hasSaid(undefined), false);
 });
 
 test('a thread the daemon lets go of is a session that ended, and one deleted is gone', async () => {

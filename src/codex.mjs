@@ -47,6 +47,8 @@ const LISTED_THREADS = 100;
 // nothing is known to have changed is good for this long, as another of Codex's apps can change it unheard.
 const LIST_WAIT_MS = 600;
 const LIST_LIFETIME_MS = 5 * 60_000;
+// How often the threads Codex has in memory are looked at: see #look.
+const LOOK_MS = 5000;
 // A connection that drops is tried again this often, this many times, before its sessions are taken to be over.
 const RECONNECT_MS = 1000;
 const RECONNECT_TRIES = 5;
@@ -228,6 +230,11 @@ export function textOf(content = []) {
 export function thinkingOf(item) {
   const parts = item.summary?.length ? item.summary : item.content ?? [];
   return parts.join('\n\n').trim();
+}
+
+// A thread something has been said in: its first words are kept, or its first turn is going now.
+export function hasSaid(thread) {
+  return Boolean(thread?.preview) || thread?.status?.type === 'active';
 }
 
 // A thread a person started, and not one Codex made for itself, as a subagent's is.
@@ -687,6 +694,10 @@ export class Codex {
   #listing;
   #listWaitMs;
   #listLifetimeMs;
+  // The look at what Codex has in memory, now and then, and whether one is under way.
+  #looking;
+  #isLooking = false;
+  #lookMs;
 
   constructor({
     store, socketPath = controlSocket(), connect = CodexLink.connect,
@@ -698,10 +709,11 @@ export class Codex {
     // What opens a terminal at the Mac, as for a Claude Code session that's resumed: none, and no session gets one.
     terminal = undefined, env = process.env, keyLimitMs = KEY_LIMIT_MS,
     kill = pid => process.kill(pid, 'SIGTERM'), quitLimitMs = QUIT_LIMIT_MS,
-    listWaitMs = LIST_WAIT_MS, listLifetimeMs = LIST_LIFETIME_MS,
+    listWaitMs = LIST_WAIT_MS, listLifetimeMs = LIST_LIFETIME_MS, lookMs = LOOK_MS,
   }) {
     this.#listWaitMs = listWaitMs;
     this.#listLifetimeMs = listLifetimeMs;
+    this.#lookMs = lookMs;
     this.#kill = kill;
     this.#quitLimitMs = quitLimitMs;
     this.#keyLimitMs = keyLimitMs;
@@ -796,6 +808,7 @@ export class Codex {
   stop() {
     this.#isStopped = true;
     clearTimeout(this.#retry);
+    clearInterval(this.#looking);
     this.#link?.close();
   }
 
@@ -832,8 +845,14 @@ export class Codex {
 
   // A thread that has started, which is a session from then. It's said once, though Codex can tell of
   // one twice: in its answer to what made it, and again unasked.
-  #started(thread) {
+  //
+  // Unless another of Codex's apps started it and nothing has been said in it. Codex's terminal starts a
+  // thread as it opens, and when it then goes on with an older one, the new one never has a word in it:
+  // it sat among the sessions, going on and empty, while the one being talked in wasn't followed. Such a
+  // thread is a session once something is said in it, which a look finds. `own` is one started from here.
+  #started(thread, { own = false } = {}) {
     if (!thread?.id || !isListed(thread)) return;
+    if (!own && !this.#threads.has(thread.id) && !hasSaid(thread)) return;
     this.#relisted(thread.id, undefined, thread);
     this.#adopt(thread);
     if (this.#toldStarted.has(thread.id)) return;
@@ -874,7 +893,29 @@ export class Codex {
     link.on('close', () => this.#onClose(link));
     this.#link = link;
     await this.#adoptLoaded(link).catch(error => console.error(`codex: ${error.message}`));
+    // The list of what's stored takes Codex seconds, so it's asked for now, ahead of whoever wants it.
+    if (!this.#listed) this.#relist(link).catch(() => {});
+    if (!this.#looking && !this.#isStopped) {
+      this.#looking = setInterval(() => { this.#look(); }, this.#lookMs);
+      this.#looking.unref();
+    }
     return link;
+  }
+
+  // Codex tells its other apps when a thread starts, and not when one of them loads a thread it had
+  // stored, as its terminal does to go on with an older session. So what it has in memory is looked at
+  // now and then, over the connection there is, for threads to follow and threads that have gone.
+  async #look() {
+    const link = this.#link;
+    if (!link?.isOpen || this.#isLooking || this.#isStopped) return;
+    this.#isLooking = true;
+    try {
+      await this.#adoptLoaded(link);
+    } catch (error) {
+      if (link.isOpen) console.error(`codex: ${error.message}`);
+    } finally {
+      this.#isLooking = false;
+    }
   }
 
   // The daemon went, or only the connection did. Its threads are still there in the second case, so
@@ -899,8 +940,9 @@ export class Codex {
     this.#retry.unref();
   }
 
-  // Every thread the daemon has in memory is a session going on, whoever started it. One it no longer
-  // has is over.
+  // Every thread the daemon has in memory that something has been said in is a session going on,
+  // whoever started it, and so is one started from here before its first word. One the daemon no
+  // longer has is over.
   async #adoptLoaded(link) {
     const { data: loaded = [] } = await link.request('thread/loaded/list', {});
     for (const session of this.#store.liveSessions()) {
@@ -908,8 +950,11 @@ export class Codex {
     }
     for (const threadId of loaded) {
       if (this.#closed.has(threadId)) continue;
+      // One that's followed and joined is told of by Codex itself.
+      const known = this.#store.find(threadId);
+      if (known && known.status !== 'ended' && this.#threads.get(threadId)?.isSubscribed) continue;
       const read = await link.request('thread/read', { threadId, includeTurns: false }).catch(() => undefined);
-      if (read?.thread && isListed(read.thread)) {
+      if (read?.thread && isListed(read.thread) && (hasSaid(read.thread) || this.#threads.has(threadId))) {
         this.#adopt(read.thread);
         await this.#subscribe(link, threadId).catch(() => {});
       }
@@ -1045,7 +1090,11 @@ export class Codex {
     }
     const thread = this.#threads.get(threadId);
     const session = thread && this.#store.find(threadId);
-    if (!thread || !session) return;
+    if (!thread || !session) {
+      // A thread that isn't followed has something going on in it: one another app loaded, or started and has now said something in.
+      if (method === 'thread/status/changed' && threadId && params.status?.type !== 'notLoaded') this.#look();
+      return;
+    }
     const report = (kind, data, fields) => this.#store.report(threadId, kind, data, fields);
     switch (method) {
       case 'thread/status/changed':
@@ -1387,6 +1436,9 @@ export class Codex {
     const thread = this.#adopt(started.thread, { model: started.model, effort: started.reasoningEffort ?? undefined, permissionMode: this.#noteAccess(started.thread.id, started) });
     thread.isSubscribed = true;
     thread.wantsTerminal = true;
+    // Codex says so to everyone, and can say it before it answers whoever started the thread, when it
+    // isn't known to be this helper's own yet. So it's said from here.
+    this.#started(started.thread, { own: true });
     return { sessionId: started.thread.id };
   }
 
@@ -1649,7 +1701,7 @@ export class Codex {
       } else if (name === 'fork') {
         // The chat that comes of it is a session from now, as any thread that starts is: by what Codex
         // answers, whether or not it says so again.
-        this.#started((await link.request('thread/fork', { threadId })).thread);
+        this.#started((await link.request('thread/fork', { threadId })).thread, { own: true });
         this.#isListStale = true;
       } else if (name === 'archive') {
         await link.request('thread/archive', { threadId });
@@ -1721,12 +1773,17 @@ export class Codex {
   // other agent's sessions with it, five seconds each time for a reader with a lot of Codex's. The list
   // it last gave serves while nothing is known to have changed. When something may have, a new one is
   // waited for a moment, which is all a short list takes, and past that the last one serves and the new
-  // one is there for the next asking.
+  // one is there for the next asking. Only the first list of all is waited for to its end.
   async #storedThreads(link) {
     const isGood = this.#listed && !this.#isListStale && Date.now() - this.#listedAt < this.#listLifetimeMs;
     if (isGood) return this.#listed;
+    const listing = this.#relist(link).catch(() => undefined);
+    // With no list had yet there's none to serve in its place, and a library that came without Codex's
+    // sessions would have a reader's later pages start past them. So the first is waited for: it's asked
+    // for as soon as Codex is reached, which is before most readers ask.
+    if (!this.#listed) return (await listing) ?? [];
     const late = new Promise(resolve => { setTimeout(resolve, this.#listWaitMs).unref(); });
-    return (await Promise.race([this.#relist(link).catch(() => undefined), late])) ?? this.#listed ?? [];
+    return (await Promise.race([listing, late])) ?? this.#listed ?? [];
   }
 
   #relist(link) {

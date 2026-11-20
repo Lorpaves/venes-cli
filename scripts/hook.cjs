@@ -35,6 +35,9 @@ process.stdin.on('end', () => {
       'Content-Type': 'application/json',
       'X-Venes-Pane': env('TMUX_PANE'), 'X-Venes-Tmux': env('TMUX'),
       'X-Venes-Rex-Block': env('REX_BLOCK'), 'X-Venes-Rex-Session': env('REX_SESSION'), 'X-Venes-Rex-Server': env('REX_SERVER'),
+      // On Windows a session is typed into through its console, which the helper finds from whoever ran
+      // this: Claude Code itself, or a shell it ran this through.
+      ...(isWindows && { 'X-Venes-Console': String(process.ppid) }),
     },
   }, response => {
     // Only what the helper says when all is well is passed on.

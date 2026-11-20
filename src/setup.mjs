@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { shimOf } from './status.mjs';
 
 const CLI = fileURLToPath(new URL('../cli/venes.mjs', import.meta.url));
 
@@ -30,7 +31,14 @@ export function windowsLauncher({ home }, node, cli) {
   return `@echo off\r\nset "VENES_HOME=${plain(home)}"\r\n"${plain(node)}" "${plain(cli)}" %*\r\n`;
 }
 
-export function writeLauncher(paths) {
+// The same again as JavaScript, for Windows: what Claude Code runs as its status line goes to whichever
+// shell it uses there, and `node` with a file is the one command they all read alike.
+export function launcherShim({ home }, cli = CLI) {
+  return `process.env.VENES_HOME ??= ${JSON.stringify(home)};\nawait import(${JSON.stringify(pathToFileURL(cli).href)});\n`;
+}
+
+export function writeLauncher(paths, platform = process.platform) {
   fs.mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   fs.writeFileSync(paths.launcher, launcherScript(paths), { mode: 0o755 });
+  if (platform === 'win32') fs.writeFileSync(shimOf(paths.launcher), launcherShim(paths));
 }

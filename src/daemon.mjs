@@ -35,9 +35,10 @@ import { readRegistry, writeRegistry } from './registry.mjs';
 import { followTranscripts, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
 import { avatarSource } from './avatar.mjs';
 import {
-  closePage, hasTerminal, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalFrom, typeOnPage,
+  closePage, hasTerminal, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalOf, typeOnPage,
 } from './terminal.mjs';
 import { TerminalWatch } from './terminalwatch.mjs';
+import { isConsolePane, openPanes as openConsoles } from './winconsole.mjs';
 import { choicesOf, chooseRow, isAbout, knownTexts, readPrompt } from './prompt.mjs';
 import {
   MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
@@ -134,11 +135,11 @@ function createHookServer(store, antigravity = undefined) {
     // before anything is made of the event.
     if (req.headers['x-venes-agent'] === ANTIGRAVITY) {
       res.end();
-      antigravity?.handleHook(event, terminalFrom(req.headers));
+      antigravity?.handleHook(event, await terminalOf(req.headers).catch(() => ({})));
       return;
     }
     try {
-      const held = store.handleHook(event, terminalFrom(req.headers));
+      const held = store.handleHook(event, await terminalOf(req.headers).catch(() => ({})));
       const output = held ? await held.decision : undefined;
       res.end(output ? JSON.stringify(output) : '');
     } catch (error) {
@@ -1090,7 +1091,10 @@ export async function restoreSessions(store, paths, terminal = resumeTerminal())
   const records = readRegistry(paths.sessionsFile);
   const panes = await findClaudePanes(new Set(records.map(record => record.tmuxSocket ?? undefined)));
   const running = new Set(panes.map(pane => `${pane.tmuxSocket}|${pane.pane}`));
+  // A Windows console is there while the program it was named by still runs.
+  const consoles = records.some(isConsolePane) ? await openConsoles().catch(() => undefined) : undefined;
   const isAlive = record => {
+    if (isConsolePane(record)) return consoles?.has(record.pane) ?? false;
     if (record.agent === ANTIGRAVITY) return runsAntigravity(terminal, record);
     return record.rexSession ? rexRunsClaude(record) : running.has(`${record.tmuxSocket ?? null}|${record.pane}`);
   };
@@ -1143,6 +1147,8 @@ export async function startDaemon(paths) {
   // A Codex session the helper starts or loads is shown in a terminal at the Mac too, unless a run says not to.
   const codex = new Codex({ store, terminal: process.env.VENES_CODEX_TERMINAL === 'off' ? undefined : resumeTerminal() });
   codex.restore().catch(error => console.error(`codex: ${error.message}`));
+  // On Windows, what types into consoles is started now, so that a session's first hook finds it there.
+  if (process.platform === 'win32') openConsoles().catch(() => {});
   // Antigravity's, each in a terminal as Claude Code's are, and told of by the hooks of a plugin put
   // where Antigravity finds it. A Mac with no Antigravity gets none.
   const antigravity = new Antigravity({ store, terminal: resumeTerminal(), account: paths.antigravityAccount });

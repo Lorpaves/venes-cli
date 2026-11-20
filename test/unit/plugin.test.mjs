@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { helperPaths } from '../../src/paths.mjs';
-import { launcherScript, writeLauncher } from '../../src/setup.mjs';
+import { launcherScript, launcherShim, writeLauncher } from '../../src/setup.mjs';
 
 // What's tried here of the launcher and of hook.sh is a Mac's and Linux's: Windows has its own of each,
 // which test/smoke.mjs runs.
@@ -24,6 +24,22 @@ function withTempDir(run) {
 test('the launcher needs nothing from PATH and passes its arguments on', posix, () => {
   const script = launcherScript({ home: '/h/.venes' }, '/opt/homebrew/bin/node', "/it's/venes.mjs");
   assert.ok(script.includes(`VENES_HOME='/h/.venes' exec '/opt/homebrew/bin/node' '/it'\\''s/venes.mjs' "$@"`));
+});
+
+test('on Windows the launcher is there as JavaScript too, which runs the same command line from the same home', () => {
+  withTempDir(dir => {
+    const home = path.join(dir, 'h');
+    const paths = { home, launcher: path.join(home, 'venes.cmd') };
+    writeLauncher(paths, 'win32');
+    const shim = fs.readFileSync(path.join(home, 'venes.mjs'), 'utf8');
+    assert.equal(shim, launcherShim(paths));
+    assert.match(shim, /^process\.env\.VENES_HOME \?\?= ".*";\nawait import\("file:\/\/.*\/cli\/venes\.mjs"\);\n$/);
+    assert.ok(shim.includes(JSON.stringify(home)));
+    // Elsewhere there's none: the launcher is a script any shell runs.
+    const other = { home: path.join(dir, 'o'), launcher: path.join(dir, 'o', 'venes') };
+    writeLauncher(other, 'darwin');
+    assert.equal(fs.existsSync(path.join(dir, 'o', 'venes.mjs')), false);
+  });
 });
 
 test('the launcher is written executable', posix, () => {

@@ -28,4 +28,4 @@ jobs:
       - name: Unit tests that hold on Windows
         if: ${{ matrix.os == 'windows-latest' }}
         timeout-minutes: 5
-        run: node --test test/unit/winssh.test.mjs test/unit/winbin.test.mjs test/unit/wirepaths.test.mjs test/unit/qr.test.mjs test/unit/plugin.test.mjs test/unit/git.test.mjs
+        run: node --test test/unit/winssh.test.mjs test/unit/winbin.test.mjs test/unit/wirepaths.test.mjs test/unit/qr.test.mjs test/unit/plugin.test.mjs test/unit/git.test.mjs test/unit/winconsole.test.mjs

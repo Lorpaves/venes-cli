@@ -1,13 +1,16 @@
 // What the helper does with a terminal, whichever one a session runs in. A session in Rex says so
-// with `rexSession`, and any other pane is tmux's.
+// with `rexSession`, one in a Windows console by its pane's name, and any other pane is tmux's.
 
 import * as rex from './rex.mjs';
 import { plainText, runsOf, screenCells } from './screen.mjs';
 import { HelperError } from './sessions.mjs';
 import * as tmux from './tmux.mjs';
 import { referenceTo } from './uploads.mjs';
+import * as winconsole from './winconsole.mjs';
 
 const PASTE_SETTLE_MS = 150;
+// How long a hook's event waits to learn which Windows console it came from.
+const CONSOLE_WAIT_MS = 2500;
 
 // Pressing Enter while one of these is open picks its highlighted option, which for a permission
 // prompt means approving the tool, and on a page like /config changes a setting. Footers end in
@@ -50,10 +53,10 @@ export const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 // Whether a terminal's program is its shell, as when what ran in it has quit back to it.
 export const isShell = program => /^-?(zsh|bash|fish|sh|dash|ksh|tcsh|csh|nu|pwsh|powershell|cmd)(\.exe)?$/i.test(String(program ?? '').split(/[\\/]/).pop());
 export const bottomOf = screen => screen.trimEnd().split('\n').slice(-DIALOG_SEARCH_LINES).join('\n');
-const backendOf = session => (session.rexSession ? rex : tmux);
+const backendOf = session => (session.rexSession ? rex : winconsole.isConsolePane(session) ? winconsole : tmux);
 // Whether the terminal a session is in is still there: false once it has closed, and nothing when that
 // can't be told. `asked` keeps what each terminal's server said, for the sessions that share one.
-const serverOf = session => (session.rexSession ? `rex ${session.rexServer ?? ''}` : `tmux ${session.tmuxSocket ?? ''}`);
+const serverOf = session => (session.rexSession ? `rex ${session.rexServer ?? ''}` : winconsole.isConsolePane(session) ? 'console' : `tmux ${session.tmuxSocket ?? ''}`);
 export async function hasTerminal(session, asked = new Map()) {
   const server = serverOf(session);
   if (!asked.has(server)) asked.set(server, backendOf(session).openPanes(session));
@@ -196,6 +199,12 @@ export async function sendMessage(session, { text = '', attachments = [] }, isBl
   imageLimit = IMAGE_SETTLE_LIMIT_MS, imageCheck = IMAGE_SETTLE_CHECK_MS, boxSettle = BOX_SETTLE_MS,
 } = {}) {
   await refuseIfBlocked(session, isBlocked);
+  // A console can't tell a hint in the box from something typed with the cursor put before it, so there
+  // the keys that empty the box are pressed whatever it seems to hold: they do nothing to an empty one.
+  if (winconsole.isConsolePane(session)) {
+    for (const key of BOX_KEYS) for (let presses = 0; presses < BOX_PRESSES; presses++) await pressKey(session, key);
+    await pause(boxSettle);
+  }
   if (!await emptyBox(session, boxOf, { settle: boxSettle })) throw new HelperError('box_not_empty', BOX_NOT_EMPTY);
   for (const upload of attachments) {
     if (upload.kind === 'image') await pasteImage(session, upload.path, { limit: imageLimit, check: imageCheck });
@@ -291,17 +300,34 @@ export function terminalFrom(headers) {
   const pane = headers['x-venes-pane'];
   if (pane) return { pane, socket: tmux.parseTmuxEnv(headers['x-venes-tmux']) };
   const block = headers['x-venes-rex-block'];
-  if (!block) return {};
-  return { pane: block, rexSession: headers['x-venes-rex-session'], rexServer: headers['x-venes-rex-server'] || undefined };
+  if (block) return { pane: block, rexSession: headers['x-venes-rex-session'], rexServer: headers['x-venes-rex-server'] || undefined };
+  // On Windows, with neither: the console of whatever ran the hook, by that process.
+  const process = Number(headers['x-venes-console']);
+  return Number.isInteger(process) && process > 0 ? { pane: `${winconsole.PANE_PREFIX}${process}` } : {};
+}
+
+// The same, with a Windows console named by the program in it: a hook says only who ran it, which can be
+// a shell between it and Claude Code. Where the console can't be reached from here, as one in another
+// Windows session can't, the session has no terminal, and says so when it's typed into.
+export async function terminalOf(headers, { console: backend = winconsole, limit = CONSOLE_WAIT_MS } = {}) {
+  const found = terminalFrom(headers);
+  if (!winconsole.isConsolePane(found)) return found;
+  // A hook waits four seconds for its answer, and what finds a console takes a moment to start the first
+  // time it's asked. Past this the event goes on with no terminal, and the session's next hook says
+  // where it is, by when that's quick to find.
+  const late = new Promise(resolve => { setTimeout(resolve, limit).unref?.(); });
+  const pane = await Promise.race([backend.paneOf(found.pane.slice(winconsole.PANE_PREFIX.length)), late]);
+  return pane ? { pane } : {};
 }
 
 // Where a stopped session picks up again: Rex if it's on this Mac, as nothing else is needed for it.
 export function resumeTerminal(env = process.env) {
   const useRex = env.VENES_TERMINAL ? env.VENES_TERMINAL === 'rex' : rex.isInstalled();
-  const backend = useRex ? rex : tmux;
+  // Windows has no tmux: without Rex, a session there is started in a console of its own.
+  const useConsole = !useRex && (env.VENES_TERMINAL ? env.VENES_TERMINAL === 'console' : process.platform === 'win32');
+  const backend = useRex ? rex : useConsole ? winconsole : tmux;
   return {
-    // Windows has no tmux, so without Rex nothing can be started there, which is known before anything is tried.
-    canStart: useRex || process.platform !== 'win32',
+    canStart: true,
     startSession: backend.startSession, isSessionOpen: backend.isSessionOpen, hasOpenDialog, readScreen, readStyledScreen, pressKey,
     paste: (session, text) => backendOf(session).paste(session, text),
     foreground: session => backendOf(session).foreground(session),

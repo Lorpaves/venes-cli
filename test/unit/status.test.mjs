@@ -6,7 +6,8 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  accountLimits, checkedOutBranch, installStatusLine, keepStatus, pruneStatus, readStatus, readWorkspace, removeStatusLine, standInCommand, statusFile, switchOnStatusLine,
+  accountLimits, checkedOutBranch, installStatusLine, keepStatus, pruneStatus, readStatus, readWorkspace, removeStatusLine, shimOf, standInCommand, statusFile, statusShell,
+  switchOnStatusLine,
 } from '../../src/status.mjs';
 
 const STATUS = fileURLToPath(new URL('../../src/status.mjs', import.meta.url));
@@ -58,6 +59,37 @@ test('the helper stands in for the status line, keeping the one that was there a
   // Again, it's the same, and what it stands in for stays the one that was there.
   assert.equal(installStatusLine(files), 'installed');
   assert.deepEqual(readState(files), { statusLine: original });
+});
+
+test('on Windows the stand-in is a command every shell there reads the same, and is known again for what it is', t => {
+  const dir = tempDir(t);
+  const launcher = 'C:\\Users\\Ada Lovelace\\.venes\\venes.cmd';
+  const files = { ...settingsIn(dir, { statusLine: { type: 'command', command: 'ccstatusline' } }), launcher, platform: 'win32' };
+  assert.equal(shimOf(launcher), 'C:\\Users\\Ada Lovelace\\.venes\\venes.mjs');
+  assert.equal(standInCommand(launcher, 'win32'), 'node "C:/Users/Ada Lovelace/.venes/venes.mjs" statusline');
+  assert.equal(standInCommand('/Users/ada/.venes/venes', 'darwin'), "'/Users/ada/.venes/venes' statusline");
+  assert.equal(installStatusLine(files), 'installed');
+  assert.equal(readSettings(files).statusLine.command, 'node "C:/Users/Ada Lovelace/.venes/venes.mjs" statusline');
+  // Again, it's the same, and the one it stands in for is still the one that was there.
+  assert.equal(installStatusLine(files), 'installed');
+  assert.deepEqual(readState(files), { statusLine: { type: 'command', command: 'ccstatusline' } });
+  removeStatusLine(files);
+  assert.deepEqual(readSettings(files).statusLine, { type: 'command', command: 'ccstatusline' });
+});
+
+test('the status line it stands in for runs in the shell Claude Code would give it to', () => {
+  const env = { ProgramFiles: 'C:\\Program Files', LOCALAPPDATA: 'C:\\Users\\ada\\AppData\\Local' };
+  const there = files => file => files.includes(file);
+  assert.equal(statusShell({ env: { SHELL: '/bin/zsh' }, platform: 'darwin' }), '/bin/zsh');
+  assert.equal(statusShell({ env: {}, platform: 'linux' }), '/bin/sh');
+  assert.equal(statusShell({ env, platform: 'win32', exists: there(['C:\\Program Files\\Git\\bin\\bash.exe']) }), 'C:\\Program Files\\Git\\bin\\bash.exe');
+  const own = 'C:\\Users\\ada\\AppData\\Local\\Programs\\Git\\bin\\bash.exe';
+  assert.equal(statusShell({ env, platform: 'win32', exists: there([own]) }), own);
+  // Where Claude Code is told which to use, that one.
+  const told = { ...env, CLAUDE_CODE_GIT_BASH_PATH: 'D:\\git\\bash.exe' };
+  assert.equal(statusShell({ env: told, platform: 'win32', exists: there(['D:\\git\\bash.exe', 'C:\\Program Files\\Git\\bin\\bash.exe']) }), 'D:\\git\\bash.exe');
+  // With no Git for Windows, PowerShell, as Claude Code does.
+  assert.equal(statusShell({ env, platform: 'win32', exists: () => false }), 'powershell.exe');
 });
 
 test('with no status line, or no settings at all, it stands in for none', t => {

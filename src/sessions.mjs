@@ -51,7 +51,8 @@ const writtenAt = timestamp => {
 // Only Rex and tmux can be typed into, and a session started before the plugin was installed sends
 // no hooks to say where it is, so a restart is the way out of both.
 export const notTypable = () => new HelperError('no_pane', process.platform === 'win32'
-  ? 'Venes can\'t type into a session on Windows yet. Type at the computer, and follow and answer it here.'
+  // Its console wasn't told, or couldn't be reached, when it started: Claude Code started again says where it is.
+  ? 'This session can’t be controlled from here. Quit and reopen Claude Code on your computer.'
   : 'This session can\'t be typed into from here. Restart it in Rex or tmux.');
 
 function permissionDecision(decision) {

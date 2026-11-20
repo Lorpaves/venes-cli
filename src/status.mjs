@@ -36,9 +36,28 @@ function writeAtomically(file, text, mode = 0o600) {
 
 export const statusFile = (dir, sessionId) => path.join(dir, `${sessionId}.json`);
 
-// The command Claude Code runs as the status line once the helper stands in.
-export const standInCommand = launcher => `${shellQuote(launcher)} ${SUBCOMMAND}`;
-const isStandIn = command => typeof command === 'string' && /(?:^|\/)venes'?\s+statusline$/.test(command.trim());
+// The launcher again as JavaScript, beside it: on Windows, what the status line's command runs.
+export const shimOf = launcher => launcher.replace(/\.cmd$/i, '.mjs');
+
+// The command Claude Code runs as the status line once the helper stands in. On Windows Claude Code
+// gives it to Git Bash where that's installed and to PowerShell where it isn't, and a command file by
+// a name in quotes is run by neither the same way. `node` with a file in double quotes, its path
+// written with forward slashes, is read alike by both, and by the older prompt.
+export const standInCommand = (launcher, platform = process.platform) => (platform === 'win32'
+  ? `node "${shimOf(launcher).replace(/\\/g, '/')}" ${SUBCOMMAND}`
+  : `${shellQuote(launcher)} ${SUBCOMMAND}`);
+const isStandIn = command => typeof command === 'string' && /(?:^|[\/\\])venes(?:'|\.mjs")?\s+statusline$/.test(command.trim());
+
+// Where Git for Windows keeps its shell, for whoever installed it for.
+const GIT_BASH = ['ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'].map(folder => [folder, folder === 'LOCALAPPDATA' ? ['Programs', 'Git', 'bin', 'bash.exe'] : ['Git', 'bin', 'bash.exe']]);
+
+// The shell Claude Code would run a status line in: the user's own, or on Windows Git Bash where
+// there's one, as Claude Code is told or where it's installed, and PowerShell where there's none.
+export function statusShell({ env = process.env, platform = process.platform, exists = fs.existsSync } = {}) {
+  if (platform !== 'win32') return env.SHELL || '/bin/sh';
+  const candidates = [env.CLAUDE_CODE_GIT_BASH_PATH, ...GIT_BASH.map(([folder, rest]) => env[folder] && path.win32.join(env[folder], ...rest))].filter(Boolean);
+  return candidates.find(file => exists(file)) ?? 'powershell.exe';
+}
 
 // Keeps what Claude Code sent, for the session it names. Anything else is left alone.
 export function keepStatus(dir, input) {
@@ -55,7 +74,7 @@ export function keepStatus(dir, input) {
 
 // Stands in as the status line in Claude Code's settings, keeping the one that was there to run
 // behind it. A file that can't be read is never written, and once switched off it stays off.
-export function installStatusLine({ settingsFile, stateFile, launcher }) {
+export function installStatusLine({ settingsFile, stateFile, launcher, platform = process.platform }) {
   const state = readJSON(stateFile) ?? {};
   if (state.off) return 'off';
   let text = '{}';
@@ -71,7 +90,7 @@ export function installStatusLine({ settingsFile, stateFile, launcher }) {
     return 'unreadable';
   }
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return 'unreadable';
-  const command = standInCommand(launcher);
+  const command = standInCommand(launcher, platform);
   const current = settings.statusLine;
   if (current?.command === command) return 'installed';
   // Another helper's, from another home, stands for the same one, which is already kept.
@@ -108,7 +127,7 @@ async function readAll(stream) {
 
 // What Claude Code runs as the status line: keeps the input, then runs the status line that was
 // there with it, in the user's shell as Claude Code would, and exits as that does.
-export async function runStatusLine({ stdin, dir, stateFile, shell = process.env.SHELL || '/bin/sh' }) {
+export async function runStatusLine({ stdin, dir, stateFile, shell = statusShell() }) {
   const input = await readAll(stdin);
   try {
     keepStatus(dir, input);
@@ -119,7 +138,7 @@ export async function runStatusLine({ stdin, dir, stateFile, shell = process.env
   const command = original?.type === 'command' ? original.command : undefined;
   if (!command || isStandIn(command)) return 0;
   return new Promise(resolve => {
-    const child = spawn(shell, ['-c', command], { stdio: ['pipe', 'inherit', 'inherit'] });
+    const child = spawn(shell, ['-c', command], { stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true });
     child.on('error', () => resolve(1));
     child.on('exit', code => resolve(code ?? 1));
     child.stdin.on('error', () => {});

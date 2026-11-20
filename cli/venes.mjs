@@ -188,8 +188,7 @@ const commands = {
     if (isNewer(running?.version, VERSION)) return;
     writeLauncher(paths);
     try {
-      // Not on Windows yet, where the command Claude Code would run is written for another shell.
-      if (!isWindows) installStatusLine(statusLineOptions());
+      installStatusLine(statusLineOptions());
     } catch {
       // The phone shows less of a session, and nothing else changes.
     }

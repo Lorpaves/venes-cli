@@ -2501,7 +2501,9 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   // One of the commands the helper carries out. A name costs Codex nothing to take.
   await r.client.request('send', { sessionId, text: '/rename E2E renamed', clientId: 'c-rename' });
   let title;
-  for (const deadline = Date.now() + 5000; Date.now() < deadline && title !== 'E2E renamed'; await delay(200)) {
+  // Codex can take seconds over its list, where a lot is stored, and the library doesn't wait for it: the
+  // name is there once a list has come.
+  for (const deadline = Date.now() + 20000; Date.now() < deadline && title !== 'E2E renamed'; await delay(200)) {
     title = (await r.client.request('library', { limit: 100 })).items.find(item => item.id === sessionId)?.title;
   }
   assert.equal(title, 'E2E renamed');
@@ -2519,7 +2521,7 @@ T('codex_session_replies_runs_a_line_and_is_kept', { codex: { sandbox: 'read-onl
   codexForks.push(forked.id);
   await r.client.request('send', { sessionId: forked.id, text: '/archive', clientId: 'c-archive' });
   let isListed = true;
-  for (const deadline = Date.now() + 8000; Date.now() < deadline && isListed; await delay(300)) {
+  for (const deadline = Date.now() + 20000; Date.now() < deadline && isListed; await delay(300)) {
     isListed = (await r.client.request('sessions')).sessions.some(session => session.id === forked.id && session.status !== 'ended')
       || (await r.client.request('library', { limit: 100 })).items.some(item => item.id === forked.id);
   }
@@ -3059,6 +3061,25 @@ async function terminalRunsCommands(r) {
   r.after(() => other.close());
   assert.deepEqual((await other.request('sessions')).sessions, []);
 }
+// The library is one list, the newest first, a page at a time: two sessions made here are its first two,
+// the one last worked in first, and a page of one has one.
+T('the_library_comes_a_page_at_a_time_the_newest_first', TERMINAL, async r => {
+  const older = await startTerminal(r);
+  await r.client.request('send', { sessionId: older, text: 'echo one', clientId: 'c1' });
+  await printedAll(r, 'c1');
+  await delay(1100);
+  const newer = await startTerminal(r);
+  await r.client.request('send', { sessionId: newer, text: 'echo two', clientId: 'c2' });
+  await printedAll(r, 'c2');
+  const first = await r.client.request('library', { limit: 1 });
+  assert.deepEqual([first.items.map(item => item.id), first.offset, first.hasMore], [[newer], 1, true]);
+  const second = await r.client.request('library', { limit: 1, offset: first.offset });
+  assert.deepEqual([second.items.map(item => item.id), second.offset], [[older], 2]);
+  const both = await r.client.request('library', { limit: 2 });
+  assert.deepEqual(both.items.map(item => [item.id, item.agent]), [[newer, 'terminal'], [older, 'terminal']]);
+  const times = (await r.client.request('library', { limit: 30 })).items.filter(item => item.status === null).map(item => item.lastActiveAt ?? 0);
+  assert.deepEqual(times, [...times].sort((a, b) => b - a), 'what isn\'t going on is by when it was last active');
+});
 T('terminal_runs_commands', TERMINAL, terminalRunsCommands);
 T('in_rex_terminal_runs_commands', { ...TERMINAL, rex: true }, terminalRunsCommands);
 

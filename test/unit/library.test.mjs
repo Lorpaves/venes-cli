@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dropParentSession, restoreSessions } from '../../src/daemon.mjs';
 import { writeRegistry } from '../../src/registry.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
-import { Library, joinedStatus, libraryPage, planName, readAccountLimits, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
+import { Library, joinedStatus, libraryPage, mergedPage, planName, readAccountLimits, readCapabilities, readModelLimits, readRunning } from '../../src/library.mjs';
 
 const WORKER = fileURLToPath(new URL('../../src/library-worker.mjs', import.meta.url));
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -469,4 +469,27 @@ test('after a restart an Antigravity session is kept while its terminal still ru
     [['agy-up', 'antigravity', 'auto', modes, 'gemini-4-hydrogen', 'block:1']]);
   // Only Antigravity's are asked this way.
   assert.deepEqual(asked.sort(), ['%7', 'block:1', 'block:2']);
+});
+
+test('every agent\'s stored sessions come as one list, the newest first, a page at a time', () => {
+  const item = (id, lastActiveAt, more = {}) => ({ id, lastActiveAt, status: null, ...more });
+  const claude = { items: [item('c9', 900), item('c7', 700), item('c5', 500), item('c1', 100)], hasMore: false };
+  const others = [item('x8', 800, { agent: 'codex' }), item('x2', 200, { agent: 'codex' }), item('t6', 600, { agent: 'terminal' })];
+  const ids = page => page.items.map(found => found.id);
+  const first = mergedPage(claude, others, { limit: 3, offset: 0 });
+  assert.deepEqual([ids(first), first.offset, first.hasMore], [['c9', 'x8', 'c7'], 3, true]);
+  const second = mergedPage(claude, others, { limit: 3, offset: first.offset });
+  assert.deepEqual([ids(second), second.offset, second.hasMore], [['t6', 'c5', 'x2'], 6, true]);
+  const third = mergedPage(claude, others, { limit: 3, offset: second.offset });
+  assert.deepEqual([ids(third), third.offset, third.hasMore], [['c1'], 7, false]);
+  assert.deepEqual(ids(mergedPage(claude, others, { limit: 3, offset: 7 })), []);
+});
+
+test('what\'s going on now comes before the rest, and Claude Code having more says there\'s more', () => {
+  const claude = { items: [{ id: 'new', lastActiveAt: 900, status: null }, { id: 'live', lastActiveAt: 100, status: 'running' }], hasMore: true };
+  const others = [{ id: 'waiting', lastActiveAt: 50, status: 'waiting', agent: 'codex' }, { id: 'undated', status: null, agent: 'terminal' }];
+  const page = mergedPage(claude, others, { limit: 10, offset: 0 });
+  assert.deepEqual(page.items.map(found => found.id), ['live', 'waiting', 'new', 'undated']);
+  assert.equal(page.hasMore, true);
+  assert.equal(mergedPage({ ...claude, hasMore: false }, others, { limit: 10, offset: 0 }).hasMore, false);
 });

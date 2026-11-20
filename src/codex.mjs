@@ -40,8 +40,13 @@ const KEPT_PICTURE_THREADS = 50;
 const TURNS_PER_READ = 5;
 // The turns a thread's events are kept track of by, which is more than the event log can hold of one session's.
 const TURNS_TRACKED = 32;
-// The stored threads listed with the library's first page.
+// The stored threads listed in the library, the newest.
 const LISTED_THREADS = 100;
+// Codex takes seconds over a long list: five for a hundred threads, where its sessions take gigabytes. A
+// list that may have changed is waited for this long, and past that the one it last gave serves. One that
+// nothing is known to have changed is good for this long, as another of Codex's apps can change it unheard.
+const LIST_WAIT_MS = 600;
+const LIST_LIFETIME_MS = 5 * 60_000;
 // A connection that drops is tried again this often, this many times, before its sessions are taken to be over.
 const RECONNECT_MS = 1000;
 const RECONNECT_TRIES = 5;
@@ -675,6 +680,13 @@ export class Codex {
   #skills = new Map();
   #isStopped = false;
   #restartDaemon;
+  // The threads Codex last listed and when, whether they may have changed since, and a list on its way.
+  #listed;
+  #listedAt = 0;
+  #isListStale = true;
+  #listing;
+  #listWaitMs;
+  #listLifetimeMs;
 
   constructor({
     store, socketPath = controlSocket(), connect = CodexLink.connect,
@@ -686,7 +698,10 @@ export class Codex {
     // What opens a terminal at the Mac, as for a Claude Code session that's resumed: none, and no session gets one.
     terminal = undefined, env = process.env, keyLimitMs = KEY_LIMIT_MS,
     kill = pid => process.kill(pid, 'SIGTERM'), quitLimitMs = QUIT_LIMIT_MS,
+    listWaitMs = LIST_WAIT_MS, listLifetimeMs = LIST_LIFETIME_MS,
   }) {
+    this.#listWaitMs = listWaitMs;
+    this.#listLifetimeMs = listLifetimeMs;
     this.#kill = kill;
     this.#quitLimitMs = quitLimitMs;
     this.#keyLimitMs = keyLimitMs;
@@ -819,6 +834,7 @@ export class Codex {
   // one twice: in its answer to what made it, and again unasked.
   #started(thread) {
     if (!thread?.id || !isListed(thread)) return;
+    this.#relisted(thread.id, undefined, thread);
     this.#adopt(thread);
     if (this.#toldStarted.has(thread.id)) return;
     this.#toldStarted.add(thread.id);
@@ -1006,6 +1022,8 @@ export class Codex {
   }
 
   #onNotification({ method, params = {} }) {
+    // Whatever Codex says of a thread or a turn can change what it lists: a new thread, one worked on, one gone.
+    if (method.startsWith('thread/') || method.startsWith('turn/')) this.#isListStale = true;
     // The account's, and so every session's.
     if (method === 'account/rateLimits/updated') {
       // It's about one of the limits Codex meters: the plan's own, or another by its id.
@@ -1094,6 +1112,8 @@ export class Codex {
         report('plan.updated', { explanation: params.explanation ?? undefined, plan: params.plan ?? [] });
         break;
       case 'turn/completed':
+        // Worked on just now, it's the newest in the list.
+        this.#relisted(threadId, listed => ({ ...listed, updatedAt: Math.floor(Date.now() / 1000) }));
         this.#onTurnCompleted(threadId, thread, params.turn ?? {});
         break;
       case 'serverRequest/resolved': {
@@ -1344,6 +1364,7 @@ export class Codex {
   }
 
   #forget(threadId) {
+    this.#relisted(threadId, () => undefined);
     this.#threads.delete(threadId);
     this.#toldStarted.delete(threadId);
     this.#pictures.delete(threadId);
@@ -1629,11 +1650,16 @@ export class Codex {
         // The chat that comes of it is a session from now, as any thread that starts is: by what Codex
         // answers, whether or not it says so again.
         this.#started((await link.request('thread/fork', { threadId })).thread);
+        this.#isListStale = true;
       } else if (name === 'archive') {
         await link.request('thread/archive', { threadId });
+        this.#relisted(threadId, () => undefined);
         // Put away, it's gone from here, whether or not Codex says so again.
         if (this.#threads.has(threadId)) this.#forget(threadId);
-      } else await link.request('thread/name/set', { threadId, name: argument });
+      } else {
+        await link.request('thread/name/set', { threadId, name: argument });
+        this.#relisted(threadId, listed => ({ ...listed, name: argument }));
+      }
     } catch (error) {
       thread.compactsByHand = false;
       thread.reviewOf = undefined;
@@ -1675,17 +1701,64 @@ export class Codex {
     return {};
   }
 
-  // The threads Codex has stored, newest first, for the library's first page. One the daemon has in
-  // memory says what it's doing. Nothing when Codex isn't there to ask.
+  // The threads Codex has stored, newest first, for the library. One the daemon has in memory says what
+  // it's doing. Nothing when Codex isn't there to ask.
   async library() {
     const link = await this.#open({ start: false }).catch(() => undefined);
     if (!link) return [];
-    const { data = [] } = await link.request('thread/list', { limit: LISTED_THREADS, sortKey: 'updated_at', sourceKinds: LISTED_SOURCES });
+    const data = await this.#storedThreads(link);
     return data.filter(isListed).map(thread => {
       this.#owned.set(thread.id, true);
       const session = this.#store.find(thread.id);
       return libraryItem(thread, session && session.status !== 'ended' ? session.status : null);
     });
+  }
+
+  // What Codex lists, without holding the library up for it: the whole library waited on this list, every
+  // other agent's sessions with it, five seconds each time for a reader with a lot of Codex's. The list
+  // it last gave serves while nothing is known to have changed. When something may have, a new one is
+  // waited for a moment, which is all a short list takes, and past that the last one serves and the new
+  // one is there for the next asking.
+  async #storedThreads(link) {
+    const isGood = this.#listed && !this.#isListStale && Date.now() - this.#listedAt < this.#listLifetimeMs;
+    if (isGood) return this.#listed;
+    const late = new Promise(resolve => { setTimeout(resolve, this.#listWaitMs).unref(); });
+    return (await Promise.race([this.#relist(link).catch(() => undefined), late])) ?? this.#listed ?? [];
+  }
+
+  #relist(link) {
+    if (!this.#listing) {
+      // What changes from here on isn't in this list.
+      this.#isListStale = false;
+      this.#listing = link.request('thread/list', { limit: LISTED_THREADS, sortKey: 'updated_at', sourceKinds: LISTED_SOURCES })
+        .then(({ data = [] }) => {
+          // Something changed while Codex listed: what's kept already has that, where this list may not,
+          // so it stays until the list asked for next.
+          if (this.#isListStale && this.#listed) return this.#listed;
+          this.#listed = data;
+          this.#listedAt = Date.now();
+          return data;
+        }, error => {
+          this.#isListStale = true;
+          throw error;
+        })
+        .finally(() => { this.#listing = undefined; });
+      this.#listing.catch(() => {});
+    }
+    return this.#listing;
+  }
+
+  // A change made or heard of here, put into the list Codex last gave, which it can take seconds to give
+  // again: a thread changed by `change`, or dropped where that gives nothing, or `added` at its head if
+  // it isn't there. The list is asked for again all the same, at the next asking.
+  #relisted(threadId, change, added = undefined) {
+    this.#isListStale = true;
+    if (!this.#listed) return;
+    if (added) {
+      if (!this.#listed.some(thread => thread.id === threadId)) this.#listed = [added, ...this.#listed];
+      return;
+    }
+    this.#listed = this.#listed.flatMap(thread => (thread.id === threadId ? [change(thread)].filter(Boolean) : [thread]));
   }
 
   // Codex is worked through its server, not a terminal, so no command of it opens a page there.

@@ -14,6 +14,7 @@ import {
 const FOLDER = os.homedir();
 const rpcError = message => Object.assign(new Error(message), { rpcCode: -32600 });
 const settle = () => new Promise(resolve => { setImmediate(resolve); });
+const pause = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
 const stored = (id, fields = {}) => ({
   id, cwd: FOLDER, source: 'cli', ephemeral: false, parentThreadId: null, preview: 'first words', name: null,
@@ -63,7 +64,11 @@ function fakeCodex() {
       server.say('thread/started', { thread });
       return { thread, model: thread.model, reasoningEffort: thread.reasoningEffort };
     },
-    'thread/list': () => ({ data: [...server.threads.values()] }),
+    // A long list takes Codex a while: `listDelay`, when it's set.
+    'thread/list': () => {
+      const data = [...server.threads.values()];
+      return server.listDelay ? new Promise(resolve => { setTimeout(() => resolve({ data }), server.listDelay); }) : { data };
+    },
     'thread/delete': ({ threadId }) => {
       if (server.fails.delete) throw rpcError(`cannot delete thread ${threadId}: forked history still references it`);
       server.threads.delete(threadId); server.loaded.delete(threadId); return {};
@@ -122,7 +127,10 @@ function fakeCodex() {
   return server;
 }
 
-function setup({ threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {}, kill = undefined, quitLimitMs = 60 } = {}) {
+function setup({
+  threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {}, kill = undefined, quitLimitMs = 60, listWaitMs = 200,
+  listLifetimeMs = 60_000,
+} = {}) {
   const server = fakeCodex();
   server.isRunning = isRunning;
   for (const thread of threads) server.threads.set(thread.id, thread);
@@ -133,7 +141,7 @@ function setup({ threads = [], loaded = [], isRunning = true, trusts = () => tru
   const codex = new Codex({
     store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, restartDaemon: server.restartDaemon, retryMs: 5, trusts,
     installed: () => isRunning, terminal, env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on', ...env }, keyLimitMs: 40,
-    ...(kill && { kill }), quitLimitMs,
+    ...(kill && { kill }), quitLimitMs, listWaitMs, listLifetimeMs,
   });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
@@ -1200,6 +1208,71 @@ test('the library has Codex\'s stored threads, and says which are going on', asy
   const { codex } = setup({ threads: [stored('live', { status: { type: 'active', activeFlags: [] } }), stored('old'), stored('sub', { parentThreadId: 'live' })], loaded: ['live'] });
   const items = await codex.library();
   assert.deepEqual(items.map(item => [item.id, item.status, item.agent]), [['live', 'running', 'codex'], ['old', null, 'codex']]);
+});
+
+test('a list Codex takes long over doesn\'t hold the library up: the last one serves, and the new one next time', async () => {
+  const { codex, server } = setup({ threads: [stored('old')], listWaitMs: 15 });
+  const ids = async () => (await codex.library()).map(item => item.id);
+  server.listDelay = 60;
+  // With none yet, it's waited for a moment and no longer.
+  const started = Date.now();
+  assert.deepEqual(await ids(), []);
+  assert.ok(Date.now() - started < 55, 'not for the whole of Codex\'s time');
+  await pause(70);
+  // The one that came meanwhile serves at once, and Codex isn't asked again while nothing has changed.
+  assert.deepEqual(await ids(), ['old']);
+  assert.equal(server.called('thread/list').length, 1);
+  // Something changed: a new list is asked for, and the last one serves while it's on its way.
+  server.threads.set('newer', stored('newer'));
+  server.say('thread/status/changed', { threadId: 'newer', status: { type: 'idle' } });
+  assert.deepEqual(await ids(), ['old']);
+  assert.equal(server.called('thread/list').length, 2);
+  await pause(70);
+  assert.deepEqual(await ids(), ['old', 'newer']);
+  assert.equal(server.called('thread/list').length, 2);
+});
+
+test('a short list is waited for, so what just changed is in it', async () => {
+  const { codex, server } = setup({ threads: [stored('old')] });
+  const ids = async () => (await codex.library()).map(item => item.id);
+  assert.deepEqual(await ids(), ['old']);
+  server.threads.set('newer', stored('newer'));
+  server.say('turn/completed', { threadId: 'newer', turn: { id: 't', status: 'completed' } });
+  assert.deepEqual(await ids(), ['old', 'newer']);
+  // One deleted from here is out of the list at once, whatever Codex takes to list again.
+  server.listDelay = 60;
+  await codex.remove({ sessionId: 'newer' });
+  assert.deepEqual(await ids(), ['old']);
+});
+
+test('what changes from here is in the list at once, however long Codex takes to list again', async () => {
+  const { codex, server } = setup({ threads: [stored('old'), stored('other')], listWaitMs: 15 });
+  const titles = async () => (await codex.library()).map(item => [item.id, item.title]);
+  await codex.library();
+  server.listDelay = 80;
+  // A name given from here.
+  const { sessionId } = await codex.start({ cwd: FOLDER });
+  server.threads.get(sessionId).isNew = false;
+  await codex.send({ sessionId, text: '/rename Mine' });
+  await settle();
+  assert.deepEqual((await titles()).find(([id]) => id === sessionId), [sessionId, 'Mine'], 'a thread started here is listed, by the name given here');
+  // One put away from here.
+  await codex.send({ sessionId, text: '/archive' });
+  await settle();
+  assert.ok(!(await titles()).some(([id]) => id === sessionId));
+  // And a list that was on its way while that changed doesn't put the old state back.
+  await pause(100);
+  assert.ok(!(await titles()).some(([id]) => id === sessionId));
+});
+
+test('a list nothing is known to have changed is asked for again once it\'s old', async () => {
+  const { codex, server } = setup({ threads: [stored('old')], listLifetimeMs: 20 });
+  await codex.library();
+  await codex.library();
+  assert.equal(server.called('thread/list').length, 1);
+  await pause(30);
+  await codex.library();
+  assert.equal(server.called('thread/list').length, 2);
 });
 
 test('whose a session is gets asked of Codex once', async () => {

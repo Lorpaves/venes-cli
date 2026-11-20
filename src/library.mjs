@@ -23,7 +23,7 @@ const AGENTS_TIMEOUT_MS = 10_000;
 const OWN_RUNS_KEPT = 64;
 const READ_TIMEOUT_MS = 60_000;
 const READ_BUFFER_BYTES = 64 * 1024 * 1024;
-const DEFAULT_PAGE_SIZE = 50;
+export const DEFAULT_PAGE_SIZE = 50;
 // Long enough to open many pages, and short enough that a new skill soon shows up.
 const CAPABILITIES_LIFETIME_MS = 5 * 60_000;
 // Each read of the account's usage starts Claude Code, and a week's limit moves slowly.
@@ -52,6 +52,16 @@ export function libraryPage(stored, running, { limit, offset }) {
   const listed = new Set(items.map(item => item.id));
   const unlisted = offset ? [] : running.filter(session => !listed.has(session.id)).map(session => ({ ...session, lastActiveAt: session.startedAt }));
   return { items: [...unlisted, ...items], offset: offset + stored.length, hasMore: stored.length === limit };
+}
+
+// One page of every agent's stored sessions together: what's going on now first, then the newest first.
+// `claude` is Claude Code's newest `offset + limit`, and `others` what the other agents have, so nothing
+// older than what's there can belong on the page. The reply's `offset` is where the next page starts.
+export function mergedPage(claude, others, { limit, offset }) {
+  const lastActive = item => item.lastActiveAt ?? 0;
+  const all = [...claude.items, ...others].sort((a, b) => Number(b.status != null) - Number(a.status != null) || lastActive(b) - lastActive(a));
+  const items = all.slice(offset, offset + limit);
+  return { items, offset: offset + items.length, hasMore: claude.hasMore || all.length > offset + limit };
 }
 
 // What a session that's running somewhere else is doing, for someone opening it. `claude agents`

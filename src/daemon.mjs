@@ -20,7 +20,7 @@ import {
 } from './git.mjs';
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
-import { Library, joinedStatus } from './library.mjs';
+import { DEFAULT_PAGE_SIZE, Library, joinedStatus, mergedPage } from './library.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession, stopSession } from './remove.mjs';
 import { askAgain, dialogLeft, quitInTerminal, restartSession, resumeSession } from './resume.mjs';
@@ -448,16 +448,20 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     try { return await doing; } finally { recount(sessionId); }
   };
 
-  // Codex's stored threads come with the first page, which is where what's running comes too.
+  // Every agent's stored sessions as one list, the newest first, a page at a time: see mergedPage. The
+  // first page had Claude Code's newest and all of every other agent's after them, over two hundred
+  // sessions at once for a reader with a few of each, in no order of time.
   const listLibrary = async ({ limit, offset }, socket) => {
+    const size = Number.isInteger(limit) && limit > 0 ? limit : DEFAULT_PAGE_SIZE;
+    const from = Number.isInteger(offset) && offset > 0 ? offset : 0;
     const [page, threads] = await Promise.all([
-      library.page({ limit, offset }),
-      offset ? [] : Promise.all(others.filter(other => shows(socket, other.name)).map(other => other.library().catch(error => {
+      library.page({ limit: from + size, offset: 0 }),
+      Promise.all(others.filter(other => shows(socket, other.name)).map(other => other.library().catch(error => {
         console.error(`${other.name} library: ${error.message}`);
         return [];
       }))).then(lists => lists.flat()),
     ]);
-    return threads.length ? { ...page, items: [...page.items, ...threads] } : page;
+    return mergedPage(page, threads, { limit: size, offset: from });
   };
 
   const listSessions = async socket => {

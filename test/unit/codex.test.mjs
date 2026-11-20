@@ -1275,6 +1275,14 @@ test('a list nothing is known to have changed is asked for again once it\'s old'
   assert.equal(server.called('thread/list').length, 2);
 });
 
+test('a thread Codex lists twice is in the library once, as it is now', async () => {
+  const { codex, server } = setup({ threads: [stored('twice', { updatedAt: 900 }), stored('other', { updatedAt: 800 })] });
+  // Codex's own list, with the thread again as it was.
+  server.threads.set('again', { ...stored('twice', { updatedAt: 100 }) });
+  const items = await codex.library();
+  assert.deepEqual(items.map(item => [item.id, item.lastActiveAt]), [['twice', 900_000], ['other', 800_000]]);
+});
+
 test('whose a session is gets asked of Codex once', async () => {
   const { codex, server, store } = setup({ threads: [stored('old')] });
   assert.equal(await codex.owns('old'), true);

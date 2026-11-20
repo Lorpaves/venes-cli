@@ -1707,7 +1707,10 @@ export class Codex {
     const link = await this.#open({ start: false }).catch(() => undefined);
     if (!link) return [];
     const data = await this.#storedThreads(link);
-    return data.filter(isListed).map(thread => {
+    // Codex can list a thread twice, as it did two of a hundred: once as it is now and once as it was. The
+    // first is the newer, and the second would put the session back where it used to be in the list.
+    const seen = new Set();
+    return data.filter(thread => isListed(thread) && !seen.has(thread.id) && seen.add(thread.id)).map(thread => {
       this.#owned.set(thread.id, true);
       const session = this.#store.find(thread.id);
       return libraryItem(thread, session && session.status !== 'ended' ? session.status : null);

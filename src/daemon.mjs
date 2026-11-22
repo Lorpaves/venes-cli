@@ -41,7 +41,7 @@ import { TerminalWatch } from './terminalwatch.mjs';
 import { isConsolePane, openPanes as openConsoles } from './winconsole.mjs';
 import { choicesOf, chooseRow, isAbout, knownTexts, readPrompt } from './prompt.mjs';
 import {
-  MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, removeUploads, saveUpload,
+  MAX_ATTACHMENTS, answersWithAttachments, discardUpload, findUpload, markSent, pruneIncoming, pruneUploads, removeUploads, saveReceived, saveUpload,
 } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { screenAccess, sshAccess } from './ssh.mjs';
@@ -190,7 +190,7 @@ async function reofferPromptRows(store, request) {
   if (prompt && isAbout(prompt, request.input)) store.offerRows(request.id, choicesOf(prompt));
 }
 
-function createClientServer(store, checkForUpdate, library, { uploads, downloads, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined, usage = undefined, terminals = undefined) {
+function createClientServer(store, checkForUpdate, library, { uploads, downloads, incoming, statusDir, pushFile }, tailscaleAccount = () => undefined, codex = undefined, antigravity = undefined, usage = undefined, terminals = undefined) {
   // The agents other than Claude Code, each with sessions of its own that it runs through its own server.
   // A terminal session has no agent in it, and is kept the same way: a shell the helper runs and reads itself.
   const others = [codex, antigravity, terminals].filter(Boolean);
@@ -866,7 +866,8 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       store.respond(msg.requestId, { ...msg, answers: attachedAnswers(msg) });
       return {};
     },
-    upload: msg => saveUpload(uploads, msg, downloads),
+    // In the line itself, or as a file `receive` took over SSH and wrote where it says.
+    upload: msg => (msg.file === undefined ? saveUpload(uploads, msg, downloads) : saveReceived(uploads, msg, incoming, downloads)),
     // Taken back out of the composer before its message went.
     discard: ({ sessionId, uploadId }) => discardUpload(uploads, sessionId, uploadId),
     // For a phone to send files over SSH, which takes its key.
@@ -1140,6 +1141,7 @@ export async function startDaemon(paths) {
   library.prepare().catch(error => console.error(`library: ${error.message}`));
   // Old uploads go now, and not while the helper runs, when a message might be on its way with one.
   pruneUploads(paths.uploads);
+  pruneIncoming(paths.incoming);
   pruneStatus(paths.statusDir);
   const rexAccount = cachedAccount();
   await rexAccount.refresh();

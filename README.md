@@ -233,7 +233,7 @@ A line ends at a line feed and nowhere else. JSON leaves a line separator (U+202
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
 | `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `annotations`, `always`, `option` | Answers a request. A question's `annotations`, by question as AskUserQuestion has them (`{"Which color?": {"notes": "…"}}`), go to Claude Code beside its `answers`, which shows Claude each note with its answer. Notes for questions it didn't ask, and empty ones, are left out. |
-| `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. See [Attachments](#attachments) |
+| `upload` | `sessionId`, `name`, `mediaType`, `data` in base64 | Keeps a picture or file for a message. `uploadId`, `name`, `mediaType`, `size`, `kind`. In place of `data`, `receive` gives `file`, where it wrote what came over SSH. See [Attachments](#attachments) |
 | `file` | `sessionId`, `uploadId` | `name`, `mediaType`, `data` in base64: a file a message had attached, while the Mac still keeps it |
 | `discard` | `sessionId`, `uploadId` | `discarded`: an upload taken back out of the composer before its message went. Its file goes from Downloads too, unless a message has it or it was moved or changed since. See [Attachments](#attachments) |
 | `ssh` | `publicKey` | Lets the client's key in over SSH, for files: `user`, `port`, `hostKey`, `hosts`. See [Over SSH](#over-ssh) |
@@ -594,11 +594,13 @@ A file taken back out of the composer before its message went is no one's yet, s
 
 They all go ahead of the text, and the text in `message.user` and in `history` items leaves out what was typed for them: Claude Code's `[Image #n]` marks, the references and the paths, at the start of a message only. Pictures then show as `images`, like any other. Files and videos are listed as `attachments`, each `{uploadId, name, mediaType, size}`. A picture Claude Code didn't take stays as its path, and is listed as a file.
 
-A name loses anything that can't be part of a path, a picture's and a video's lose their spaces, and they end in their type's extension. An upload can be up to 30 MB, and a message can have up to 20. A session that isn't running gets its first message's attachments as references on the command line, pictures too.
+A name loses anything that can't be part of a path, a picture's and a video's lose their spaces, and they end in their type's extension. An upload in a line of the connection can be up to 30 MB, since it's held whole there; one that comes [over SSH](#over-ssh) can be of any size (0.38.0). A message can have up to 20. A session that isn't running gets its first message's attachments as references on the command line, pictures too.
 
 #### Over SSH
 
 A file doesn't have to travel in the lines of the connection: base64 makes it a third bigger, and Rex takes a message of at most 1 MB. A client that can log in over SSH runs `~/.venes/venes receive` there instead, and writes a line of JSON with `sessionId`, `name`, `mediaType` and `size`, then exactly `size` bytes. It prints one line, the same `result` `upload` replies with, or one with `ok: false` and an `error`, and exits. The file then goes in a message by its `uploadId`, as any other.
+
+Since 0.38.0 a file that comes this way can be of any size. `receive` writes it to a file in `~/.venes/incoming` as it comes, no faster than the disk takes it, so it's never held whole, and then asks the helper to `upload` that `file` in place of `data`: the helper moves it to Downloads, at once where that's on the same disk and as a copy where it isn't. Only a file straight in that folder is taken, since what's named is moved. One that stops short, or that the helper turns away, is removed, and whatever a `receive` that died left there goes a day later, when the helper next starts. Before 0.38.0 `receive` turned away a file of more than 30 MB with `too_large`, as soon as it had read the line that says its size.
 
 A client that came through Rex gets in with `ssh`, which takes its `publicKey`, an Ed25519 key as `authorized_keys` has them, and lets it in, as pairing over SSH does. Whoever reaches the helper can do as much already. It replies with the `user`, the `port`, the `hostKey` fingerprint, and the `hosts` to try in order: this Mac's own address on its tailnet while its Tailscale is on, then its name on the local network. Rex's built-in Tailscale is no use here, since only Rex answers on that node. `hosts` is empty while Remote Login is off. Over SSH, macOS lets a program in Downloads only with *Allow full disk access for remote users* on, in Remote Login's settings, so `receive` hands the file to the helper, which goes by the terminal's access.
 
@@ -746,7 +748,7 @@ A `task` has `id`, `type` (`shell`, `subagent`, `workflow`, `monitor` and others
 | `mode_failed` | The terminal didn't show the session's mode as expected, so it was left as it is. Claude Code's status bar may have changed. |
 | `picker_failed` | The terminal's model picker wasn't as expected, so nothing changed. Claude Code's picker may have changed, or the session's model may not be one of its rows. |
 | `message_too_long` | The first message to a stored session has to be under 12 KB, because it travels on a command line. Later ones don't. |
-| `bad_upload`, `too_large` | An upload had no type, nothing in it, or more than 30 MB |
+| `bad_upload`, `too_large` | An upload had no type, nothing in it, or more than 30 MB in a line of the connection |
 | `bad_attachment` | `send` named an upload that isn't there any more, or more than 20 |
 | `unknown_file` | `file` named an upload the Mac no longer keeps, or that someone moved |
 | `bad_key` | `ssh` was given something that isn't an Ed25519 public key |

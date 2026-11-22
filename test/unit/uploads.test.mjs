@@ -7,8 +7,8 @@ import { SessionStore } from '../../src/sessions.mjs';
 import { sendMessage } from '../../src/terminal.mjs';
 import { readHistory } from '../../src/transcript.mjs';
 import {
-  MAX_UPLOAD_BYTES, answersWithAttachments, discardUpload, findUpload, markSent, pruneUploads, referenceTo, removeUploads, safeName, saveUpload,
-  splitAttachments,
+  MAX_UPLOAD_BYTES, answersWithAttachments, discardUpload, findUpload, markSent, pruneIncoming, pruneUploads, referenceTo, removeUploads, safeName, saveReceived,
+  saveUpload, splitAttachments,
 } from '../../src/uploads.mjs';
 
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
@@ -115,6 +115,72 @@ test('an upload needs a type and something in it, and has a size limit', t => {
   assert.throws(save({ data: 'A'.repeat(Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 + 8) }), { code: 'too_large' });
   assert.equal(fs.existsSync(path.join(root, SESSION_ID)), false);
   assert.deepEqual(fs.readdirSync(downloads), []);
+});
+
+// As `receive` leaves a file: straight in the folder, under a name of its own.
+function cameIn(incoming, bytes, name = 'f00d') {
+  const file = path.join(incoming, name);
+  fs.writeFileSync(file, bytes, { mode: 0o600 });
+  return file;
+}
+
+test('a file that came in over SSH is moved to Downloads whatever its size, and is an upload like any other', async t => {
+  const { root, downloads } = tempFolders(t);
+  const incoming = tempRoot(t);
+  // More than a line takes, which is no matter for a file that's moved and never read.
+  const file = cameIn(incoming, Buffer.alloc(MAX_UPLOAD_BYTES + 1024, 3));
+  const video = await saveReceived(root, { sessionId: SESSION_ID, name: 'screen recording.mov', mediaType: 'VIDEO/QuickTime', file }, incoming, downloads);
+  assert.deepEqual([video.kind, video.mediaType, video.name, video.size], ['video', 'video/quicktime', 'screen-recording.mov', MAX_UPLOAD_BYTES + 1024]);
+  assert.match(video.uploadId, /^[0-9a-f]{32}$/);
+  const found = findUpload(root, SESSION_ID, video.uploadId);
+  assert.equal(found.path, path.join(downloads, 'screen-recording.mov'));
+  assert.equal(fs.statSync(found.path).size, MAX_UPLOAD_BYTES + 1024);
+  assert.deepEqual(fs.readdirSync(incoming), [], 'and it isn\'t where it came in any more');
+  // A second of the same name is numbered, as one in a line is.
+  const again = await saveReceived(root, { sessionId: SESSION_ID, name: 'screen recording.mov', mediaType: 'video/quicktime', file: cameIn(incoming, 'x') }, incoming, downloads);
+  assert.equal(findUpload(root, SESSION_ID, again.uploadId).path, path.join(downloads, 'screen-recording-2.mov'));
+  // And taken back out of the composer before its message went, its file goes too.
+  assert.deepEqual(discardUpload(root, SESSION_ID, again.uploadId), { discarded: true });
+  assert.equal(fs.existsSync(path.join(downloads, 'screen-recording-2.mov')), false);
+});
+
+test('only a file that came in is moved: not one named from anywhere else, a folder, a link, or an empty one', async t => {
+  const { root, downloads } = tempFolders(t);
+  const incoming = tempRoot(t);
+  const elsewhere = tempRoot(t);
+  const outside = cameIn(elsewhere, 'mine');
+  const take = file => saveReceived(root, { sessionId: SESSION_ID, name: 'x.txt', mediaType: 'text/plain', file }, incoming, downloads);
+  await assert.rejects(take(outside), { code: 'bad_upload' });
+  await assert.rejects(take(path.join(incoming, '..', path.basename(elsewhere), 'f00d')), { code: 'bad_upload' });
+  await assert.rejects(take(path.join(incoming, 'none')), { code: 'bad_upload' });
+  await assert.rejects(take(incoming), { code: 'bad_upload' });
+  await assert.rejects(take(42), { code: 'bad_upload' });
+  fs.mkdirSync(path.join(incoming, 'folder'));
+  await assert.rejects(take(path.join(incoming, 'folder')), { code: 'bad_upload' });
+  if (process.platform !== 'win32') {
+    fs.symlinkSync(outside, path.join(incoming, 'link'));
+    await assert.rejects(take(path.join(incoming, 'link')), { code: 'bad_upload' });
+  }
+  await assert.rejects(take(cameIn(incoming, '', 'empty')), { code: 'bad_upload' });
+  // With nowhere said for files to come in, none is taken.
+  await assert.rejects(saveReceived(root, { sessionId: SESSION_ID, name: 'x.txt', mediaType: 'text/plain', file: cameIn(incoming, 'x') }, undefined, downloads), { code: 'bad_upload' });
+  await assert.rejects(saveReceived(root, { sessionId: SESSION_ID, name: 'x.txt', mediaType: 'nope', file: cameIn(incoming, 'x', 'typed') }, incoming, downloads), { code: 'bad_upload' });
+  await assert.rejects(saveReceived(root, { sessionId: 'a/b', name: 'x.txt', mediaType: 'text/plain', file: cameIn(incoming, 'x', 'sess') }, incoming, downloads), { code: 'unknown_session' });
+  assert.equal(fs.readFileSync(outside, 'utf8'), 'mine');
+  assert.deepEqual(fs.readdirSync(downloads), []);
+  assert.equal(fs.existsSync(path.join(root, SESSION_ID)), false, 'and nothing is known of what wasn\'t taken');
+});
+
+test('a file that came in and was never kept goes after a day, when the helper starts', t => {
+  const incoming = tempRoot(t);
+  const old = cameIn(incoming, 'left behind', 'old');
+  const recent = cameIn(incoming, 'on its way', 'recent');
+  const day = 24 * 60 * 60 * 1000;
+  fs.utimesSync(old, new Date(Date.now() - 2 * day), new Date(Date.now() - 2 * day));
+  pruneIncoming(incoming);
+  assert.deepEqual(fs.readdirSync(incoming), ['recent']);
+  assert.equal(fs.readFileSync(recent, 'utf8'), 'on its way');
+  pruneIncoming(path.join(incoming, 'no such folder'));
 });
 
 test('what\'s known of a session\'s uploads goes with it, and old ones go when the helper starts, but not their files', t => {

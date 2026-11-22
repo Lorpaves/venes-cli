@@ -924,8 +924,17 @@ T('a_video_comes_through_receive_and_goes_in_by_its_path', {}, async r => {
   assert.ok(!said.includes(`@\\"${where}`), 'and not as a reference');
   const { items } = await r.client.request('history', { sessionId: id });
   assert.deepEqual(items.findLast(item => item.role === 'user').attachments?.map(file => file.uploadId), [video.uploadId]);
-  const big = await receive({ sessionId: id, name: 'big.mov', mediaType: 'video/quicktime', size: 31 * 1024 * 1024 }, Buffer.alloc(0));
-  assert.deepEqual([big.code, big.reply.ok, big.reply.error?.code], [1, false, 'too_large']);
+  // One bigger than a line of the connection takes comes whole: it's written as it comes, and moved.
+  const bytes = Buffer.alloc(31 * 1024 * 1024, 5);
+  const big = await receive({ sessionId: id, name: 'big.mov', mediaType: 'video/quicktime' }, bytes);
+  assert.deepEqual([big.code, big.reply.ok, big.reply.kind, big.reply.size], [0, true, 'video', bytes.length]);
+  const bigAt = findUpload(paths.uploads, id, big.reply.uploadId).path;
+  assert.equal(path.dirname(bigAt), DOWNLOADS);
+  assert.equal(fs.statSync(bigAt).size, bytes.length);
+  // One that stops short is no upload, and nothing of either is left where they came in.
+  const short = await receive({ sessionId: id, name: 'cut.mov', mediaType: 'video/quicktime', size: 100 }, Buffer.from('abc'));
+  assert.deepEqual([short.code, short.reply.ok, short.reply.error?.code], [1, false, 'bad_upload']);
+  assert.deepEqual(fs.readdirSync(paths.incoming), []);
 });
 
 // A phone asks where this Mac's Screen Sharing is, to reach it straight over the tailnet: whatever this

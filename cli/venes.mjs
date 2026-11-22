@@ -364,17 +364,23 @@ const commands = {
   output: ([sessionId, taskId]) => withClient(async client => {
     console.log((await client.request('taskOutput', { sessionId, taskId })).output ?? '');
   }),
-  // Replies as the helper would to `upload`, on one line.
+  // Replies as the helper would to `upload`, on one line. The file is written here as it comes, which
+  // takes one of any size, and the helper moves it to Downloads: over SSH this may not be let in there.
   async receive() {
     let reply;
+    let taken;
     try {
-      const { sessionId, name, mediaType, bytes } = await readUpload(process.stdin);
+      fs.mkdirSync(paths.incoming, { recursive: true, mode: 0o700 });
+      taken = await readUpload(process.stdin, { into: paths.incoming });
+      const { sessionId, name, mediaType, file } = taken;
       await withClient(async client => {
-        reply = await client.request('upload', { sessionId, name, mediaType, data: bytes.toString('base64') });
+        reply = await client.request('upload', { sessionId, name, mediaType, file });
       });
     } catch (error) {
       reply = { type: 'result', ok: false, error: { code: error.code ?? 'internal', message: error.message } };
     }
+    // Moved by now if the helper took it, and no one's if it didn't.
+    if (taken) fs.rmSync(taken.file, { force: true });
     process.stdout.write(`${JSON.stringify(reply)}\n`, () => process.exit(reply.ok ? 0 : 1));
   },
   async attach([mode]) {

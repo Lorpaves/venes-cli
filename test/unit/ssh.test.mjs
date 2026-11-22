@@ -125,6 +125,69 @@ test('a file that ends early or stops coming is turned away', async () => {
   await assert.rejects(waited, { code: 'bad_upload' });
 });
 
+function incomingFolder(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-incoming-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test('a file read into a folder is written there as it comes, whatever its size, and is given back as where it is', async t => {
+  const into = incomingFolder(t);
+  const input = new PassThrough();
+  // More than a line of the connection takes, which isn't asked of a file that's never held whole.
+  const read = readUpload(input, { into, maxBytes: undefined });
+  const piece = Buffer.alloc(256 * 1024, 7);
+  const pieces = 20;
+  input.write(about({ size: piece.length * pieces + 3 }));
+  for (let sent = 0; sent < pieces; sent++) input.write(piece);
+  input.write(Buffer.from([1, 2, 3, 99, 99]));
+  const { file, ...said } = await read;
+  assert.deepEqual(said, { sessionId: SESSION_ID, name: 'clip.mov', mediaType: 'video/quicktime', size: piece.length * pieces + 3 });
+  assert.equal(path.dirname(file), into);
+  const written = fs.readFileSync(file);
+  assert.equal(written.length, piece.length * pieces + 3, 'and what came after it isn\'t in it');
+  assert.deepEqual([...written.subarray(-4)], [7, 1, 2, 3]);
+  assert.ok(written.subarray(0, piece.length).equals(piece));
+  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test('a file as big as a line never takes is turned away in a line, and taken into a folder', async t => {
+  const into = incomingFolder(t);
+  const big = 31 * 1024 * 1024;
+  const inLine = new PassThrough();
+  const refused = readUpload(inLine);
+  inLine.write(about({ size: big }));
+  await assert.rejects(refused, { code: 'too_large' });
+  const toDisk = new PassThrough();
+  const read = readUpload(toDisk, { into });
+  toDisk.write(about({ size: big }));
+  const piece = Buffer.alloc(1024 * 1024);
+  for (let sent = 0; sent < 31; sent++) {
+    // As a sender does that's told to wait.
+    if (!toDisk.write(piece)) await new Promise(resolve => toDisk.once('drain', resolve));
+  }
+  const { file, size } = await read;
+  assert.equal(size, big);
+  assert.equal(fs.statSync(file).size, big);
+});
+
+test('a file that ends early or stops coming leaves nothing in the folder', async t => {
+  const into = incomingFolder(t);
+  const short = new PassThrough();
+  const ended = readUpload(short, { into });
+  short.end(`${about({ size: 10 })}abc`);
+  await assert.rejects(ended, { code: 'bad_upload' });
+  const stalled = new PassThrough();
+  const waited = readUpload(stalled, { into, idleMs: 30 });
+  stalled.write(`${about({ size: 10 })}abc`);
+  await assert.rejects(waited, { code: 'bad_upload' });
+  const none = new PassThrough();
+  const empty = readUpload(none, { into });
+  none.write(about({ size: 0 }));
+  await assert.rejects(empty, { code: 'bad_upload' });
+  assert.deepEqual(fs.readdirSync(into), []);
+});
+
 test('a pairing code over SSH sends the phone to the tailnet while this Mac is on it', () => {
   assert.equal(pairingHost(running, 'Mini.local'), '100.96.228.46');
   assert.equal(pairingHost({ ...running, BackendState: 'Stopped' }, 'Mini.local'), 'Mini.local');

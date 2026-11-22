@@ -2,7 +2,10 @@
 // it controls sessions on. The phone runs `venes receive`, which hands what it reads to the helper.
 
 import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { HelperError } from './errors.mjs';
 import { allowPhone, authorizedKeysFile, isPortOpen, knownHostKey, localHostName, phoneCommand } from './pairing.mjs';
 import { helperPaths } from './paths.mjs';
@@ -115,8 +118,10 @@ export async function localName() {
 const badUpload = message => new HelperError('bad_upload', message);
 
 // What a phone sends `receive`: a line of JSON with `sessionId`, `name`, `mediaType` and `size`,
-// then exactly that many bytes.
-export function readUpload(input, { idleMs = RECEIVE_IDLE_MS, maxBytes = MAX_UPLOAD_BYTES } = {}) {
+// then exactly that many bytes. With `into`, a folder, the bytes go to a file there as they come: the
+// file is never held whole, so it can be of any size, and it's given back as where it is, with its
+// `size`. Without, the bytes are given back, and can be no more than a line of the connection takes.
+export function readUpload(input, { idleMs = RECEIVE_IDLE_MS, into, maxBytes = into ? Infinity : MAX_UPLOAD_BYTES } = {}) {
   return new Promise((resolve, reject) => {
     let head = Buffer.alloc(0);
     let about;
@@ -124,16 +129,46 @@ export function readUpload(input, { idleMs = RECEIVE_IDLE_MS, maxBytes = MAX_UPL
     let size = 0;
     let idle;
     let done = false;
-    const finish = (error, value) => {
-      if (done) return;
-      done = true;
+    let file;
+    let out;
+    const stop = () => {
       clearTimeout(idle);
       input.off('data', onData);
       input.off('end', onEnd);
       input.off('error', onError);
       input.pause();
-      if (error) reject(error);
-      else resolve(value);
+    };
+    const finish = (error, value) => {
+      if (done) return;
+      done = true;
+      stop();
+      if (!error) resolve(value);
+      else if (!out) reject(error);
+      else {
+        // Part of a file is no file.
+        out.destroy();
+        fs.rm(file, { force: true }, () => reject(error));
+      }
+    };
+    const waitForMore = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => finish(badUpload('This file stopped coming.')), idleMs);
+    };
+    const write = bytes => {
+      if (!out) {
+        file = path.join(into, crypto.randomBytes(16).toString('hex'));
+        out = fs.createWriteStream(file, { flags: 'wx', mode: 0o600 });
+        out.on('error', error => finish(error));
+      }
+      // No faster than the disk takes it. The phone waits meanwhile, which isn't its going quiet.
+      if (out.write(bytes) || size >= about.size) return;
+      input.pause();
+      clearTimeout(idle);
+      out.once('drain', () => {
+        if (done) return;
+        waitForMore();
+        input.resume();
+      });
     };
     const readAbout = chunk => {
       head = Buffer.concat([head, chunk]);
@@ -153,22 +188,29 @@ export function readUpload(input, { idleMs = RECEIVE_IDLE_MS, maxBytes = MAX_UPL
       return head.subarray(newline + 1);
     };
     const onData = chunk => {
-      clearTimeout(idle);
-      idle = setTimeout(() => finish(badUpload('This file stopped coming.')), idleMs);
+      waitForMore();
       const bytes = about ? chunk : readAbout(chunk);
-      if (done || !bytes) return;
-      body.push(bytes);
-      size += bytes.length;
-      if (size >= about.size) {
-        const { sessionId, name, mediaType } = about;
-        finish(undefined, { sessionId, name, mediaType, bytes: Buffer.concat(body).subarray(0, about.size) });
+      if (done || !bytes?.length) return;
+      // What comes after the file isn't the file's.
+      const taken = bytes.subarray(0, about.size - size);
+      size += taken.length;
+      if (into) write(taken);
+      else body.push(taken);
+      if (size < about.size) return;
+      const { sessionId, name, mediaType } = about;
+      if (!into) {
+        finish(undefined, { sessionId, name, mediaType, bytes: Buffer.concat(body) });
+        return;
       }
+      // All of it has come, and it's a file once all of it is written.
+      stop();
+      out.end(() => finish(undefined, { sessionId, name, mediaType, size: about.size, file }));
     };
     const onEnd = () => finish(badUpload('This file came to an end too soon.'));
     const onError = error => finish(error);
     input.on('data', onData);
     input.on('end', onEnd);
     input.on('error', onError);
-    idle = setTimeout(() => finish(badUpload('This file stopped coming.')), idleMs);
+    waitForMore();
   });
 }

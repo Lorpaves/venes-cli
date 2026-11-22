@@ -1,5 +1,7 @@
 // Pictures, videos and files a client attaches to a message. They go in Downloads, like anything else
 // this Mac is sent, and what's known of each is kept by session, for the messages that name them.
+// One that comes in a line of the connection is all in memory, and can be so big and no bigger. One a
+// phone sends over SSH is written to a file as it comes, and can be of any size.
 // A picture's path is pasted on its own, which Claude Code turns into an image the way it does one
 // dragged into the terminal. A file goes in as an @ reference, which puts its contents in the message.
 
@@ -16,7 +18,10 @@ const IMAGE_EXTENSIONS = new Map([
 // Claude can't watch a video, but it can work with one by its path, the way it would with any
 // file it was pointed at.
 const VIDEO_EXTENSIONS = new Map([['video/quicktime', ['mov']], ['video/mp4', ['mp4', 'm4v']], ['video/x-m4v', ['m4v']]]);
+// The most a file can be in a line of the connection, where it's base64 and held whole.
 export const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;
+// A file that came in over SSH and was never asked for is left by a `receive` that died.
+const INCOMING_KEEP_MS = 24 * 60 * 60 * 1000;
 export const MAX_ATTACHMENTS = 20;
 const MAX_NAME_LENGTH = 120;
 const MAX_EXTENSION_LENGTH = 16;
@@ -87,16 +92,20 @@ function createIn(folder, name, gap) {
   }
 }
 
-// Into Downloads, or next to what's known of it when this Mac won't let the helper write there.
-function keep(bytes, { downloads, dir, name, kind }) {
-  let created;
+// A name of its own in Downloads, or next to what's known of it when this Mac won't let the helper
+// write there.
+function reserve({ downloads, dir, name, kind }) {
   try {
     fs.mkdirSync(downloads, { recursive: true });
-    created = createIn(downloads, name, kind === 'file' ? ' ' : '-');
+    return createIn(downloads, name, kind === 'file' ? ' ' : '-');
   } catch (error) {
     if (!['EPERM', 'EACCES', 'EROFS', 'ENOTDIR'].includes(error.code)) throw error;
-    created = createIn(dir, name, '-');
+    return createIn(dir, name, '-');
   }
+}
+
+function keep(bytes, place) {
+  const created = reserve(place);
   try {
     fs.writeFileSync(created.fd, bytes);
   } catch (error) {
@@ -108,11 +117,85 @@ function keep(bytes, { downloads, dir, name, kind }) {
   return created.file;
 }
 
-// Keeps what a client sent for a message it's about to send. `data` is base64.
-export function saveUpload(root, { sessionId, name, mediaType, data }, downloads = downloadsFolder()) {
+// A file that's whole already takes the name's place: at once on the same disk, and as a copy where
+// Downloads is on another, which is waited for without holding anything else up.
+async function keepFile(from, place) {
+  const created = reserve(place);
+  fs.closeSync(created.fd);
+  try {
+    try {
+      await fs.promises.rename(from, created.file);
+    } catch (error) {
+      if (error.code !== 'EXDEV') throw error;
+      await fs.promises.copyFile(from, created.file);
+      await fs.promises.rm(from, { force: true });
+    }
+  } catch (error) {
+    fs.rmSync(created.file, { force: true });
+    throw error;
+  }
+  return created.file;
+}
+
+// The session it's for and what kind it says it is, before anything is kept.
+function uploadFor(root, { sessionId, mediaType }) {
   const folder = sessionFolder(root, sessionId);
   const type = typeof mediaType === 'string' ? mediaType.toLowerCase() : '';
   if (!MEDIA_TYPE.test(type)) throw new HelperError('bad_upload', 'This file has no type.');
+  return { folder, type };
+}
+
+// When it was written, so that a file taken back out of a message can be told from one changed since.
+function note(dir, about, file) {
+  const { mtimeMs } = fs.statSync(file);
+  fs.writeFileSync(path.join(dir, ABOUT), JSON.stringify({ ...about, path: file, mtimeMs }), { mode: 0o600 });
+}
+
+// A file `receive` wrote as it came, by where it is. Only one straight in `incoming`, where nothing but
+// `receive` writes: what's named here is moved, so it can't be any file a client cares to name.
+function cameIn(file, incoming) {
+  const none = () => new HelperError('bad_upload', 'This file didn\'t come in.');
+  if (typeof file !== 'string' || typeof incoming !== 'string' || path.dirname(path.resolve(file)) !== path.resolve(incoming)) throw none();
+  let found;
+  try { found = fs.lstatSync(file); } catch { throw none(); }
+  if (!found.isFile()) throw none();
+  if (!found.size) throw new HelperError('bad_upload', 'This file is empty.');
+  return { file: path.resolve(file), size: found.size };
+}
+
+// Keeps a file `receive` took over SSH, for a message a client is about to send: it's moved from where
+// it was written to Downloads, whatever its size.
+export async function saveReceived(root, { sessionId, name, mediaType, file }, incoming, downloads = downloadsFolder()) {
+  const { folder, type } = uploadFor(root, { sessionId, mediaType });
+  const came = cameIn(file, incoming);
+  const uploadId = crypto.randomBytes(16).toString('hex');
+  const about = { name: safeName(name, type), mediaType: type, size: came.size, kind: kindOf(type) };
+  const dir = path.join(folder, uploadId);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    note(dir, about, await keepFile(came.file, { downloads, dir, ...about }));
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+  return { uploadId, ...about };
+}
+
+// Files that came in and were never kept go, once they're a day old: a `receive` that died left them.
+export function pruneIncoming(incoming, { now = Date.now(), keepMs = INCOMING_KEEP_MS } = {}) {
+  let files;
+  try { files = fs.readdirSync(incoming); } catch { return; }
+  for (const name of files) {
+    const file = path.join(incoming, name);
+    try {
+      if (now - fs.statSync(file).mtimeMs > keepMs) fs.rmSync(file, { recursive: true, force: true });
+    } catch { /* gone already */ }
+  }
+}
+
+// Keeps what a client sent for a message it's about to send. `data` is base64.
+export function saveUpload(root, { sessionId, name, mediaType, data }, downloads = downloadsFolder()) {
+  const { folder, type } = uploadFor(root, { sessionId, mediaType });
   if (typeof data !== 'string' || !data) throw new HelperError('bad_upload', 'This file is empty.');
   if (data.length > Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 + 4) throw tooLarge();
   const bytes = Buffer.from(data, 'base64');
@@ -122,10 +205,7 @@ export function saveUpload(root, { sessionId, name, mediaType, data }, downloads
   const about = { name: safeName(name, type), mediaType: type, size: bytes.length, kind: kindOf(type) };
   const dir = path.join(folder, uploadId);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = keep(bytes, { downloads, dir, ...about });
-  // When it was written, so that a file taken back out of a message can be told from one changed since.
-  const { mtimeMs } = fs.statSync(file);
-  fs.writeFileSync(path.join(dir, ABOUT), JSON.stringify({ ...about, path: file, mtimeMs }), { mode: 0o600 });
+  note(dir, about, keep(bytes, { downloads, dir, ...about }));
   return { uploadId, ...about };
 }
 

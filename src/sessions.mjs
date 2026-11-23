@@ -422,6 +422,13 @@ export class SessionStore extends EventEmitter {
     };
   }
 
+  // What a session has told since `seq`, for a client that has all of it up to there and wants what's
+  // new. Undefined when some of that has gone from the log, since then it can't be made up from here.
+  eventsOf(s, seq) {
+    const { events, gap } = this.eventsSince(seq);
+    return gap ? undefined : events.filter(e => e.sessionId === s.id);
+  }
+
   // This session's events that the transcript can't be relied on for yet: the turn going on
   // now, and any that ended so recently its last words may not have reached the file.
   openTurn(s, now = Date.now()) {

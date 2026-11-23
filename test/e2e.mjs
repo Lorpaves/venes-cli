@@ -789,6 +789,24 @@ T('history', {}, async r => {
   const opened = await r.client.request('join', { sessionId: id, foldOver: 0 });
   assert.equal(opened.items.filter(i => i.role === 'fold').length + opened.turn.filter(e => e.kind === 'turn.fold').length, 1);
   assert.ok(![...opened.items, ...opened.turn].some(one => one.role === 'tool' || one.kind === 'tool.start'), 'and none of its calls beside it');
+  // A client that kept a page asks only for what's come since, and adds it under what it shows.
+  const kept = await r.client.request('join', { sessionId: id });
+  assert.equal(typeof kept.bootId, 'string', 'a page says which helper it came from');
+  const nothing = await r.client.request('join', { sessionId: id, since: kept.seq, bootId: kept.bootId });
+  assert.deepEqual([nothing.caughtUp, nothing.items, nothing.events.filter(e => /^(message|tool|turn)\./.test(e.kind))], [true, undefined, []]);
+  r.mark();
+  await r.type('Reply with only the word MORE.');
+  await r.turnEnd(40000);
+  const more = await r.client.request('join', { sessionId: id, since: kept.seq, bootId: kept.bootId });
+  assert.equal(more.caughtUp, true);
+  assert.ok(more.events.every(e => e.seq > kept.seq && e.sessionId === id), 'this session, since then');
+  for (const kind of ['message.user', 'turn.end']) assert.ok(more.events.some(e => e.kind === kind), kind);
+  assert.deepEqual([more.sessions[0].id, more.requests, more.seq >= more.events.at(-1).seq], [id, [], true]);
+  const foldedMore = await r.client.request('join', { sessionId: id, since: kept.seq, bootId: kept.bootId, foldOver: 0 });
+  assert.equal(foldedMore.caughtUp, true, 'and folded for a client that asks, when it has calls to fold');
+  assert.ok(foldedMore.events.some(e => e.kind === 'turn.end'));
+  const restarted = await r.client.request('join', { sessionId: id, since: kept.seq, bootId: 'another' });
+  assert.ok(Array.isArray(restarted.items) && restarted.caughtUp === undefined, 'a page from another helper is given whole');
 });
 
 function solidPng(size, rgb = [0x80, 0x80, 0x80]) {

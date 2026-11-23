@@ -787,6 +787,26 @@ test('a picture in the shape Code Mode hands one over in has no bytes either, an
   assert.deepEqual(response.media, [[{ type: 'image', source: { type: 'base64', media_type: 'image/png' } }]]);
 });
 
+test('what one session has told since a point is its own events after it, or nothing certain once some have gone', () => {
+  const store = new SessionStore();
+  const hook = (id, name, fields = {}) => store.handleHook({ session_id: id, cwd: '/w', permission_mode: 'default', hook_event_name: name, ...fields });
+  hook('a', 'UserPromptSubmit', { prompt: 'one' });
+  const mark = store.seq;
+  hook('b', 'UserPromptSubmit', { prompt: 'other' });
+  hook('a', 'Stop', { last_assistant_message: 'done', background_tasks: [] });
+  const told = store.eventsOf(store.find('a'), mark);
+  assert.ok(told.length > 0 && told.every(e => e.sessionId === 'a' && e.seq > mark));
+  assert.ok(told.some(e => e.kind === 'turn.end'));
+  assert.deepEqual(store.eventsOf(store.find('a'), store.seq), []);
+  // Turn after turn in the other session, until the log has let the first ones go.
+  hook('b', 'Stop', { last_assistant_message: 'ok', background_tasks: [] });
+  for (let index = 0; index < 3000; index += 1) {
+    hook('b', 'UserPromptSubmit', { prompt: `more ${index}` });
+    hook('b', 'Stop', { last_assistant_message: 'ok', background_tasks: [] });
+  }
+  assert.equal(store.eventsOf(store.find('a'), mark), undefined, 'the log no longer goes back that far');
+});
+
 test('a turn that ended a moment ago is given time to reach the transcript, and one that ended before is not', () => {
   const { store, hook, events } = setup();
   hook('UserPromptSubmit', { prompt: 'go' });

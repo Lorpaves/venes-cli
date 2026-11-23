@@ -228,7 +228,7 @@ A line ends at a line feed and nowhere else. JSON leaves a line separator (U+202
 | `gitPush` | `sessionId` | Sends the branch to the one it follows, or makes one for it on the remote. Replies with the `branch`, and `upToDate` when there was nothing to send. |
 | `gitPull` | `sessionId` | Brings in what the branch it follows has that this one hasn't. Replies with `upToDate` when there was nothing to bring. |
 | `subscribe` | `since`, `bootId` (both optional), `agents` | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, or were more than a page would be to open again, so reload: none from before the snapshot follow it. `agents` lists the sessions other than Claude Code's that the client can show: `["codex"]`. See [Codex sessions](#codex-sessions). |
-| `join` | `sessionId`, `limit`, `foldOver` | Everything needed to open a session. See [Joining a session](#joining-a-session), and [Folds](#folds) for `foldOver`. |
+| `join` | `sessionId`, `limit`, `foldOver`, `since`, `bootId` | Everything needed to open a session. See [Joining a session](#joining-a-session), [Folds](#folds) for `foldOver`, and [Catching up](#catching-up) for `since` and `bootId`. |
 | `history` | `sessionId`, `limit`, `before`, `foldOver` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
 | `unfold` | `sessionId`, `key` | `items`: a stretch of work a page had as a `fold`, whole. See [Folds](#folds). |
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
@@ -643,6 +643,16 @@ Each call is its id, its name, `isError` when it failed, and `file` when its inp
 In `join`, the turn going on is folded too, a stretch at a time: its events are cut where history cuts (`message.user`, one sent during the turn too, `message.output`, `compact.end`, and a turn's end, since a turn that ended a moment ago is still among them when the next begins). In a stretch with more calls over than `foldOver`, a `turn.fold` event with the same `key` and `calls` stands where the first of them was, in place of those calls, the pictures they showed, the thinking, and the messages that were finished by the time the last of them ended. A call still going or one that ends in a later stretch, a message still being written, and what says how the session stands (status, requests, tasks) stay as they were, and so does everything after.
 
 `unfold` with `sessionId` and a fold's `key` answers `items`: the whole stretch as it would have come, read from the session as it is now, so it has the calls made since as well. `unknown_fold` means the session no longer has it. When the session's turn ended within the last two seconds, the answer waits out the rest of them (0.39.1): the turn's last words may not be in the transcript yet, and a client puts what it's given in place of what it showed. Without `foldOver` nothing is folded, which is what a client that doesn't know folds gets.
+
+#### Catching up
+
+Since 0.41.0 every reply to `join` has `bootId`, the helper it came from. A client that kept a page from before and shows it while it asks again passes that page's `seq` as `since` and its `bootId`. While the helper is still that one, still has every event since, and this session's are less than 64 KB, it answers with those in place of a page:
+
+```json
+{"caughtUp": true, "events": [{"seq": 41, "kind": "message.user", "…": "…"}], "seq": 57, "bootId": "…", "queued": [], "sessions": [{"id": "…", "status": "idle"}], "requests": []}
+```
+
+`events` are this session's, each as it was sent live, or folded as a page's turn is when the client passes `foldOver`, so that a long stretch of work since is one `turn.fold`; they're to be taken in order after what the kept page had, and `sessions`, `requests` and `queued` say how the session stands now, as a page's do. Events after `seq` follow on the wire as after any `join`. So the client adds what's new under what it shows, as if it had been there all along. In every other case the reply is a page whole (`items`, `turn`), which a client tells by there being no `caughtUp`: the helper started again since, the log no longer goes back to `since`, or too much has happened, when a page is less to send.
 
 ### Answering requests
 

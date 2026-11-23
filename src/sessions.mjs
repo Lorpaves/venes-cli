@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { isPollEvent, normalized, parseTaskNotification, signalsFrom, unwrapPasted } from './transcript.mjs';
 import { HelperError } from './errors.mjs';
 import { splitAttachments, uploadsRoot } from './uploads.mjs';
+import { lightened } from './light.mjs';
 
 export { HelperError };
 
@@ -142,15 +143,6 @@ const STOP_TOOLS = new Set(['TaskStop', 'KillShell']);
 
 // Late pieces of the turn before can sit between its end and these.
 const startsTurn = e => e.kind === 'message.user' || e.kind === 'task.notification' || (e.kind === 'session.status' && isAtWork(e.status));
-
-// A tool that shows Claude an image hands it over whole. It stays out of events, which go to everyone
-// and sit in the log, and a client fetches it from the transcript if someone looks.
-function withoutImageData(response) {
-  if (Array.isArray(response)) {
-    return response.map(part => (part?.type === 'image' && part.source?.data ? { ...part, source: { ...part.source, data: undefined } } : part));
-  }
-  return response?.type === 'image' && response.file?.base64 ? { ...response, file: { ...response.file, base64: undefined } } : response;
-}
 
 // The folders remembered of where a session has worked.
 const RECENT_FOLDERS = 12;
@@ -957,7 +949,7 @@ export class SessionStore extends EventEmitter {
     if (!data.isError) this.#trackStop(s, tool);
     const { response, ...rest } = data;
     this.#emit(s, 'tool.end', {
-      toolUseId, name: tool.name, parentToolUseId: this.#parentOf(s, data.agentId), ...rest, ...(response !== undefined && { response: withoutImageData(response) }),
+      toolUseId, name: tool.name, parentToolUseId: this.#parentOf(s, data.agentId), ...rest, ...(response !== undefined && { response }),
     });
   }
 
@@ -1018,8 +1010,12 @@ export class SessionStore extends EventEmitter {
     this.#emit(s, 'session.status', { status, ...(isAtRest && { working: false }) });
   }
 
+  // A call is told without what no page shows of it, and cut where it runs long: an event goes to every
+  // client, sits in the log, and comes again with the turn a page opens on. See `light.mjs`.
   #emit(s, kind, data) {
     const event = { seq: ++this.#seq, at: Date.now(), sessionId: s.id, kind, ...data };
+    if (kind === 'tool.start' && event.input !== undefined) event.input = lightened(event.input);
+    if (kind === 'tool.end' && event.response !== undefined) event.response = lightened(event.response);
     this.#log.push(event);
     if (this.#log.length > EVENT_LOG_SIZE) this.#log.shift();
     this.emit('event', event);

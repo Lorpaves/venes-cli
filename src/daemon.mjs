@@ -22,6 +22,7 @@ import {
 import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
 import { DEFAULT_PAGE_SIZE, Library, joinedStatus, mergedPage } from './library.mjs';
+import { isWorthReplaying, lightPage } from './light.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession, stopSession } from './remove.mjs';
 import { askAgain, dialogLeft, quitInTerminal, restartSession, resumeSession } from './resume.mjs';
@@ -642,15 +643,19 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       const { unattached } = await listSessions(socket);
       // Nothing below awaits, so no event can slip between the snapshot and the subscription.
       const sameBoot = !msg.bootId || msg.bootId === bootId;
-      const { events, gap } = store.eventsSince(sameBoot ? msg.since ?? store.seq : 0);
+      const missed = sameBoot ? store.eventsSince(msg.since ?? store.seq) : { events: [], gap: true };
+      // A client that's told of a gap starts over from the snapshot and takes no event from before it, so
+      // none is sent. Nor are they when what it missed is more than opening its page again would be.
+      const events = missed.gap ? [] : missed.events.filter(event => showsEvent(socket, event));
+      const isReplayed = isWorthReplaying(events);
       write(socket, {
         type: 'snapshot', bootId, seq: store.seq, unattached,
         sessions: store.sessions().filter(session => shows(socket, session.agent)),
         requests: store.requests().filter(request => shows(socket, request.agent)),
       });
-      for (const event of events) if (showsEvent(socket, event)) write(socket, { type: 'event', event });
+      if (isReplayed) for (const event of events) write(socket, { type: 'event', event });
       subscribers.add(socket);
-      return { gap: gap || !sameBoot };
+      return { gap: missed.gap || !isReplayed };
     },
     library: (msg, socket) => listLibrary({ limit: msg.limit, offset: msg.offset }, socket),
     // A phone that wants notifications while it isn't connected, and this connection is that phone's.
@@ -1045,6 +1050,12 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
       return {};
     },
   };
+
+  // A page's calls are cut down as live ones are, whoever keeps the session.
+  for (const name of ['join', 'history']) {
+    const page = commands[name];
+    commands[name] = async (...given) => lightPage(await page(...given));
+  }
 
   const server = net.createServer(socket => {
     clients.add(socket);

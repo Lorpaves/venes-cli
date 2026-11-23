@@ -769,6 +769,24 @@ test('so does one in the shape a server\'s tool uses', () => {
   assert.deepEqual(response[1], { type: 'text', text: 'words' });
 });
 
+test('a picture in the shape Code Mode hands one over in has no bytes either, and a long result is cut', () => {
+  const { hook, events } = setup();
+  hook('PreToolUse', { tool_use_id: 't', tool_name: 'REPL', tool_input: { code: 'x'.repeat(100000) } });
+  hook('PostToolUse', {
+    tool_use_id: 't', tool_name: 'REPL', tool_input: {},
+    tool_response: {
+      result: 'y'.repeat(100000), images: [{ base64: 'QUJD', mediaType: 'image/png' }],
+      media: [[{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QUJD' } }]],
+    },
+  });
+  const started = events.find(e => e.kind === 'tool.start');
+  const { response } = events.find(e => e.kind === 'tool.end');
+  assert.ok(started.input.code.length < 40000 && started.input.code.endsWith('\u2026'));
+  assert.ok(response.result.length < 40000 && response.result.endsWith('\u2026'));
+  assert.deepEqual(response.images, [{ mediaType: 'image/png' }]);
+  assert.deepEqual(response.media, [[{ type: 'image', source: { type: 'base64', media_type: 'image/png' } }]]);
+});
+
 test('any other response comes through as it was', () => {
   const { hook, events } = setup();
   hook('PreToolUse', { tool_use_id: 't', ...bash });

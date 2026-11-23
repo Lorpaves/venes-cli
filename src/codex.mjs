@@ -303,7 +303,8 @@ export function historyOf(turn, keep = undefined) {
     } else if (isTool(item)) {
       const images = picturesOf(item, keep);
       const shown = withoutPictures(item);
-      items.push({ role: 'tool', at, toolUseId: item.id, name: item.type, input: shown, result: shown, isError: isFailed(item), ...(images.length && { images }) });
+      // Once, as `input`: a page reads a stored item from there when it has no `result`, and twice was twice the page.
+      items.push({ role: 'tool', at, toolUseId: item.id, name: item.type, input: shown, isError: isFailed(item), ...(images.length && { images }) });
     }
   }
   if (turn.status === 'interrupted') items.push({ role: 'system', at, kind: 'interrupted' });

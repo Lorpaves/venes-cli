@@ -218,8 +218,9 @@ test('a stored turn is told as history tells one', () => {
   assert.deepEqual(items.map(item => item.role), ['user', 'thinking', 'assistant', 'tool', 'compact', 'assistant', 'turn_end']);
   assert.deepEqual(items[0], { role: 'user', at: '2023-11-14T22:13:20.000Z', text: 'hello', clientId: 'c9' });
   assert.equal(items[2].phase, 'commentary');
-  assert.deepEqual({ ...items[3], input: undefined, result: undefined }, { role: 'tool', at: items[0].at, toolUseId: 'exec-1', name: 'commandExecution', input: undefined, result: undefined, isError: false });
-  assert.equal(items[3].result.aggregatedOutput, 'ok');
+  // The item is there once, as what the call was given: a page reads it from there.
+  assert.deepEqual({ ...items[3], input: undefined }, { role: 'tool', at: items[0].at, toolUseId: 'exec-1', name: 'commandExecution', input: undefined, isError: false });
+  assert.equal(items[3].input.aggregatedOutput, 'ok');
   assert.equal(items.at(-1).durationMs, 4200);
   assert.deepEqual(historyOf({ status: 'interrupted', items: [] }), [{ role: 'system', at: undefined, kind: 'interrupted' }]);
   assert.deepEqual(historyOf({ status: 'inProgress', items: [command({ status: 'declined' })] }).map(item => item.isError), [true]);
@@ -1684,7 +1685,7 @@ test('a page is told of a picture by an id, its kind and its size, and never giv
   assert.deepEqual(items.map(item => [item.role, item.name, item.images?.map(image => image.id)]),
     [['user', undefined, ['u1:1']], ['tool', 'imageView', ['v1:0']], ['tool', 'mcpToolCall', ['m1:0']], ['tool', 'imageGeneration', ['g1:0']], ['turn_end', undefined, undefined]]);
   assert.equal(JSON.stringify(items).includes(DOT), false, 'no picture\'s bytes are on the page');
-  assert.deepEqual(items[2].result.result.content, [{ type: 'image', data: undefined, mimeType: 'image/png' }, { type: 'text', text: 'done' }]);
+  assert.deepEqual(items[2].input.result.content, [{ type: 'image', data: undefined, mimeType: 'image/png' }, { type: 'text', text: 'done' }]);
   assert.deepEqual([...kept.keys()], ['u1:1', 'v1:0', 'm1:0', 'g1:0']);
   // Without anything to keep them, the page is the same.
   assert.deepEqual(historyOf(turn), items);

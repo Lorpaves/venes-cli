@@ -845,6 +845,19 @@ T('an_image_claude_reads_can_be_fetched_and_stays_out_of_events', { mode: 'bypas
   const { items } = await r.client.request('history', { sessionId: id });
   assert.deepEqual(items.find(item => item.role === 'tool').images.map(ref => ref.id), [shown.images[0].id], 'a page has the same id');
   await assert.rejects(r.client.request('image', { sessionId: id, imageId: '0:99' }), { code: 'unknown_image' });
+  // The picture is quoted where it is: an attachment like one sent up, with the bytes it read, and a
+  // message can name it.
+  assert.equal((await r.client.request('capabilities', { sessionId: id })).quote, true);
+  const quoted = await r.client.request('quote', { sessionId: id, imageId: shown.images[0].id });
+  assert.deepEqual([quoted.kind, quoted.mediaType, quoted.size, quoted.name], ['image', 'image/png', png.length, 'image.png']);
+  assert.match(quoted.uploadId, /^[0-9a-f]{32}$/);
+  await assert.rejects(r.client.request('quote', { sessionId: id, imageId: '0:99' }), { code: 'unknown_image' });
+  r.mark();
+  await r.client.request('send', { sessionId: id, text: 'Reply with only the word AGAIN.', clientId: 'quoted', attachments: [quoted.uploadId] });
+  const echo = await r.kind('message.user', 20000);
+  assert.deepEqual([echo.clientId, echo.text], ['quoted', 'Reply with only the word AGAIN.']);
+  assert.equal((await r.kind('message.images', 20000)).images.length, 1, 'the message went with the picture');
+  await r.turnEnd(40000);
 });
 
 const base64 = text => Buffer.from(text).toString('base64');

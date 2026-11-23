@@ -1059,6 +1059,19 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     const page = commands[name];
     commands[name] = async (...given) => foldedPage(lightPage(await page(...given)), foldOverOf(given[0]));
   }
+  // A picture the session already has, made an attachment of where it is, for a message that's about
+  // it: it's on this computer, in the transcript or in whatever the agent keeps, so it needn't come down
+  // to the client to go up again, which far from home is the slow way round. It answers as `upload`
+  // does, and a message names it the same way.
+  const pictureOf = commands.image;
+  commands.quote = async (msg, ...rest) => {
+    const picture = await pictureOf(msg, ...rest);
+    return saveUpload(uploads, { sessionId: msg.sessionId, name: 'image', mediaType: picture.mediaType, data: picture.data }, downloads);
+  };
+  // A client shows what it's told can be done: quoting a picture, since 0.40.0.
+  const capabilitiesOf = commands.capabilities;
+  commands.capabilities = async (...given) => ({ ...(await capabilitiesOf(...given)), quote: true });
+
   // A stretch a page had folded, whole: all of the session is read for it, as it is for any page.
   commands.unfold = async (msg, ...rest) => {
     // A turn that ended a moment ago may not have its last words in the transcript yet, and what's read

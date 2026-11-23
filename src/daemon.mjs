@@ -23,6 +23,7 @@ import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
 import { DEFAULT_PAGE_SIZE, Library, joinedStatus, mergedPage } from './library.mjs';
 import { isWorthReplaying, lightPage } from './light.mjs';
+import { foldedPage, foldOverOf, stretchOf } from './fold.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession, stopSession } from './remove.mjs';
 import { askAgain, dialogLeft, quitInTerminal, restartSession, resumeSession } from './resume.mjs';
@@ -1051,11 +1052,20 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     },
   };
 
-  // A page's calls are cut down as live ones are, whoever keeps the session.
+  // A page's calls are cut down as live ones are, whoever keeps the session, and its long stretches of
+  // them are folded for a client that asks: see `fold.mjs`.
+  const wholeHistory = commands.history;
   for (const name of ['join', 'history']) {
     const page = commands[name];
-    commands[name] = async (...given) => lightPage(await page(...given));
+    commands[name] = async (...given) => foldedPage(lightPage(await page(...given)), foldOverOf(given[0]));
   }
+  // A stretch a page had folded, whole: all of the session is read for it, as it is for any page.
+  commands.unfold = async (msg, ...rest) => {
+    const { items = [] } = lightPage(await wholeHistory({ sessionId: msg.sessionId, limit: Number.MAX_SAFE_INTEGER }, ...rest));
+    const stretch = typeof msg.key === 'string' ? stretchOf(items, msg.key) : undefined;
+    if (!stretch) throw new HelperError('unknown_fold', 'Those steps are no longer in the session.');
+    return { items: stretch };
+  };
 
   const server = net.createServer(socket => {
     clients.add(socket);

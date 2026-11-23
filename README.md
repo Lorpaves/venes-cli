@@ -228,8 +228,9 @@ A line ends at a line feed and nowhere else. JSON leaves a line separator (U+202
 | `gitPush` | `sessionId` | Sends the branch to the one it follows, or makes one for it on the remote. Replies with the `branch`, and `upToDate` when there was nothing to send. |
 | `gitPull` | `sessionId` | Brings in what the branch it follows has that this one hasn't. Replies with `upToDate` when there was nothing to bring. |
 | `subscribe` | `since`, `bootId` (both optional), `agents` | Sends a `snapshot`, replays later events, then streams. `gap: true` means events were lost, or were more than a page would be to open again, so reload: none from before the snapshot follow it. `agents` lists the sessions other than Claude Code's that the client can show: `["codex"]`. See [Codex sessions](#codex-sessions). |
-| `join` | `sessionId`, `limit` | Everything needed to open a session. See [Joining a session](#joining-a-session). |
-| `history` | `sessionId`, `limit`, `before` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
+| `join` | `sessionId`, `limit`, `foldOver` | Everything needed to open a session. See [Joining a session](#joining-a-session), and [Folds](#folds) for `foldOver`. |
+| `history` | `sessionId`, `limit`, `before`, `foldOver` | `items`, `before`, `hasMore`: a page of the conversation, from the transcript. It starts where a turn does, so it can hold more than `limit` |
+| `unfold` | `sessionId`, `key` | `items`: a stretch of work a page had as a `fold`, whole. See [Folds](#folds). |
 | `image` | `sessionId`, `imageId` | `mediaType`, `data` in base64: an image from the conversation. See [Images](#images) |
 | `avatar` | | `mediaType`, `data` in base64: the picture this Mac's account shows at login, at most 256 pixels on its long side. Empty if it has none |
 | `respond` | `requestId`, `decision`, `message`, `answers`, `annotations`, `always`, `option` | Answers a request. A question's `annotations`, by question as AskUserQuestion has them (`{"Which color?": {"notes": "…"}}`), go to Claude Code beside its `answers`, which shows Claude each note with its answer. Notes for questions it didn't ask, and empty ones, are left out. |
@@ -624,6 +625,23 @@ Pass `before` from one reply to get the page before it. It counts items from the
 | `turn_end` | `durationMs` |
 | `compact` | `trigger`, `preTokens`, `postTokens` |
 | `system` | `kind`: `interrupted` |
+| `fold` | `key`, `calls`: a stretch of work told as its calls, for a client that asked with `foldOver` |
+
+#### Folds
+
+Since 0.39.0. A turn of hundreds of calls is hundreds of kilobytes a page however each call is cut down, and far from home that's most of a minute. A client that passes `foldOver` to `join` or `history`, a whole number, gets each stretch of more calls than that as one item. A stretch is what the session said, thought and did with nothing between that stands by itself (a message of the reader's, a marker, a line's output, the turn's end). Calls a subagent made aren't counted.
+
+```json
+{"role": "fold", "at": "2026-11-23T04:00:00.000Z", "key": "toolu_01…", "calls": [
+  {"toolUseId": "toolu_01…", "name": "Read", "file": "/Users/me/app/main.swift"},
+  {"toolUseId": "toolu_02…", "name": "Bash", "isError": true}]}
+```
+
+Each call is its id, its name, `isError` when it failed, and `file` when its input names one (`file_path`, `notebook_path`, `path`): what a row that counts them is made from. A Codex call has its item's type for a name, and with it `commandActions` for a `commandExecution`, each action's `type` and `path`, or `changes` for a `fileChange`, each file's `path` and `kind`: a command that only read files counts as reading them, and a change as the files it touched, as they would opened. After the fold come the stretch's calls that published a page, whole, and what the session said after its last call. What it thought, what it said between calls and what its subagents did aren't sent.
+
+In `join`, the turn going on is folded too, a stretch at a time: its events are cut where history cuts (`message.user`, one sent during the turn too, `message.output`, `compact.end`, and a turn's end, since a turn that ended a moment ago is still among them when the next begins). In a stretch with more calls over than `foldOver`, a `turn.fold` event with the same `key` and `calls` stands where the first of them was, in place of those calls, the pictures they showed, the thinking, and the messages that were finished by the time the last of them ended. A call still going or one that ends in a later stretch, a message still being written, and what says how the session stands (status, requests, tasks) stay as they were, and so does everything after.
+
+`unfold` with `sessionId` and a fold's `key` answers `items`: the whole stretch as it would have come, read from the session as it is now, so it has the calls made since as well. `unknown_fold` means the session no longer has it. Without `foldOver` nothing is folded, which is what a client that doesn't know folds gets.
 
 ### Answering requests
 
@@ -668,6 +686,7 @@ Each one looks like `{"type":"event","event":{"seq":…,"at":…,"sessionId":…
 | `message.thinking` | `text`, `durationMs` |
 | `tool.start` | `toolUseId`, `name`, `input`, `agentId`, `parentToolUseId` |
 | `tool.end` | `toolUseId`, `name`, `response`, `durationMs`, `isError`, `interrupted`, `parentToolUseId` |
+| `turn.fold` | `key`, `calls`: only in `join`'s `turn`, for a client that asked with `foldOver`. See [Folds](#folds). |
 | `tool.images` | `toolUseId`, `images` |
 | `message.images` | `images`, for the latest `message.user` |
 | `request.opened` | `request` |

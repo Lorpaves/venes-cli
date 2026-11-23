@@ -771,6 +771,24 @@ T('history', {}, async r => {
   const { items } = await r.client.request('history', { sessionId: id });
   for (const role of ['assistant', 'tool', 'turn_end', 'user']) assert.ok(items.some(i => i.role === role), role);
   assert.equal(items.find(i => i.role === 'tool').name, 'Bash');
+  // For a client that asks, a stretch of more calls than it says is one fold, which comes back whole.
+  const folded = await r.client.request('history', { sessionId: id, foldOver: 0 });
+  const fold = folded.items.find(i => i.role === 'fold');
+  assert.deepEqual(fold.calls.map(call => call.name), ['Bash']);
+  assert.ok(!folded.items.some(i => i.role === 'tool' || i.role === 'thinking'), 'its calls are in the fold alone');
+  for (const role of ['assistant', 'turn_end', 'user']) assert.ok(folded.items.some(i => i.role === role), `${role} stays`);
+  const whole = await r.client.request('unfold', { sessionId: id, key: fold.key });
+  const call = whole.items.find(i => i.role === 'tool');
+  assert.equal(call.toolUseId, fold.key);
+  assert.ok(call.input.command, 'with what it was given');
+  assert.ok(whole.items.every(i => ['assistant', 'thinking', 'tool'].includes(i.role)), 'the stretch and nothing around it');
+  await assert.rejects(r.client.request('unfold', { sessionId: id, key: 'nothing' }), { code: 'unknown_fold' });
+  assert.deepEqual((await r.client.request('history', { sessionId: id, foldOver: 5 })).items, items, 'a short stretch is as it was');
+  // A page that opens has it folded too: among its items, or among its turn's events while the turn that
+  // just ended is still told that way.
+  const opened = await r.client.request('join', { sessionId: id, foldOver: 0 });
+  assert.equal(opened.items.filter(i => i.role === 'fold').length + opened.turn.filter(e => e.kind === 'turn.fold').length, 1);
+  assert.ok(![...opened.items, ...opened.turn].some(one => one.role === 'tool' || one.kind === 'tool.start'), 'and none of its calls beside it');
 });
 
 function solidPng(size, rgb = [0x80, 0x80, 0x80]) {

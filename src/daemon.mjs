@@ -1061,6 +1061,11 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   }
   // A stretch a page had folded, whole: all of the session is read for it, as it is for any page.
   commands.unfold = async (msg, ...rest) => {
+    // A turn that ended a moment ago may not have its last words in the transcript yet, and what's read
+    // here takes the place of what the page shows.
+    const known = store.find(msg.sessionId);
+    const unsettled = known ? store.settlesIn(known) : 0;
+    if (unsettled > 0) await new Promise(resolve => { setTimeout(resolve, unsettled); });
     const { items = [] } = lightPage(await wholeHistory({ sessionId: msg.sessionId, limit: Number.MAX_SAFE_INTEGER }, ...rest));
     const stretch = typeof msg.key === 'string' ? stretchOf(items, msg.key) : undefined;
     if (!stretch) throw new HelperError('unknown_fold', 'Those steps are no longer in the session.');

@@ -431,6 +431,14 @@ export class SessionStore extends EventEmitter {
     return start < 0 ? [] : events.slice(start);
   }
 
+  // How long until the transcript can be relied on for the turn this session ended last: nothing, unless
+  // it ended a moment ago. Whoever reads the transcript for what a page already shows waits this long,
+  // or the turn's last words, not yet written there, would go from the page.
+  settlesIn(s, now = Date.now()) {
+    const last = this.#log.findLast(e => e.sessionId === s.id && endsTurn(e));
+    return last ? Math.max(0, TRANSCRIPT_SETTLE_MS - (now - last.at)) : 0;
+  }
+
   // Returns undefined, or { request, decision } when the hook must wait for an answer.
   handleHook(ev, tmux = {}) {
     if (!ev.session_id || this.#deleted.has(ev.session_id)) return undefined;

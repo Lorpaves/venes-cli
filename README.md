@@ -641,7 +641,7 @@ Each call is its id, its name, `isError` when it failed, and `file` when its inp
 
 In `join`, the turn going on is folded too, a stretch at a time: its events are cut where history cuts (`message.user`, one sent during the turn too, `message.output`, `compact.end`, and a turn's end, since a turn that ended a moment ago is still among them when the next begins). In a stretch with more calls over than `foldOver`, a `turn.fold` event with the same `key` and `calls` stands where the first of them was, in place of those calls, the pictures they showed, the thinking, and the messages that were finished by the time the last of them ended. A call still going or one that ends in a later stretch, a message still being written, and what says how the session stands (status, requests, tasks) stay as they were, and so does everything after.
 
-`unfold` with `sessionId` and a fold's `key` answers `items`: the whole stretch as it would have come, read from the session as it is now, so it has the calls made since as well. `unknown_fold` means the session no longer has it. Without `foldOver` nothing is folded, which is what a client that doesn't know folds gets.
+`unfold` with `sessionId` and a fold's `key` answers `items`: the whole stretch as it would have come, read from the session as it is now, so it has the calls made since as well. `unknown_fold` means the session no longer has it. When the session's turn ended within the last two seconds, the answer waits out the rest of them (0.39.1): the turn's last words may not be in the transcript yet, and a client puts what it's given in place of what it showed. Without `foldOver` nothing is folded, which is what a client that doesn't know folds gets.
 
 ### Answering requests
 

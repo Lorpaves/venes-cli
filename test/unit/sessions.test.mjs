@@ -787,6 +787,18 @@ test('a picture in the shape Code Mode hands one over in has no bytes either, an
   assert.deepEqual(response.media, [[{ type: 'image', source: { type: 'base64', media_type: 'image/png' } }]]);
 });
 
+test('a turn that ended a moment ago is given time to reach the transcript, and one that ended before is not', () => {
+  const { store, hook, events } = setup();
+  hook('UserPromptSubmit', { prompt: 'go' });
+  const session = store.find('a');
+  assert.equal(store.settlesIn(session), 0, 'no turn has ended');
+  hook('Stop', { last_assistant_message: 'done', background_tasks: [] });
+  const ended = events.findLast(e => e.kind === 'turn.end').at;
+  assert.equal(store.settlesIn(session, ended + 500), 1500);
+  assert.equal(store.settlesIn(session, ended + 2000), 0);
+  assert.equal(store.settlesIn(session, ended + 60000), 0);
+});
+
 test('any other response comes through as it was', () => {
   const { hook, events } = setup();
   hook('PreToolUse', { tool_use_id: 't', ...bash });

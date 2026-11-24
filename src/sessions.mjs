@@ -159,6 +159,12 @@ export function modesOf(s) {
   return s.permissionModes ?? [...ALWAYS_MODES, ...OPTIONAL_MODES.filter(mode => s.modes.includes(mode) || s.permissionMode === mode)];
 }
 
+// When a session was last at work, after something said of it now, or as of `at`: never before what was
+// known of it already.
+function lastAt(s, at) {
+  return at === undefined ? Date.now() : Math.max(s?.lastEventAt ?? 0, at);
+}
+
 function blankSession(id) {
   return {
     id, status: 'idle', tools: new Map(), tasks: new Map(), agentParents: new Map(), echoes: [], held: [], queued: [], pollEvents: 0, backgroundTasks: 0, modes: [],
@@ -186,6 +192,8 @@ export class SessionStore extends EventEmitter {
   #deleted = new Set();
   #log = [];
   #seq = 0;
+  // When what's being said happened, where that isn't now: see `#dated`.
+  #asOf;
   #agentParent;
   #compactWaitMs;
   #compactLimitMs;
@@ -262,35 +270,60 @@ export class SessionStore extends EventEmitter {
   }
 
   // A session the helper follows through something other than hooks, as it does a Codex thread through
-  // Codex's own server. `agent` among its `fields` says which, and every view of it says so too.
-  adopt(id, fields = {}) {
+  // Codex's own server. `agent` among its `fields` says which, and every view of it says so too. `at` is
+  // when it was last at work, for one found as it was rather than seen doing something: a thread found in
+  // Codex's memory is as old as its last word, not as new as the finding. Taken as the finding, fourteen
+  // Codex sessions nobody had used that day stood at the top of the list as just at work, every time the
+  // helper found them again (2026-11-24).
+  adopt(id, fields = {}, { at = undefined } = {}) {
     let s = this.#sessions.get(id);
     this.#deleted.delete(id);
-    if (!s) {
-      s = { ...blankSession(id), startedAt: Date.now(), ...fields };
-      this.#sessions.set(id, s);
-      this.#emit(s, 'session.discovered', { cwd: s.cwd, ...(s.agent && { agent: s.agent }) });
-    } else {
-      Object.assign(s, fields);
-      if (s.status === 'ended') this.#setStatus(s, 'idle');
-    }
-    s.lastEventAt = Date.now();
-    return s;
+    const when = lastAt(s, at);
+    return this.#dated(when, () => {
+      if (!s) {
+        s = { ...blankSession(id), startedAt: when, ...fields };
+        this.#sessions.set(id, s);
+        this.#emit(s, 'session.discovered', { cwd: s.cwd, ...(s.agent && { agent: s.agent }) });
+      } else {
+        Object.assign(s, fields);
+        if (s.status === 'ended') this.#setStatus(s, 'idle');
+      }
+      s.lastEventAt = when;
+      return s;
+    });
   }
 
   // An event for such a session, after `fields` change what's known of it. A status, a model and an
   // end go the way a hook's would, so that each is said once and does all it should. `supersedes`
   // takes out earlier events this one makes stale, as a command's output so far is by its output since.
-  report(id, kind, data = {}, fields = undefined, { supersedes = undefined } = {}) {
+  // `at` is when it happened, where that isn't now, as `adopt` has it: what isn't something done in the
+  // session, such as what it's set to run on, is said as of its last work, and leaves it where it was.
+  report(id, kind, data = {}, fields = undefined, { supersedes = undefined, at = undefined } = {}) {
     const s = this.#sessions.get(id);
     if (!s) return;
     Object.assign(s, fields);
-    s.lastEventAt = Date.now();
+    // An end said of a session that's over already is nothing new, and doesn't make it newer.
+    if (kind === 'session.ended' && s.status === 'ended') return;
+    s.lastEventAt = lastAt(s, at);
     if (supersedes) this.#log = this.#log.filter(e => e.sessionId !== id || !supersedes(e));
-    if (kind === 'session.status') this.#setStatus(s, data.status, data.working);
-    else if (kind === 'session.model') this.#setModel(s, data.model);
-    else if (kind === 'session.ended') { if (s.status !== 'ended') this.#endSession(s, data.reason); }
-    else this.#emit(s, kind, data);
+    this.#dated(s.lastEventAt, () => {
+      if (kind === 'session.status') this.#setStatus(s, data.status, data.working);
+      else if (kind === 'session.model') this.#setModel(s, data.model);
+      else if (kind === 'session.ended') this.#endSession(s, data.reason);
+      else this.#emit(s, kind, data);
+    });
+  }
+
+  // Says what `tell` says as of `at`: each event it makes is dated then, since a client puts a session
+  // where its events' times say.
+  #dated(at, tell) {
+    const outer = this.#asOf;
+    this.#asOf = at;
+    try {
+      return tell();
+    } finally {
+      this.#asOf = outer;
+    }
   }
 
   // A request that something other than a hook waits on. `decide` turns a client's answer into what
@@ -1028,7 +1061,7 @@ export class SessionStore extends EventEmitter {
   // A call is told without what no page shows of it, and cut where it runs long: an event goes to every
   // client, sits in the log, and comes again with the turn a page opens on. See `light.mjs`.
   #emit(s, kind, data) {
-    const event = { seq: ++this.#seq, at: Date.now(), sessionId: s.id, kind, ...data };
+    const event = { seq: ++this.#seq, at: this.#asOf ?? Date.now(), sessionId: s.id, kind, ...data };
     if (kind === 'tool.start' && event.input !== undefined) event.input = lightened(event.input);
     if (kind === 'tool.end' && event.response !== undefined) event.response = lightened(event.response);
     this.#log.push(event);

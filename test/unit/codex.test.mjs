@@ -131,6 +131,8 @@ function setup({
   threads = [], loaded = [], isRunning = true, trusts = () => true, terminal = undefined, env = {}, kill = undefined, quitLimitMs = 60, listWaitMs = 200,
   listLifetimeMs = 60_000, lookMs = 60_000,
 } = {}) {
+  // What says how long a session has rested: a second after `stored` threads were last worked on, until a test moves it on.
+  const clock = { at: 2001 * 1000 };
   const server = fakeCodex();
   server.isRunning = isRunning;
   for (const thread of threads) server.threads.set(thread.id, thread);
@@ -141,11 +143,11 @@ function setup({
   const codex = new Codex({
     store, socketPath: '/nowhere', connect: server.connect, startDaemon: server.startDaemon, restartDaemon: server.restartDaemon, retryMs: 5, trusts,
     installed: () => isRunning, terminal, env: { PATH: '/bin', LANG: 'en_US.UTF-8', CODEX_HOME: '/codex-home', SECRET: 'not passed on', ...env }, keyLimitMs: 40,
-    ...(kill && { kill }), quitLimitMs, listWaitMs, listLifetimeMs, lookMs,
+    ...(kill && { kill }), quitLimitMs, listWaitMs, listLifetimeMs, lookMs, now: () => clock.at,
   });
   const kinds = () => events.map(event => event.kind);
   const last = kind => events.findLast(event => event.kind === kind);
-  return { server, store, events, codex, kinds, last };
+  return { server, store, events, codex, kinds, last, clock };
 }
 
 // A session with a turn going, started from a client.
@@ -1380,6 +1382,76 @@ test('a thread the daemon no longer has is over at the next look, though Codex s
   codex.stop();
 });
 
+test('a thread found in Codex\'s memory is as old as its last word, not as new as the finding, and stays so when it\'s found again', async () => {
+  const { codex, store, server, events } = setup({ threads: [stored('one', { updatedAt: 1900 })], loaded: ['one'], lookMs: 10 });
+  await codex.restore();
+  assert.equal(store.get('one').lastEventAt, 1_900_000);
+  const told = () => events.filter(event => event.sessionId === 'one');
+  assert.ok(told().length > 0);
+  assert.ok(told().every(event => event.at === 1_900_000), 'what it\'s set to run on is told as of then too');
+  // Codex's server goes and comes back with the thread in memory still, as when it starts again.
+  server.drop();
+  await pause(40);
+  assert.equal(store.get('one').status, 'idle');
+  assert.ok(server.called('thread/resume').filter(params => params.threadId === 'one').length >= 2, 'joined again');
+  assert.equal(store.get('one').lastEventAt, 1_900_000, 'and no newer for it');
+  assert.ok(told().every(event => event.at === 1_900_000));
+  codex.stop();
+});
+
+test('a Codex session at rest for an hour is let go where it stood, and is one again once something goes on in it elsewhere', async () => {
+  const { codex, store, server, clock, last } = setup({ threads: [stored('one', { updatedAt: 1900 })], loaded: ['one'], lookMs: 10 });
+  await codex.restore();
+  assert.equal(store.get('one').status, 'idle');
+  await pause(40);
+  assert.equal(store.get('one').status, 'idle', 'not within the hour');
+  clock.at = 1_900_000 + 60 * 60_000 + 1;
+  await pause(40);
+  assert.equal(store.get('one').status, 'ended');
+  assert.deepEqual(server.called('thread/unsubscribe'), [{ threadId: 'one' }]);
+  assert.equal(last('session.ended').reason, 'closed');
+  assert.equal(last('session.ended').at, 1_900_000, 'over as of its last work, so it stays where it was in the list');
+  assert.equal(store.get('one').lastEventAt, 1_900_000);
+  // Codex keeps it in memory, as it does while another of its apps has it open: looks leave it be.
+  const joins = server.called('thread/resume').length;
+  await pause(40);
+  assert.equal(store.get('one').status, 'ended');
+  assert.equal(server.called('thread/resume').length, joins);
+  assert.equal(server.called('thread/unsubscribe').length, 1);
+  // Worked on there, it's newer, and a session again, as of then.
+  server.threads.get('one').updatedAt = 1900 + 3700;
+  await pause(40);
+  assert.equal(store.get('one').status, 'idle');
+  assert.equal(store.get('one').lastEventAt, (1900 + 3700) * 1000);
+  assert.equal(server.called('thread/resume').length, joins + 1);
+  codex.stop();
+});
+
+test('a session with a turn going, or one waiting on the reader, isn\'t let go however long it has been', async () => {
+  const { codex, sessionId, store, server, clock } = await running({ lookMs: 10 });
+  clock.at = Date.now() + 2 * 60 * 60_000;
+  await pause(40);
+  assert.notEqual(store.get(sessionId).status, 'ended');
+  assert.deepEqual(server.called('thread/unsubscribe'), []);
+  codex.stop();
+});
+
+test('a thread in Codex\'s memory at rest for over an hour isn\'t joined, or a session, until something goes on in it', async () => {
+  const { codex, store, server, clock } = setup({ threads: [stored('old', { updatedAt: 1000 }), stored('new', { updatedAt: 4590 })], loaded: ['old', 'new'], lookMs: 10 });
+  clock.at = 1000 * 1000 + 60 * 60_000 + 1;
+  await codex.restore();
+  assert.equal(store.find('old'), undefined);
+  assert.equal(server.called('thread/resume').filter(params => params.threadId === 'old').length, 0);
+  assert.equal(store.get('new').status, 'idle');
+  await pause(40);
+  assert.equal(store.find('old'), undefined, 'nor at a look');
+  server.threads.get('old').updatedAt = 4595;
+  await pause(40);
+  assert.equal(store.get('old').status, 'idle');
+  assert.equal(store.get('old').lastEventAt, 4_595_000);
+  codex.stop();
+});
+
 test('a session started from here is one before its first word, and still is after a look', async () => {
   const { codex, store, kinds } = setup({ lookMs: 10 });
   const { sessionId } = await codex.start({ cwd: FOLDER });
@@ -1802,6 +1874,18 @@ test('a Codex session closed here stays closed while Codex\'s server only keeps 
   server.say('thread/status/changed', { threadId: 't1', status: { type: 'active', activeFlags: [] } });
   await new Promise(resolve => { setTimeout(resolve, 10); });
   assert.notEqual(store.get('t1').status, 'ended', 'another app\'s turn opens it again');
+});
+
+test('a Codex session closed here opens again when it\'s worked on in another of Codex\'s apps, though Codex says nothing of it', async () => {
+  const { server, codex, store } = setup({ threads: [stored('t1')], loaded: ['t1'], lookMs: 10 });
+  await codex.restore();
+  await codex.closeNow('t1');
+  await pause(40);
+  assert.equal(store.get('t1').status, 'ended');
+  server.threads.get('t1').updatedAt += 5;
+  await pause(40);
+  assert.notEqual(store.get('t1').status, 'ended');
+  codex.stop();
 });
 
 test('a Codex session with no window of Codex\'s on it closes all the same, and one that isn\'t open has nothing to close', async () => {

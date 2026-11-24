@@ -1932,3 +1932,29 @@ test('how much has changed in a session\'s repository is kept with it, and told 
   store.noteChanges('nobody', { files: 1, added: 1, removed: 0 });
   assert.equal(told.length, 3);
 });
+
+
+test('what\'s said of a session as of its last work leaves it where it was, events and all, and an end said again is nothing new', () => {
+  const store = new SessionStore();
+  const events = [];
+  store.on('event', event => events.push(event));
+  store.adopt('c1', { agent: 'codex', cwd: '/x' }, { at: 5000 });
+  assert.equal(store.get('c1').lastEventAt, 5000);
+  assert.equal(store.get('c1').startedAt, 5000);
+  store.report('c1', 'session.model', { model: 'gpt-6' }, undefined, { at: 5000 });
+  // Never older than what was known of it already.
+  store.report('c1', 'session.ended', { reason: 'closed' }, undefined, { at: 4000 });
+  assert.equal(store.get('c1').status, 'ended');
+  assert.equal(store.get('c1').lastEventAt, 5000);
+  assert.ok(events.length >= 3);
+  assert.ok(events.every(event => event.at === 5000));
+  const told = events.length;
+  store.report('c1', 'session.ended', { reason: 'closed' });
+  assert.equal(events.length, told);
+  assert.equal(store.get('c1').lastEventAt, 5000);
+  // Something done in it now is now.
+  const before = Date.now();
+  store.adopt('c1');
+  assert.ok(store.get('c1').lastEventAt >= before);
+  assert.ok(events.at(-1).at >= before);
+});

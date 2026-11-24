@@ -52,6 +52,8 @@ const LOOK_MS = 5000;
 // A connection that drops is tried again this often, this many times, before its sessions are taken to be over.
 const RECONNECT_MS = 1000;
 const RECONNECT_TRIES = 5;
+// A session at rest this long is let go: see `#letGo`.
+const REST_MS = 60 * 60_000;
 // The kinds of thread a person started: Codex's terminal, its apps and editors, and clients such as this.
 const LISTED_SOURCES = ['cli', 'vscode', 'appServer', 'unknown'];
 
@@ -234,8 +236,18 @@ export function thinkingOf(item) {
 
 // A thread something has been said in: its first words are kept, or its first turn is going now.
 export function hasSaid(thread) {
-  return Boolean(thread?.preview) || thread?.status?.type === 'active';
+  return Boolean(thread?.preview) || isActive(thread);
 }
+
+// A thread with a turn going, or waiting on the reader.
+const isActive = thread => thread?.status?.type === 'active';
+
+// When Codex last said a thread was worked on, as the helper keeps times, if it says.
+const updatedAtOf = thread => (Number.isFinite(thread?.updatedAt) ? thread.updatedAt * 1000 : undefined);
+
+// What's said of a session that isn't something done in it, such as Codex's server going: as of its last
+// work, which leaves it where it was in the list.
+const asItWas = session => ({ at: session?.lastEventAt });
 
 // A thread a person started, and not one Codex made for itself, as a subagent's is.
 export function isListed(thread) {
@@ -658,10 +670,11 @@ export class Codex {
   #link;
   #opening;
   #threads = new Map();
-  // Threads closed from here, which Codex's server keeps loaded all the same: it unloads one only once it's
-  // deleted, or the server goes. They stay closed until a message loads one, or another of Codex's apps
-  // starts a turn in it.
-  #closed = new Set();
+  // Threads closed or let go from here, each with when Codex last said it was worked on (its `updatedAt`).
+  // Codex's server keeps one loaded a while after the last of its clients lets go, and for good while another
+  // of its apps has it open. One stays closed until a message loads it, or something goes on in it there:
+  // a turn, or anything else that makes it newer.
+  #closed = new Map();
   #toldStarted = new Set();
   // Where each session's pictures are, by the ids its pages were given for them.
   #pictures = new Map();
@@ -699,6 +712,9 @@ export class Codex {
   #looking;
   #isLooking = false;
   #lookMs;
+  // How long a session rests before it's let go, and the clock that says how long it has.
+  #restMs;
+  #now;
 
   constructor({
     store, socketPath = controlSocket(), connect = CodexLink.connect,
@@ -710,11 +726,13 @@ export class Codex {
     // What opens a terminal at the Mac, as for a Claude Code session that's resumed: none, and no session gets one.
     terminal = undefined, env = process.env, keyLimitMs = KEY_LIMIT_MS,
     kill = pid => process.kill(pid, 'SIGTERM'), quitLimitMs = QUIT_LIMIT_MS,
-    listWaitMs = LIST_WAIT_MS, listLifetimeMs = LIST_LIFETIME_MS, lookMs = LOOK_MS,
+    listWaitMs = LIST_WAIT_MS, listLifetimeMs = LIST_LIFETIME_MS, lookMs = LOOK_MS, restMs = REST_MS, now = Date.now,
   }) {
     this.#listWaitMs = listWaitMs;
     this.#listLifetimeMs = listLifetimeMs;
     this.#lookMs = lookMs;
+    this.#restMs = restMs;
+    this.#now = now;
     this.#kill = kill;
     this.#quitLimitMs = quitLimitMs;
     this.#keyLimitMs = keyLimitMs;
@@ -776,7 +794,7 @@ export class Codex {
     } catch (error) {
       throw new HelperError('close_failed', `Codex wouldn't let the session go: ${error.message}`);
     }
-    this.#closed.add(threadId);
+    this.#closed.set(threadId, await this.#updatedAt(link, threadId));
     this.#end(threadId, 'closed');
   }
 
@@ -912,6 +930,7 @@ export class Codex {
     this.#isLooking = true;
     try {
       await this.#adoptLoaded(link);
+      await this.#letGo(link);
     } catch (error) {
       if (link.isOpen) console.error(`codex: ${error.message}`);
     } finally {
@@ -935,34 +954,78 @@ export class Codex {
     this.#retry = setTimeout(() => {
       this.#open({ start: false }).catch(() => {
         if (tries > 1) this.#onClose(undefined, tries - 1);
-        else for (const session of live()) this.#store.report(session.id, 'session.ended', { reason: 'disconnected' });
+        else for (const session of live()) this.#store.report(session.id, 'session.ended', { reason: 'disconnected' }, undefined, asItWas(session));
       });
     }, this.#retryMs);
     this.#retry.unref();
   }
 
   // Every thread the daemon has in memory that something has been said in is a session going on,
-  // whoever started it, and so is one started from here before its first word. One the daemon no
-  // longer has is over.
+  // whoever started it, and so is one started from here before its first word, if it was at work within
+  // the hour. One the daemon no longer has is over. One at rest for longer is let be, as `#letGo` leaves
+  // one: Codex keeps a thread in memory while anything is joined to it, and when its server started again
+  // it had every one the helper had joined, from September on, in memory again (2026-11-24).
   async #adoptLoaded(link) {
     const { data: loaded = [] } = await link.request('thread/loaded/list', {});
     for (const session of this.#store.liveSessions()) {
-      if (session.agent === AGENT && !loaded.includes(session.id)) this.#store.report(session.id, 'session.ended', { reason: 'closed' });
+      if (session.agent === AGENT && !loaded.includes(session.id)) this.#store.report(session.id, 'session.ended', { reason: 'closed' }, undefined, asItWas(session));
     }
     for (const threadId of loaded) {
-      if (this.#closed.has(threadId)) continue;
       // One that's followed and joined is told of by Codex itself.
       const known = this.#store.find(threadId);
       if (known && known.status !== 'ended' && this.#threads.get(threadId)?.isSubscribed) continue;
-      const read = await link.request('thread/read', { threadId, includeTurns: false }).catch(() => undefined);
-      if (read?.thread && isListed(read.thread) && (hasSaid(read.thread) || this.#threads.has(threadId))) {
-        this.#adopt(read.thread);
-        await this.#subscribe(link, threadId).catch(() => {});
+      const { thread } = await link.request('thread/read', { threadId, includeTurns: false }).catch(() => ({}));
+      if (!thread || !isListed(thread)) continue;
+      // Closed or let go from here: a session again once something goes on in it, which Codex doesn't always tell.
+      if (this.#closed.has(threadId)) {
+        if (!isActive(thread) && !(thread.updatedAt > this.#closed.get(threadId))) continue;
+        this.#closed.delete(threadId);
       }
+      if (!hasSaid(thread) && !this.#threads.has(threadId)) continue;
+      if (!isActive(thread) && this.#isRested(updatedAtOf(thread))) {
+        this.#closed.set(threadId, thread.updatedAt);
+        if (known && known.status !== 'ended') this.#end(threadId, 'closed', { quiet: true });
+        continue;
+      }
+      this.#adopt(thread, {}, { at: updatedAtOf(thread) });
+      await this.#subscribe(link, threadId).catch(() => {});
     }
   }
 
-  #adopt(thread, extra = {}) {
+  // A session at rest for an hour is let go, as its reader would close it: Codex's server unloads a thread
+  // once nothing is joined to it and it's idle, and the thread's tools go with it. It's a session again when
+  // a message from here loads it, or something goes on in it in another of Codex's apps. Joined from here
+  // for good, every thread Codex had loaded stayed loaded and in the list as going on: fourteen of them on
+  // 2026-11-24, from September on, with fifty-five processes of their tools.
+  async #letGo(link) {
+    for (const session of this.#store.liveSessions()) {
+      if (session.agent !== AGENT || session.status !== 'idle' || !this.#isRested(session.lastEventAt)) continue;
+      if (this.#store.isBusy(session) || this.#store.pendingFor(session).length || this.#threads.get(session.id)?.turnId) continue;
+      try {
+        await link.request('thread/unsubscribe', { threadId: session.id });
+      } catch (error) {
+        // Over a connection that has gone there's nothing joined to let go of: the next one looks again.
+        // One Codex doesn't know as joined from here is let go all the same.
+        if (error.rpcCode === undefined) return;
+      }
+      this.#closed.set(session.id, await this.#updatedAt(link, session.id));
+      this.#end(session.id, 'closed', { quiet: true });
+    }
+  }
+
+  // Whether a session last at work at `at` has rested long enough to be let go.
+  #isRested(at) {
+    return Number.isFinite(at) && this.#now() - at > this.#restMs;
+  }
+
+  // When Codex last said a thread was worked on, in its own seconds, or now when it can't be asked.
+  async #updatedAt(link, threadId) {
+    const read = await link?.request('thread/read', { threadId, includeTurns: false }).catch(() => undefined);
+    return read?.thread?.updatedAt ?? Math.floor(this.#now() / 1000);
+  }
+
+  // `at` is when the thread was last worked on, for one found as it was: see `SessionStore.adopt`.
+  #adopt(thread, extra = {}, { at = undefined } = {}) {
     this.#owned.set(thread.id, true);
     if (!this.#threads.has(thread.id)) this.#threads.set(thread.id, blankThread());
     this.#threads.get(thread.id).branch = thread.gitInfo?.branch ?? undefined;
@@ -970,8 +1033,8 @@ export class Codex {
     this.#store.adopt(thread.id, {
       agent: AGENT, permissionModes: MODE_IDS, cwd: thread.cwd, model: thread.model ?? known?.model, effort: thread.reasoningEffort ?? known?.effort,
       startedAt: thread.createdAt ? thread.createdAt * 1000 : known?.startedAt, lastPrompt: known?.lastPrompt ?? (thread.preview || undefined), ...extra,
-    });
-    this.#store.report(thread.id, 'session.status', { status: statusOf(thread.status) });
+    }, { at });
+    this.#store.report(thread.id, 'session.status', { status: statusOf(thread.status) }, undefined, { at });
     return this.#threads.get(thread.id);
   }
 
@@ -992,15 +1055,16 @@ export class Codex {
   #noteSettings(threadId, { model, effort, approvalPolicy, sandbox, collaborationMode }) {
     const session = this.#store.find(threadId);
     if (!session) return;
-
-    if (model) this.#store.report(threadId, 'session.model', { model });
-    if (effort && effort !== session.effort) this.#store.report(threadId, 'session.effort', { effort }, { effort });
+    // What a thread is set to run on isn't something done in it, so the session stays where it was.
+    const quietly = asItWas(session);
+    if (model) this.#store.report(threadId, 'session.model', { model }, undefined, quietly);
+    if (effort && effort !== session.effort) this.#store.report(threadId, 'session.effort', { effort }, { effort }, quietly);
     // One of the three picked from here and not taken yet, which Codex does with the next turn, is the one to show.
     if (!this.#chosen.get(threadId)?.approvalPolicy) this.#noteAccess(threadId, { approvalPolicy, sandbox });
     // Whether it's planning is as Codex last said, where it says.
     const plans = collaborationMode ? collaborationMode.mode === PLAN_MODE : session.permissionMode === PLAN_MODE;
     const mode = plans ? PLAN_MODE : this.#access.get(threadId);
-    if (mode && mode !== session.permissionMode) this.#noteMode(threadId, mode);
+    if (mode && mode !== session.permissionMode) this.#noteMode(threadId, mode, quietly);
   }
 
   // A thread's mode as its settings give it. Which of the three it has is kept, for when it stops planning.
@@ -1055,8 +1119,8 @@ export class Codex {
     }
   }
 
-  #noteMode(threadId, permissionMode) {
-    this.#store.report(threadId, 'session.mode', { permissionMode, permissionModes: MODE_IDS }, { permissionMode });
+  #noteMode(threadId, permissionMode, options = {}) {
+    this.#store.report(threadId, 'session.mode', { permissionMode, permissionModes: MODE_IDS }, { permissionMode }, options);
     // A thread that has stopped planning has no plan left to ask about.
     if (permissionMode !== PLAN_MODE) this.#closePlanRequest(threadId);
   }
@@ -1098,25 +1162,33 @@ export class Codex {
     }
     const report = (kind, data, fields) => this.#store.report(threadId, kind, data, fields);
     switch (method) {
-      case 'thread/status/changed':
+      case 'thread/status/changed': {
+        const isWorkedOn = params.status?.type === 'active';
         if (params.status?.type === 'notLoaded') {
           this.#closed.delete(threadId);
-          this.#end(threadId, 'closed');
-        } else {
-          if (this.#closed.has(threadId)) {
-            if (params.status?.type !== 'active') break;
-            this.#closed.delete(threadId);
-          }
-          if (session.status === 'ended') this.#store.adopt(threadId);
-          // Told by the turn itself for a thread that's joined, and only by this for one that isn't yet.
-          if (!thread.isSubscribed) {
-            report('session.status', { status: statusOf(params.status) });
-            if (params.status?.type === 'active' && this.#link) this.#subscribe(this.#link, threadId).catch(() => {});
-          }
+          this.#end(threadId, 'closed', { quiet: true });
+          break;
+        }
+        if (this.#closed.has(threadId)) {
+          if (!isWorkedOn) break;
+          this.#closed.delete(threadId);
+        }
+        // Loaded again with nothing going on in it, as Codex's server does with what it had when it starts
+        // again, it's a session going on only if it was at work within the hour, and as of then.
+        const quietly = isWorkedOn ? {} : asItWas(session);
+        if (session.status === 'ended') {
+          if (!isWorkedOn && this.#isRested(session.lastEventAt)) break;
+          this.#store.adopt(threadId, {}, quietly);
+        }
+        // Told by the turn itself for a thread that's joined, and only by this for one that isn't yet.
+        if (!thread.isSubscribed) {
+          this.#store.report(threadId, 'session.status', { status: statusOf(params.status) }, undefined, quietly);
+          if (isWorkedOn && this.#link) this.#subscribe(this.#link, threadId).catch(() => {});
         }
         break;
+      }
       case 'thread/closed':
-        this.#end(threadId, 'closed');
+        this.#end(threadId, 'closed', { quiet: true });
         break;
       case 'thread/deleted':
       case 'thread/archived':
@@ -1407,10 +1479,12 @@ export class Codex {
     });
   }
 
-  #end(threadId, reason) {
+  // `quiet` is for an end that isn't the reader's doing, such as Codex unloading the thread: the session
+  // stays where its last work put it in the list.
+  #end(threadId, reason, { quiet = false } = {}) {
     const thread = this.#threads.get(threadId);
     if (thread) Object.assign(thread, blankThread());
-    this.#store.report(threadId, 'session.ended', { reason });
+    this.#store.report(threadId, 'session.ended', { reason }, undefined, quiet ? asItWas(this.#store.find(threadId)) : {});
   }
 
   #forget(threadId) {

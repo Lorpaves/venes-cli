@@ -26,6 +26,13 @@ const DEFAULT_HISTORY_LIMIT = 200;
 // Where a record's line starts in its file, which an image's id goes by.
 const OFFSET = Symbol('offset');
 const IMAGE_ID = /^(\d{1,15}):(\d{1,6})$/;
+// A picture a Read call read from a file, by the call's record and the call: see `readPictureRef`.
+const READ_IMAGE_ID = /^(\d{1,15}):read:([A-Za-z0-9_-]{1,128})$/;
+// The pictures Claude Code's Read takes, by their files' ends, and how big a file one of them can be here.
+const PICTURE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+const READ_PICTURE_BYTES = 20 * 1024 * 1024;
+// How much of a picture's file is read to say its size in pixels.
+const PICTURE_HEAD_BYTES = 64 * 1024;
 const LINE_CHUNK_BYTES = 1024 * 1024;
 // A prompt's record is stamped a little before its hook reaches the helper.
 const PROMPT_LEAD_MS = 5000;
@@ -405,6 +412,7 @@ function pageOf(record) {
 function addToolBlock(block, at, items, tools, record) {
   if (block.type === 'tool_use') {
     const item = { role: 'tool', at, toolUseId: block.id, name: block.name, input: block.input };
+    if (record?.[OFFSET] !== undefined) item[OFFSET] = record[OFFSET];
     tools.set(block.id, item);
     items.push(item);
   } else if (block.type === 'tool_result') {
@@ -551,7 +559,57 @@ function conversationItems(file) {
       addImages(record, first);
     }
   }
+  for (const item of tools.values()) {
+    if (item.name !== 'Read' || item.images?.length) continue;
+    const picture = readPictureRef(item);
+    if (picture) item.images = [picture];
+  }
   return { items, model };
+}
+
+// The picture of a file a Read call read, for a call that has none of its own. Claude Code's Code Mode runs
+// Read in a script, and the picture comes back with the script's result, not the call's: a fold's sheet
+// showed the call by its file's name alone (2026-11-24: 「现在折叠弹窗里看不到图片缩略图 只有图片文件path」).
+// So the call gets the picture of the file it names, as that file is now. The id names the call's record
+// and the call, and `readImage` reads the file that call names, and no other.
+function readPictureRef(item) {
+  const file = item.input?.file_path;
+  const mediaType = typeof file === 'string' ? PICTURE_TYPES[path.extname(file).toLowerCase()] : undefined;
+  if (!mediaType || item[OFFSET] === undefined || !/^[A-Za-z0-9_-]{1,128}$/.test(item.toolUseId ?? '')) return undefined;
+  let bytes;
+  try {
+    bytes = fs.statSync(file).size;
+  } catch {
+    return undefined;
+  }
+  if (!bytes || bytes > READ_PICTURE_BYTES) return undefined;
+  return { id: `${item[OFFSET]}:read:${item.toolUseId}`, mediaType, bytes, ...pictureSize(file) };
+}
+
+// A picture file's size in pixels, from its start, where that can be told.
+function pictureSize(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(PICTURE_HEAD_BYTES);
+    const read = fs.readSync(fd, head, 0, head.length, 0);
+    return imageSize(head.subarray(0, read).toString('base64'));
+  } catch {
+    return {};
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+// The picture of the file the Read call `toolUseId` in the record at `offset` read, as it is now.
+function readPicture(file, offset, toolUseId) {
+  const record = parseLine(lineAt(file, offset));
+  const call = record && blocksOf(record).find(block => block?.type === 'tool_use' && block.id === toolUseId && block.name === 'Read');
+  const picture = call?.input?.file_path;
+  const mediaType = typeof picture === 'string' ? PICTURE_TYPES[path.extname(picture).toLowerCase()] : undefined;
+  if (!mediaType) return undefined;
+  if (fs.statSync(picture).size > READ_PICTURE_BYTES) return undefined;
+  return { mediaType, data: fs.readFileSync(picture).toString('base64') };
 }
 
 // Where a turn begins among `items`: at its prompt, or for a turn that has none, like a
@@ -608,6 +666,15 @@ function lineAt(file, offset) {
 // An image by the id a page gave it. The id says where its record is, because a transcript can be
 // far too long to read for one image. `undefined` if it isn't there.
 export function readImage(file, id) {
+  const read = String(id).match(READ_IMAGE_ID);
+  if (read) {
+    try {
+      return readPicture(file, Number(read[1]), read[2]);
+    } catch (error) {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
   const [, offset, index] = String(id).match(IMAGE_ID) ?? [];
   if (offset === undefined) return undefined;
   try {

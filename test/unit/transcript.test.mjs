@@ -851,3 +851,62 @@ test('a call is found in a transcript far longer than is read at once, and acros
   t.after(cleanup);
   assert.deepEqual(findArtifact(file, 'toolu_page'), { path: '/tmp/published.html' });
 });
+
+
+// A PNG's start, enough to say its size: the signature, then the IHDR chunk's length, name, width and height.
+function pngHead(width, height) {
+  const head = Buffer.alloc(33);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(head, 0);
+  head.writeUInt32BE(13, 8);
+  head.write('IHDR', 12, 'latin1');
+  head.writeUInt32BE(width, 16);
+  head.writeUInt32BE(height, 20);
+  return head;
+}
+const readCall = (id, filePath) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Read', input: { file_path: filePath } }] } });
+
+test('a picture Read in a script, whose result came with the script\'s, is the picture of the file it read', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-pictures-'));
+  const picture = path.join(dir, 'shot.png');
+  fs.writeFileSync(picture, pngHead(64, 40));
+  const { file, cleanup } = tempFile([userText('look'), readCall('r1', picture), toolResult('r1', ''), bash('b1'), toolResult('b1', 'ok')].join(''));
+  try {
+    const read = readHistory(file).items.find(item => item.toolUseId === 'r1');
+    assert.deepEqual(read.images.map(({ mediaType, bytes, width, height }) => [mediaType, bytes, width, height]), [['image/png', 33, 64, 40]]);
+    assert.equal(JSON.parse(JSON.stringify(read)).images[0].id, read.images[0].id, 'its id goes over the wire as it is');
+    assert.deepEqual(readImage(file, read.images[0].id), { mediaType: 'image/png', data: pngHead(64, 40).toString('base64') });
+    // As the file is now: one changed since is read as it is, and one that's gone is nothing.
+    fs.writeFileSync(picture, pngHead(8, 8));
+    assert.equal(readImage(file, read.images[0].id).data, pngHead(8, 8).toString('base64'));
+    fs.rmSync(picture);
+    assert.equal(readImage(file, read.images[0].id), undefined);
+    assert.equal(readHistory(file).items.find(item => item.toolUseId === 'r1').images, undefined, 'no picture for a file that\'s gone');
+  } finally {
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a Read with a picture of its own keeps it, and nothing but a Read\'s picture file is read by such an id', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'venes-pictures-'));
+  const picture = path.join(dir, 'shot.png');
+  const notes = path.join(dir, 'notes.txt');
+  fs.writeFileSync(picture, pngHead(64, 40));
+  fs.writeFileSync(notes, 'secret');
+  const other = line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'w1', name: 'Write', input: { file_path: picture } }] } });
+  const { file, cleanup } = tempFile([
+    readCall('r1', picture), shownByTool('r1', png('QUJD')), readCall('r2', notes), toolResult('r2', 'secret'), other, toolResult('w1', 'ok'),
+  ].join(''));
+  try {
+    const items = readHistory(file).items;
+    const own = items.find(item => item.toolUseId === 'r1');
+    assert.deepEqual(own.images.map(image => readImage(file, image.id).data), ['QUJD'], 'its own picture, not the file\'s');
+    assert.equal(items.find(item => item.toolUseId === 'r2').images, undefined, 'a file that\'s no picture has none');
+    assert.equal(items.find(item => item.toolUseId === 'w1').images, undefined, 'only a Read gets one');
+    // An id that names another call, or no call, finds nothing.
+    for (const id of ['0:read:r2', '0:read:w1', '2:read:r2', '4:read:w1', '0:read:nope', '0:read:', '0:read:../x']) assert.equal(readImage(file, id), undefined, id);
+  } finally {
+    cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

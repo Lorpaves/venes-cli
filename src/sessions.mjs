@@ -14,6 +14,16 @@ export { HelperError };
 
 const EVENT_LOG_SIZE = 5000;
 const REQUEST_KIND = { AskUserQuestion: 'question', ExitPlanMode: 'plan' };
+
+// What a line sent from here comes back as. Most come back as they went, but Claude Code says one command
+// its own way: `/goal X`, sent while Claude works, sets the goal at once and gives Claude "Goal set: X" to
+// read (2.1.331). Its send waited under the conversation for an echo of `/goal X`, which never came, while
+// "Goal set: X" showed above it as a message of its own (2026-11-24).
+const echoesOf = sent => {
+  const goal = /^\/goal (.+)$/.exec(sent);
+  return goal ? [sent, `Goal set: ${goal[1]}`] : [sent];
+};
+const isEchoOf = (echo, text) => echoesOf(echo.text).includes(normalized(text));
 // The ways on from a plan, as Claude Code's terminal words them (yyt in 2.1.318), by the mode each
 // switches to. The clear-context and Ultraplan rows aren't here: a hook can't do either.
 const PLAN_OPTION_LABELS = {
@@ -406,7 +416,7 @@ export class SessionStore extends EventEmitter {
     const echoes = [...s.echoes];
     return s.queued.map(typed => {
       const { text, files } = this.#splitAttachments(typed, s.id);
-      const at = echoes.findIndex(echo => echo.text === normalized(text));
+      const at = echoes.findIndex(echo => isEchoOf(echo, text));
       const clientId = at >= 0 ? echoes.splice(at, 1)[0].clientId : undefined;
       return { text, ...(clientId && { clientId }), ...(files.length ? { attachments: files } : {}) };
     });
@@ -753,7 +763,7 @@ export class SessionStore extends EventEmitter {
   }
 
   #takeEcho(s, text) {
-    const position = s.echoes.findIndex(echo => echo.text === normalized(text));
+    const position = s.echoes.findIndex(echo => isEchoOf(echo, text));
     return position < 0 ? undefined : s.echoes.splice(position, 1)[0].clientId;
   }
 

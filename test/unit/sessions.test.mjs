@@ -568,6 +568,31 @@ test('a message typed during a turn joins the conversation when Claude reads it,
   assert.equal(session.status, 'running');
 });
 
+test('a goal set during a turn echoes in Claude Code\'s words, with the send it came from', () => {
+  const { store, hook, events, session, sent } = working();
+  store.expectEcho(session, 'c1', '/goal  make the tests\npass ');
+  hook('UserPromptSubmit', { prompt: 'Goal set: make the tests\npass' });
+  queue(store, 'enqueue', 'Goal set: make the tests\npass');
+  assert.deepEqual(store.queuedFor(session).map(q => q.clientId), ['c1'], 'it waits as the send it is');
+  queue(store, 'remove', 'Goal set: make the tests\npass');
+  assert.deepEqual(sent(), ['Goal set: make the tests\npass']);
+  assert.equal(userEvents(events).at(-1).clientId, 'c1');
+});
+
+test('a goal echoes in either words between turns, and nothing else echoes as a goal', () => {
+  const { store, hook, events } = setup();
+  hook('Stop', {});
+  store.expectEcho(store.get('a'), 'c1', 'ship it');
+  store.expectEcho(store.get('a'), 'c2', '/goal ship it');
+  store.expectEcho(store.get('a'), 'c3', '/goal ship it again');
+  hook('UserPromptSubmit', { prompt: 'Goal set: ship it' });
+  hook('Stop', {});
+  hook('UserPromptSubmit', { prompt: '/goal ship it again' });
+  hook('Stop', {});
+  hook('UserPromptSubmit', { prompt: 'ship it' });
+  assert.deepEqual(userEvents(events).map(e => e.clientId), ['c2', 'c3', 'c1']);
+});
+
 test('the list shows a queued message as the last prompt only once it\'s read', () => {
   const { store, hook, session } = working();
   hook('UserPromptSubmit', { prompt: 'more' });

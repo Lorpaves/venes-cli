@@ -78,9 +78,10 @@ async function waitForPrompt({ state, terminal, name, target, limit, check, isOp
 }
 
 // The card for a question the terminal asks: its words and its options are the terminal's own, as a
-// question Claude asks in a session is shown, so a client needs nothing new to show it.
-function cardFor(choice) {
-  const question = choice.text || choice.title;
+// question Claude asks in a session is shown, so a client needs nothing new to show it. `lead` goes first,
+// for what the session said that the question is about.
+export function cardFor(choice, lead = undefined) {
+  const question = [lead, choice.text || choice.title].filter(Boolean).join('\n\n');
   const fields = {
     kind: 'question', toolName: 'AskUserQuestion',
     input: { questions: [{ question, header: choice.title, options: choice.options.map(label => ({ label })), multiSelect: false }] },

@@ -255,11 +255,21 @@ export function signalsFrom(record) {
   switch (record?.type) {
     case 'user': return [...userSignals(record), ...imageSignals(record), ...turnStartSignals(record)];
     case 'attachment': return imageSignals(record);
-    case 'assistant': return [...thinkingSignals(record), ...modelSignals(record)];
+    case 'assistant': return [...thinkingSignals(record), ...modelSignals(record), ...limitSignals(record)];
     case 'system': return systemSignals(record);
     case 'queue-operation': return queueSignals(record);
     default: return [];
   }
+}
+
+// A turn stopped at a usage limit. Claude Code writes the line its terminal shows as a reply of its own, and
+// asks at the terminal what to do now: see `limit.mjs`. `resetsAt` is when the limit resets, where it says.
+function limitSignals(record) {
+  if (!record.isApiErrorMessage || record.error !== 'rate_limit') return [];
+  const text = blocksOf(record).filter(block => block?.type === 'text').map(block => block.text ?? '').join('').trim();
+  const resetsAt = record.quotaLimits?.resetsAt ?? record.apiErrorParams?.rate_limit_info?.resetsAt;
+  const at = Date.parse(record.timestamp);
+  return [{ type: 'usageLimit', text, ...(Number.isFinite(resetsAt) && { resetsAt: resetsAt * 1000 }), ...(Number.isFinite(at) && { at }) }];
 }
 
 const tagIn = (text, name) => text.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1];

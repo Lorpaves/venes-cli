@@ -598,6 +598,8 @@ export class SessionStore extends EventEmitter {
       else if (type === 'refusal') this.#emit(s, 'model.refusal', { ...signal, prompt: s.lastPrompt });
       else if (type === 'toolImages') this.#emit(s, 'tool.images', signal);
       else if (type === 'userImages') this.#emit(s, 'message.images', signal);
+      // For the daemon, which asks the reader what the terminal asks then: see `limit.mjs`.
+      else if (type === 'usageLimit') this.emit('limit', { sessionId: s.id, ...signal });
       else if (type === 'caveat') s.caveat = signal.id;
       else if (type === 'shellInput') this.#onShellInput(s, signal);
       else if (type === 'shellOutput') this.#onShellOutput(s, signal);

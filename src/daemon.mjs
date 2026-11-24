@@ -35,9 +35,10 @@ import { isTrusted, readClaudeConfig } from './trust.mjs';
 import { SessionStore, HelperError, notTypable } from './sessions.mjs';
 import { readRegistry, writeRegistry } from './registry.mjs';
 import { followTranscripts, readAgentParent, readHistory, readImage, readTail } from './transcript.mjs';
+import { askAtLimit } from './limit.mjs';
 import { avatarSource } from './avatar.mjs';
 import {
-  closePage, hasTerminal, pause, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalOf, typeOnPage,
+  closePage, hasTerminal, pause, pressKey, pressPageKey, readPage, readScreen, resumeTerminal, sendEscape, sendMessage, settleCommand, terminalOf, typeOnPage,
 } from './terminal.mjs';
 import { TerminalWatch } from './terminalwatch.mjs';
 import { isConsolePane, openPanes as openConsoles } from './winconsole.mjs';
@@ -1236,6 +1237,16 @@ export async function startDaemon(paths) {
   const terminals = new Terminals({ store, root: paths.terminals, shellDir: paths.shellDir, terminal: resumeTerminal() });
   await terminals.restore().catch(error => console.error(`terminals: ${error.stack}`));
   const { server: clientServer, subscribers, heldTimer, stopWatching } = createClientServer(store, updater.check, library, paths, () => rexAccount.current, codex, antigravity, usage, terminals);
+  // A turn stopped at a usage limit: what the terminal asks then comes to the reader as a card. See `limit.mjs`.
+  store.on('limit', ({ sessionId, text, at }) => {
+    const session = store.find(sessionId);
+    if (!session?.pane || session.limitAsking) return;
+    session.limitAsking = true;
+    const screen = { read: () => readScreen(session), press: key => pressKey(session, key) };
+    askAtLimit({ store, screen, session, lead: text, at })
+      .catch(error => console.error(`limit: ${error.message}`))
+      .finally(() => { session.limitAsking = false; });
+  });
   const transcripts = followTranscripts(store, { every: TRANSCRIPT_POLL_MS });
   await listen(hookServer, paths.hookSocket);
   await listen(clientServer, paths.clientSocket);

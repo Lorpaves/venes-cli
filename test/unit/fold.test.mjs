@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { foldedItems, foldedPage, foldedTurn, foldOverOf, stretchOf } from '../../src/fold.mjs';
+import { foldedItems, foldedPage, foldedTurn, foldOverOf, foldRunsOf, stretchOf } from '../../src/fold.mjs';
 
 const user = text => ({ role: 'user', at: 't0', text });
 const said = text => ({ role: 'assistant', at: 't1', text });
@@ -184,4 +184,81 @@ test('only a client that asks gets folds, and asks with a whole number', () => {
   assert.deepEqual(folded.turn.map(one => one.kind), ['message.user', 'turn.fold']);
   assert.equal(folded.hasMore, false);
   assert.deepEqual(foldedPage({ items: [] }, 1), { items: [] });
+});
+
+// A client that shows what was said between calls asks with `foldRuns` (0.43.0).
+
+test('with foldRuns, a longer one keeps its words where they were, and folds each run of calls between them', () => {
+  const items = [user('go'), thought('hm'), said('first'), ...calls(2), said('between'), ...calls(2, 2), thought('so'), said('done'), said('really'), { role: 'turn_end', at: 't2' }];
+  const folded = foldedItems(items, 3, true);
+  assert.deepEqual(folded.map(item => item.role), ['user', 'thinking', 'assistant', 'fold', 'assistant', 'fold', 'assistant', 'assistant', 'turn_end']);
+  assert.deepEqual(folded[3], { role: 'fold', at: 't1', key: 'c0', calls: ['c0', 'c1'].map(id => ({ toolUseId: id, name: 'Bash' })) });
+  assert.deepEqual(folded[5], { role: 'fold', at: 't1', key: 'c2', calls: ['c2', 'c3'].map(id => ({ toolUseId: id, name: 'Bash' })) });
+  assert.deepEqual(folded.filter(item => item.role === 'assistant').map(item => item.text), ['first', 'between', 'done', 'really']);
+  // What was thought with no call beside it has nothing to go into, and stays.
+  assert.equal(folded[1].text, 'hm');
+  // No more calls than asked: as it was.
+  assert.deepEqual(foldedItems(items, 4, true), items);
+});
+
+test('with foldRuns, words before the calls stay before them, and a page the session published comes after its run', () => {
+  assert.deepEqual(foldedItems([said('first'), ...calls(3)], 2, true).map(item => item.role), ['assistant', 'fold']);
+  const card = call('p', 'Artifact', { page: { url: 'https://x', title: 'T' } });
+  const folded = foldedItems([...calls(2), card, said('mid'), ...calls(2, 2), said('done')], 2, true);
+  assert.deepEqual(folded.map(item => item.role), ['fold', 'tool', 'assistant', 'fold', 'assistant']);
+  assert.deepEqual(folded[1], card);
+});
+
+test('with foldRuns, a run of calls is found again whole by any of its calls, without the words around it', () => {
+  const items = [user('one'), said('first'), ...calls(3), thought('then'), said('a'), call('c9'), user('two'), ...calls(2, 3)];
+  assert.deepEqual(stretchOf(items, 'c0', true), items.slice(2, 6));
+  assert.deepEqual(stretchOf(items, 'c2', true), items.slice(2, 6));
+  assert.deepEqual(stretchOf(items, 'c9', true), [items[7]]);
+  assert.deepEqual(stretchOf(items, 'c4', true), items.slice(9));
+  assert.equal(stretchOf(items, 'gone', true), undefined);
+  assert.deepEqual(stretchOf(items, 'c9'), items.slice(1, 8), 'without it, the stretch whole, as ever');
+});
+
+test('with foldRuns, its calls that are over become a fold for each run between what was said, where the first of the run was', () => {
+  const turn = [
+    event(1, 'message.user', { text: 'go' }), event(2, 'session.status', { status: 'running' }),
+    event(3, 'message.thinking', { text: 'hm' }),
+    event(4, 'message.assistant.delta', { messageId: 'm1', index: 0, text: 'first', final: true }),
+    ...ran(5, 'a'), event(7, 'tool.images', { toolUseId: 'a', images: [] }), ...ran(8, 'b'),
+    event(10, 'message.assistant.delta', { messageId: 'm2', index: 0, text: 'between', final: true }),
+    ...ran(11, 'c'),
+    event(13, 'message.assistant.delta', { messageId: 'm3', index: 0, text: 'now', final: false }),
+    event(14, 'tool.start', { toolUseId: 'd', name: 'Read', input: { file_path: '/f' } }),
+  ];
+  const folded = foldedTurn(turn, 2, true);
+  assert.deepEqual(folded.map(one => one.kind), [
+    'message.user', 'session.status', 'message.thinking', 'message.assistant.delta', 'turn.fold', 'message.assistant.delta', 'turn.fold',
+    'message.assistant.delta', 'tool.start',
+  ]);
+  assert.deepEqual(folded[4], { seq: 5, at: 50, sessionId: 's', kind: 'turn.fold', key: 'a', calls: ['a', 'b'].map(id => ({ toolUseId: id, name: 'Bash' })) });
+  assert.deepEqual(folded[6], { seq: 11, at: 110, sessionId: 's', kind: 'turn.fold', key: 'c', calls: [{ toolUseId: 'c', name: 'Bash' }] });
+  assert.deepEqual(folded.filter(one => one.kind === 'message.assistant.delta').map(one => one.messageId), ['m1', 'm2', 'm3']);
+  assert.equal(folded.at(-1).toolUseId, 'd');
+});
+
+test('with foldRuns, what was thought among the calls of a run goes into its fold, and the pieces of what was said all stay', () => {
+  const turn = [
+    event(1, 'message.user', { text: 'go' }), ...ran(2, 'a'), event(4, 'message.thinking', { text: 'hm' }), ...ran(5, 'b'),
+    event(7, 'message.assistant.delta', { messageId: 'm', index: 0, text: 'half', final: false }),
+    event(8, 'message.assistant.delta', { messageId: 'm', index: 1, text: ' and all', final: true }),
+    ...ran(9, 'c'), ...ran(11, 'd'),
+  ];
+  const folded = foldedTurn(turn, 3, true);
+  assert.deepEqual(folded.map(one => (one.kind === 'turn.fold' ? one.calls.map(call => call.toolUseId).join('') : one.kind)), [
+    'message.user', 'ab', 'message.assistant.delta', 'message.assistant.delta', 'cd',
+  ]);
+  assert.deepEqual(foldedTurn(turn, 4, true), turn, 'no more calls than asked');
+});
+
+test('runs are only for a client that asks with foldRuns: true', () => {
+  assert.equal(foldRunsOf({ foldRuns: true }), true);
+  for (const other of [{}, { foldRuns: 'true' }, { foldRuns: 1 }, undefined]) assert.equal(foldRunsOf(other), false);
+  const page = { items: [said('a'), ...calls(2), said('b'), ...calls(2, 2)], turn: [], before: 0, hasMore: false };
+  assert.deepEqual(foldedPage(page, 1).items.map(item => item.role), ['fold'], 'one fold of the stretch, as ever');
+  assert.deepEqual(foldedPage(page, 1, true).items.map(item => item.role), ['assistant', 'fold', 'assistant', 'fold']);
 });

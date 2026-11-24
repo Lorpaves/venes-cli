@@ -783,6 +783,16 @@ T('history', {}, async r => {
   assert.ok(call.input.command, 'with what it was given');
   assert.ok(whole.items.every(i => ['assistant', 'thinking', 'tool'].includes(i.role)), 'the stretch and nothing around it');
   await assert.rejects(r.client.request('unfold', { sessionId: id, key: 'nothing' }), { code: 'unknown_fold' });
+  // A client that shows what was said between calls asks for each run of calls on its own (0.43.0), and gets
+  // a run back without the words around it.
+  const runs = await r.client.request('history', { sessionId: id, foldOver: 0, foldRuns: true });
+  const runFold = runs.items.find(i => i.role === 'fold');
+  assert.deepEqual(runFold.calls.map(call => call.name), ['Bash']);
+  assert.ok(!runs.items.some(i => i.role === 'tool'), 'its calls are in folds alone');
+  for (const role of ['assistant', 'turn_end', 'user']) assert.ok(runs.items.some(i => i.role === role), `${role} stays`);
+  const run = await r.client.request('unfold', { sessionId: id, key: runFold.key, foldRuns: true });
+  assert.ok(run.items.some(i => i.role === 'tool' && i.toolUseId === runFold.key), 'its calls');
+  assert.ok(run.items.every(i => ['thinking', 'tool'].includes(i.role)), 'and nothing said around them');
   assert.deepEqual((await r.client.request('history', { sessionId: id, foldOver: 5 })).items, items, 'a short stretch is as it was');
   // A page that opens has it folded too: among its items, or among its turn's events while the turn that
   // just ended is still told that way.

@@ -23,7 +23,7 @@ import { configureSession, oneAtATime, readSwitch } from './configure.mjs';
 import { readMode, switchMode } from './mode.mjs';
 import { DEFAULT_PAGE_SIZE, Library, joinedStatus, mergedPage } from './library.mjs';
 import { isWorthReplaying, lightPage } from './light.mjs';
-import { foldedPage, foldedTurn, foldOverOf, stretchOf } from './fold.mjs';
+import { foldedPage, foldedTurn, foldOverOf, foldRunsOf, stretchOf } from './fold.mjs';
 import { switchInPicker } from './picker.mjs';
 import { removeSession, stopSession } from './remove.mjs';
 import { askAgain, dialogLeft, quitInTerminal, restartSession, resumeSession } from './resume.mjs';
@@ -1057,7 +1057,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
   const wholeHistory = commands.history;
   for (const name of ['join', 'history']) {
     const page = commands[name];
-    commands[name] = async (...given) => foldedPage(lightPage(await page(...given)), foldOverOf(given[0]));
+    commands[name] = async (...given) => foldedPage(lightPage(await page(...given)), foldOverOf(given[0]), foldRunsOf(given[0]));
   }
   // A client that kept a page from before and shows it asks only for what's come since: `since`, the
   // `seq` its page came with, and the `bootId` it came with, which every page has. While the helper is
@@ -1073,7 +1073,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     // Folded as a page's turn is, for a client that asks: a hundred calls since are then one event,
     // and what's new stays less than a page however long the session went on.
     const over = foldOverOf(msg);
-    const events = over === undefined ? told : foldedTurn(told, over);
+    const events = over === undefined ? told : foldedTurn(told, over, foldRunsOf(msg));
     if (!isWorthReplaying(events)) return undefined;
     return {
       caughtUp: true, events, queued: store.queuedFor(session), seq: store.seq, bootId,
@@ -1111,7 +1111,7 @@ function createClientServer(store, checkForUpdate, library, { uploads, downloads
     const unsettled = known ? store.settlesIn(known) : 0;
     if (unsettled > 0) await new Promise(resolve => { setTimeout(resolve, unsettled); });
     const { items = [] } = lightPage(await wholeHistory({ sessionId: msg.sessionId, limit: Number.MAX_SAFE_INTEGER }, ...rest));
-    const stretch = typeof msg.key === 'string' ? stretchOf(items, msg.key) : undefined;
+    const stretch = typeof msg.key === 'string' ? stretchOf(items, msg.key, foldRunsOf(msg)) : undefined;
     if (!stretch) throw new HelperError('unknown_fold', 'Those steps are no longer in the session.');
     return { items: stretch };
   };

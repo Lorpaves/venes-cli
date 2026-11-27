@@ -1,6 +1,12 @@
 // What Antigravity's terminal shows, read off the screen: the bar under everything, the prompt it
 // asks to do something with, and the question it asks about a folder it doesn't trust yet. Its hooks
 // say nothing of any of these, so the screen is the only place to learn them (1.5.8).
+//
+// The bar isn't always its own. A status line set in Antigravity's settings (`statusLine`) is drawn
+// where the bar would be, on as many lines as its command prints, and then nothing under everything
+// says whether Antigravity waits, or names its mode (1.5.18). What's over it is drawn as ever, so such
+// a screen is read by that: the box a message is typed in, the line Antigravity writes while it works,
+// the line under a list of choices, and what the box says of a mode just switched to.
 
 // What the bar says of each mode. Asking each time has no name there, and is `default`.
 const MODES = { auto: 'auto', plan: 'plan', 'accept-edits': 'acceptEdits' };
@@ -27,16 +33,92 @@ const QUESTION_LINES = 6;
 const WRITE_IN = /^Write-in\b/;
 const WRITE_IN_OPEN = /^\s*Your answer:/m;
 const TRUST_PICKED = /^\s*>\s*Yes, I trust this folder/m;
+// As many lines as a status line of the reader's own is looked for in, under the box or a list.
+const STATUS_LINES = 8;
+// How far over the box the line it writes while it works is looked for: the steps it's going through
+// are listed under that line, between it and the box.
+const WORK_LINES = 40;
+// What an empty box says of the mode just switched to, until something's typed there: "Auto mode: edits
+// & safe commands auto-approved (shift+tab to cycle)". The mode that asks each time has no such line.
+const MODE_NOTICE = /^(\S+) mode:.*\(shift\+tab to cycle\)$/;
+// The escape sequences that colour a screen read with them.
+const ESCAPES = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 // The lines it greets with (1.5.12): its name and version, and under them the account with its plan
 // in brackets, "name@example.com (Google AI Pro)".
 const GREETING = /\bAntigravity CLI \d+\.\d+/;
 const ACCOUNT = /\S+@\S+\.\S+[ \t]+\(([^()]{1,40})\)[ \t]*$/;
 
-const linesOf = screen => {
-  const lines = screen.trimEnd().split('\n');
-  return lines.slice(-SEARCH_LINES);
-};
+// A mode by the name Antigravity has for it, on its bar and in what it tells a status line. Asking each
+// time is "default" to a status line.
+export function modeNamed(name) {
+  const key = `${name ?? ''}`.trim().toLowerCase();
+  if (key === 'default') return 'default';
+  return Object.hasOwn(MODES, key) ? MODES[key] : undefined;
+}
+
+const isHint = text => IDLE_HINT.test(text) || BUSY_HINT.test(text);
+
+// Antigravity's own bar, from the line it's on: nothing for any other line.
+function barOf(line) {
+  const parts = line.trim().split(/\s{2,}/);
+  const settings = parts.at(-1).split(' · ').map(part => part.trim());
+  const left = parts.length > 1 ? parts[0] : '';
+  const hint = IDLE_HINT.test(left) ? 'idle' : BUSY_HINT.test(left) ? 'busy' : undefined;
+  // One part is a hint by itself, as on a screen too narrow for both.
+  if (parts.length === 1 && isHint(parts[0])) return undefined;
+  const effort = EFFORTS.has(settings.at(-1)) ? settings.pop() : undefined;
+  const model = settings.pop();
+  if (!model || settings.length > 1 || (settings.length === 1 && !Object.hasOwn(MODES, settings[0]))) return undefined;
+  if (!effort && !hint) return undefined;
+  return { hint, mode: settings.length ? MODES[settings[0]] : 'default', model, effort };
+}
+
+// The line a status line of the reader's own is under: the rule that closes the box, or the line a
+// list of choices ends with. -1 where the last lines have neither.
+function overStatus(lines) {
+  const from = Math.max(0, lines.length - 1 - STATUS_LINES);
+  return lines.findLastIndex((line, index) => index >= from && (EDGE.test(line) || NAVIGATE.test(line)));
+}
+
+// The end of a screen, with what's under everything as its last line: Antigravity's own `bar`, or the
+// reader's `status` line, whose lines are put together as one so that what's over it is where it would
+// be over the bar. Neither, where the screen isn't Antigravity's at all.
+function shownOf(screen) {
+  const lines = `${screen ?? ''}`.trimEnd().split('\n').slice(-SEARCH_LINES);
+  const last = lines.at(-1) ?? '';
+  if (barOf(last) || isHint(last.trim())) return { lines, kind: 'bar' };
+  const over = overStatus(lines);
+  if (over < 0) return { lines, kind: undefined };
+  const status = lines.slice(over + 1).map(line => line.trim()).filter(Boolean).join(' ');
+  return { lines: [...lines.slice(0, over + 1), status], kind: 'status' };
+}
+
+const linesOf = screen => shownOf(screen).lines;
+
+// Whether a status line of the reader's own is where the bar would be.
+export const showsStatusLine = screen => shownOf(screen).kind === 'status';
+
+// A screen without what's under everything, the bar or the reader's status line: what a page that's
+// open is read from. `screen` can have the escape sequences that colour it.
+export function withoutBar(screen) {
+  const lines = `${screen ?? ''}`.trimEnd().split('\n');
+  if (lines.length < 2) return lines.join('\n');
+  const plain = lines.map(line => line.replace(ESCAPES, ''));
+  const last = plain.at(-1);
+  const over = barOf(last) || isHint(last.trim()) ? -1 : overStatus(plain);
+  return lines.slice(0, over < 0 ? -1 : over + 1).join('\n');
+}
+
+// The box a message is typed in, where it's what the last line is under: the rule it opens with, and
+// what's in it. Nothing while something else is there, as a prompt is.
+function boxOver(lines) {
+  const bottom = lines.length - 2;
+  if (bottom < 2 || !EDGE.test(lines[bottom])) return undefined;
+  const top = lines.slice(0, bottom).findLastIndex(line => EDGE.test(line));
+  if (top < 0 || bottom - top < 2 || !BOX_MARK.test(lines[top + 1])) return undefined;
+  return { top, text: [lines[top + 1].slice(1), ...lines.slice(top + 2, bottom)].map(line => line.trim()).join('\n').trim() };
+}
 
 // The plan the account is on, which Antigravity says in one place only: beside the account, on the lines
 // it greets with. Its `/usage` lists the limits and not the plan they're for. Nothing once the greeting
@@ -51,27 +133,31 @@ export function readPlan(screen) {
 // (`busy`), or neither says so, as while something's typed in its box. Then the mode, the model as
 // it's shown, and how hard it thinks. Nothing, when the last line isn't the bar.
 export function readBar(screen) {
-  const line = linesOf(screen).at(-1) ?? '';
-  const parts = line.trim().split(/\s{2,}/);
-  const settings = parts.at(-1).split(' · ').map(part => part.trim());
-  const left = parts.length > 1 ? parts[0] : '';
-  const hint = IDLE_HINT.test(left) ? 'idle' : BUSY_HINT.test(left) ? 'busy' : undefined;
-  // One part is a hint by itself, as on a screen too narrow for both.
-  if (parts.length === 1 && (IDLE_HINT.test(parts[0]) || BUSY_HINT.test(parts[0]))) return undefined;
-  const effort = EFFORTS.has(settings.at(-1)) ? settings.pop() : undefined;
-  const model = settings.pop();
-  if (!model || settings.length > 1 || (settings.length === 1 && !Object.hasOwn(MODES, settings[0]))) return undefined;
-  if (!effort && !hint) return undefined;
-  return { hint, mode: settings.length ? MODES[settings[0]] : 'default', model, effort };
+  const { lines, kind } = shownOf(screen);
+  return kind === 'bar' ? barOf(lines.at(-1) ?? '') : undefined;
+}
+
+// The mode it's in, where the screen names it. The bar does while it waits for a message. Under a
+// status line of the reader's own only the box does, of the mode just switched to and until something
+// is typed: nothing there says nothing either way, as the mode that asks each time has no such line.
+export function readMode(screen) {
+  const { lines, kind } = shownOf(screen);
+  if (kind === 'bar') {
+    const bar = barOf(lines.at(-1) ?? '');
+    return bar?.hint === 'idle' ? bar.mode : undefined;
+  }
+  const named = kind === 'status' ? MODE_NOTICE.exec(boxOver(lines)?.text ?? '')?.[1] : undefined;
+  return named && named.toLowerCase() !== 'default' ? modeNamed(named) : undefined;
 }
 
 // The prompt open above the bar, or nothing: its `question`, what it's `about` as drawn above that,
 // and its `rows`, each with its `number`, `label` and whether it's `marked`. It's drawn with lines
 // left empty between its parts, which are passed over.
 export function readPrompt(screen) {
-  const lines = linesOf(screen);
+  const { lines, kind } = shownOf(screen);
   let at = lines.length - 1;
-  if (!BUSY_HINT.test((lines[at] ?? '').trim())) return undefined;
+  // Under the reader's status line no bar says something's asked: the line its rows end with does.
+  if (kind === 'status' ? !NAVIGATE.test(lines[at - 1] ?? '') : !BUSY_HINT.test((lines[at] ?? '').trim())) return undefined;
   const up = () => {
     at -= 1;
     while (at >= 0 && !lines[at].trim()) at -= 1;
@@ -146,13 +232,20 @@ export function showsPage(screen) {
   return end >= 0 && NAVIGATE.test(lines[end]);
 }
 
-// Whether it's waiting for a message, with nothing going and nothing open.
+// Whether it's waiting for a message, with nothing going and nothing open. Its bar says so. Under a
+// status line of the reader's own the screen does: the box is there to type in, and the line it writes
+// while it works isn't over it. That line was there at every look of a turn that was watched (1.5.18).
 export function isIdle(screen) {
-  return readBar(screen)?.hint === 'idle' && !SPINNER.test(linesOf(screen).slice(-8).join('\n'));
+  const { lines, kind } = shownOf(screen);
+  if (kind === 'bar') return barOf(lines.at(-1) ?? '')?.hint === 'idle' && !SPINNER.test(lines.slice(-8).join('\n'));
+  const box = kind === 'status' ? boxOver(lines) : undefined;
+  return Boolean(box) && !SPINNER.test(lines.slice(Math.max(0, box.top - WORK_LINES), box.top).join('\n'));
 }
 
 // Whether Antigravity is what the screen shows at all.
 export function isUp(screen) {
+  const { lines, kind } = shownOf(screen);
+  if (kind === 'status' && boxOver(lines)) return true;
   return Boolean(readBar(screen)) || showsDialog(screen);
 }
 
@@ -194,9 +287,16 @@ export function boxOf(screen) {
 
 // Whether something's typed there. An empty box can show a line of its own, about the mode it's in,
 // which reads like one that's typed: but the bar says how to see the shortcuts only while nothing is.
+// Under a status line of the reader's own there's no bar to say, and that line is known by its words.
 export function hasTyped(screen) {
+  if (readReview(screen)) return false;
+  const { lines, kind } = shownOf(screen);
+  if (kind === 'status') {
+    const typed = boxOver(lines)?.text;
+    return Boolean(typed) && !MODE_NOTICE.test(typed);
+  }
   const bar = readBar(screen);
-  return Boolean(bar) && bar.hint === undefined && !readReview(screen) && Boolean(boxOf(screen));
+  return Boolean(bar) && bar.hint === undefined && Boolean(boxOf(screen));
 }
 
 export const asksTrust = screen => TRUST_QUESTION.test(screen);

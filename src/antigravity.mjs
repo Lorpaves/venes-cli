@@ -25,8 +25,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AcpLink } from './acplink.mjs';
 import {
-  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, asksWriteIn, hasTrustPicked, hasTyped, isIdle, isUp, readBar, readPlan, questionOf, readPrompt, readReview, reviewsWaiting, showsDialog,
-  showsPage,
+  MODE_IDS, REVIEW_COMMAND, REVIEW_NO, REVIEW_YES, asksTrust, asksWriteIn, boxOf, hasTrustPicked, hasTyped, isIdle, isUp, modeNamed, readBar, readMode, readPlan, questionOf, readPrompt, readReview,
+  reviewsWaiting, showsDialog, showsPage, showsStatusLine, withoutBar,
 } from './agyscreen.mjs';
 import { mediaTypeOf, moveToTrash } from './files.mjs';
 import { imageSize } from './imagesize.mjs';
@@ -81,6 +81,9 @@ const BOX_SETTLE_MS = 120;
 const MOST_REVIEW_PRESSES = 12;
 const KEY_LIMIT_MS = 2000;
 const KEY_CHECK_MS = 50;
+// How long the box is given to name the mode Shift+Tab switched to, under a status line of the reader's
+// own, before it's taken to be the mode the box has no line for. It named one in about 0.1s when measured.
+const NOTICE_WAIT_MS = 800;
 // A command of the terminal's own said what it did within a second when measured.
 const COMMAND_LIMIT_MS = 6000;
 // How long a command the reader sent is given to open its page or start its turn, as a Claude Code
@@ -249,14 +252,21 @@ export function saidPictures(text) {
 
 // Where a step's pictures are. A call that looked at a picture, or made one, has it as a file among the
 // conversation's own, which its step names (`media`): only one inside `root`, where Antigravity keeps
-// what's its own, is one. A message's are the files its first lines name.
+// what's its own, is one. A message's are the files its first lines name. One with none named has those
+// Antigravity took a copy of: a picture pasted into the terminal with it, or one whose path Antigravity
+// took out of the words as it was sent (1.5.18), which it names the same way, by a path and no `file://`.
 export function pictureSourcesOf(step, root) {
-  if (isUserStep(step)) return saidPictures(requestOf(step.content)).paths.map(file => ({ path: file, isSaid: true }));
+  if (isUserStep(step)) {
+    const said = saidPictures(requestOf(step.content)).paths.map(file => ({ path: file, isSaid: true }));
+    if (said.length) return said;
+  }
   return (Array.isArray(step?.media) ? step.media : []).flatMap(media => {
-    if (typeof media?.uri !== 'string' || !media.uri.startsWith('file://') || !`${media.mime_type}`.startsWith('image/')) return [];
+    if (typeof media?.uri !== 'string' || !`${media.mime_type}`.startsWith('image/')) return [];
     let file;
     try {
-      file = path.resolve(decodeURIComponent(new URL(media.uri).pathname));
+      if (media.uri.startsWith('file://')) file = path.resolve(decodeURIComponent(new URL(media.uri).pathname));
+      else if (isUserStep(step) && path.isAbsolute(media.uri)) file = path.resolve(media.uri);
+      else return [];
     } catch {
       return [];
     }
@@ -578,6 +588,9 @@ function blankSession() {
     settlesAt: 0,
     // The request made of a document that waits to be looked over, and how many looks found none waiting.
     review: undefined, reviewLooks: 0,
+    // What Antigravity told a status line of it, by when it was told: the last whose mode was taken in,
+    // and the last whose model was.
+    toldAt: 0, toldModelAt: 0,
   };
 }
 
@@ -610,6 +623,7 @@ export class Antigravity {
   #isStopped = false;
   #listCommands;
   #commands = new Map();
+  #told;
 
   constructor({
     store,
@@ -633,6 +647,9 @@ export class Antigravity {
     // The version of Antigravity installed now.
     version = () => exec(COMMAND, ['--version'], { timeout: VERSION_LIMIT_MS }).then(({ stdout }) => versionIn(stdout)),
     env = process.env,
+    // What Antigravity last told a status line of a session, as `{ at, data }`, where a status line of the
+    // reader's own hands it on to the helper's: with one in place of the bar, nothing else names the mode.
+    told = undefined,
     timing = {},
   }) {
     this.#store = store;
@@ -651,11 +668,12 @@ export class Antigravity {
     this.#version = version;
     this.#data = data;
     this.#env = env;
+    this.#told = told;
     this.#timing = {
       watch: WATCH_MS, rest: REST_CHECK_MS, startLimit: START_LIMIT_MS, startCheck: START_CHECK_MS, keySettle: KEY_SETTLE_MS,
       pasteSettle: PASTE_SETTLE_MS, stepWait: STEP_WAIT_MS, stepCheck: STEP_CHECK_MS, keyLimit: KEY_LIMIT_MS, keyCheck: KEY_CHECK_MS,
       commandLimit: COMMAND_LIMIT_MS, commandSettle: COMMAND_SETTLE_MS, modelsWait: MODELS_WAIT_MS, usageWait: USAGE_WAIT_MS, quitLimit: QUIT_LIMIT_MS, quitCheck: QUIT_CHECK_MS,
-      boxSettle: BOX_SETTLE_MS, ...timing,
+      boxSettle: BOX_SETTLE_MS, noticeWait: NOTICE_WAIT_MS, ...timing,
     };
     this.#timer = setInterval(() => this.#lookAtAll(), this.#timing.watch);
     this.#timer.unref();
@@ -881,8 +899,10 @@ export class Antigravity {
     switch (event) {
       case 'PreInvocation':
         // The first call to the model in a turn is the turn's start: everything before it has been said.
-        if (payload.invocationNum === 0 || !session.turn) this.#beginTurn(id, session, payload);
-        else this.#tell(id, session);
+        if (payload.invocationNum === 0 || !session.turn) {
+          await this.#untilSaid(id, payload);
+          this.#beginTurn(id, session, payload);
+        } else this.#tell(id, session);
         break;
       case 'PostToolUse':
         await this.#endTool(id, session, payload);
@@ -899,6 +919,16 @@ export class Antigravity {
         break;
       default:
         break;
+    }
+  }
+
+  // The step before a turn's first call to the model, once it's in the transcript: what someone said,
+  // which is written there a moment after the hook says so, and has the pictures it came with.
+  async #untilSaid(id, payload) {
+    const index = Number.isInteger(payload.initialNumSteps) ? payload.initialNumSteps - 1 : -1;
+    if (index < 0) return;
+    for (const end = Date.now() + this.#timing.stepWait; Date.now() < end; await pause(this.#timing.stepCheck)) {
+      if (this.#steps(id).some(step => step.step_index === index)) return;
     }
   }
 
@@ -1057,8 +1087,7 @@ export class Antigravity {
     // While an answer is being written on a question's own line, the question is as good as answered: it
     // isn't asked again from under whoever is writing, here or at the terminal.
     const prompt = asksWriteIn(screen) ? undefined : readPrompt(screen);
-    const bar = readBar(screen);
-    this.#noteBar(id, bar);
+    this.#noteShown(id, session, screen);
     if (session.turn) this.#tell(id, session);
     this.#notePrompt(id, session, known, prompt);
     this.#noteReview(id, session, screen);
@@ -1268,6 +1297,45 @@ export class Antigravity {
     this.#store.settle(requestId, { decision, by });
   }
 
+  // What a screen says of a session's mode and of what it runs on: its bar, where the bar is
+  // Antigravity's own. With a status line of the reader's in its place, the box names a mode just
+  // switched to, and the rest is what Antigravity told that status line, where it handed that on.
+  #noteShown(id, session, screen) {
+    const bar = readBar(screen);
+    if (bar) {
+      this.#noteBar(id, bar);
+      return;
+    }
+    if (showsStatusLine(screen)) this.#noteTold(id, session, readMode(screen));
+  }
+
+  // What Antigravity told a status line of a session, taken in once each time it's told: the mode it's
+  // in (`cycle_mode`), and the model with how hard it thinks, as `/model` shows it: "Gemini 4 Neon
+  // (XHigh)". A mode the screen itself names (`shown`) stands over one told before it.
+  #noteTold(id, session, shown = undefined) {
+    let told;
+    try {
+      told = this.#told?.(id, Math.min(session.toldAt, session.toldModelAt));
+    } catch {
+      told = undefined;
+    }
+    const { at = 0, data } = told?.data?.product === AGENT ? told : {};
+    const mode = shown ?? (at > session.toldAt ? modeNamed(data.cycle_mode) : undefined);
+    session.toldAt = Math.max(session.toldAt, at);
+    let model;
+    let effort;
+    if (at > session.toldModelAt) {
+      // A model is known by the ones Antigravity lists, which are asked for where they aren't known yet:
+      // what was told is taken in once they are.
+      if (this.#modelList.models.length) {
+        session.toldModelAt = at;
+        effort = EFFORTS.includes(data.model?.effort) ? data.model.effort : undefined;
+        model = typeof data.model?.display_name === 'string' ? data.model.display_name.replace(new RegExp(`\\s*\\(${effort}\\)$`, 'i'), '') : undefined;
+      } else this.#knownModels().then(models => { if (models.length && !this.#isStopped) this.#noteTold(id, session); }, () => {});
+    }
+    if (mode || model) this.#noteBar(id, { hint: mode ? 'idle' : undefined, mode, model, effort });
+  }
+
   // What the bar says of a session: its mode, which it names only while it waits for a message, and
   // what it runs on. The bar has a model's name where a hook has its id, so it's told by the models
   // Antigravity lists, once they're known. During a turn a hook's word stands.
@@ -1328,6 +1396,18 @@ export class Antigravity {
     const open = await this.#terminal.findSession?.(name, variables);
     if (open && this.#terminal.foreground && await runsIn(this.#terminal, open)) return open;
     const target = await this.#terminal.startSession({ name, cwd, command: [COMMAND, '--conversation', sessionId], env: variables });
+    try {
+      return await this.#untilReady(name, target, trust);
+    } catch (error) {
+      // A terminal that didn't come to wait for a message isn't left open at the Mac with a session a
+      // client was told didn't start: asked again, it would be one more beside it.
+      await this.#terminal.closeSession?.(name, target).catch(() => {});
+      throw error;
+    }
+  }
+
+  // Waits for the terminal just opened to be ready for a message, answering what it asks about its folder.
+  async #untilReady(name, target, trust) {
     const { startLimit, startCheck, keySettle } = this.#timing;
     let isAnswered = false;
     for (const deadline = Date.now() + startLimit; Date.now() < deadline; await pause(startCheck)) {
@@ -1372,7 +1452,7 @@ export class Antigravity {
     await Promise.race([this.#knownModels().catch(() => []), pause(this.#timing.modelsWait)]);
     const screen = await this.#terminal.readScreen(known).catch(() => '');
     this.#notePlan(screen);
-    this.#noteBar(known.id, readBar(screen));
+    this.#noteShown(known.id, this.#session(known.id), screen);
   }
 
   // The plan the account is on, from a screen with Antigravity's greeting on it, which is the only place
@@ -1518,10 +1598,9 @@ export class Antigravity {
     const known = this.#withPane(await this.#live(sessionId));
     if (!showsPage(await this.#terminal.readScreen(known))) return { page: null };
     const read = this.#terminal.readStyledScreen ?? this.#terminal.readScreen;
-    // Down to the line that says how to move in it: the bar under that is the terminal's own, not the page's.
-    const screen = (await read(known)).trimEnd();
-    const bar = screen.lastIndexOf('\n');
-    return { page: openPageOf(bar < 0 ? screen : screen.slice(0, bar), () => true) };
+    // Down to the line that says how to move in it: what's under that is the terminal's own bar, or the
+    // reader's status line, and not the page's.
+    return { page: openPageOf(withoutBar(await read(known)), () => true) };
   }
 
   // A key for what's open, and nothing else: with nothing open, Esc would stop the turn and Enter would
@@ -1578,24 +1657,59 @@ export class Antigravity {
     await this.#refuseIfOpen(known);
     // Its bar names the mode only between turns.
     if (this.#session(sessionId).turn) throw new HelperError('session_busy', 'Wait for the turn to end first.');
-    const read = async () => {
-      const bar = readBar(await this.#terminal.readScreen(known));
-      return bar?.hint === 'idle' ? bar.mode : undefined;
-    };
-    let current = await read();
-    if (!current) throw failed();
-    for (let press = 0; current !== mode; press++) {
-      if (press >= MOST_MODE_PRESSES) throw failed();
-      await this.#terminal.pressKey(known, 'BTab');
-      const before = current;
-      for (const end = Date.now() + this.#timing.keyLimit; ; await pause(this.#timing.keyCheck)) {
-        current = await read();
-        if (current && current !== before) break;
-        if (Date.now() >= end) throw failed();
+    if (showsStatusLine(await this.#terminal.readScreen(known))) {
+      await this.#switchUnnamed(known, mode, failed);
+    } else {
+      const read = async () => readMode(await this.#terminal.readScreen(known));
+      let current = await read();
+      if (!current) throw failed();
+      for (let press = 0; current !== mode; press++) {
+        if (press >= MOST_MODE_PRESSES) throw failed();
+        await this.#terminal.pressKey(known, 'BTab');
+        const before = current;
+        for (const end = Date.now() + this.#timing.keyLimit; ; await pause(this.#timing.keyCheck)) {
+          current = await read();
+          if (current && current !== before) break;
+          if (Date.now() >= end) throw failed();
+        }
       }
     }
     if (known.permissionMode !== mode) this.#noteMode(sessionId, mode);
     return {};
+  }
+
+  // Shift+Tab under a status line of the reader's own, where no bar names the mode. The box does, of the
+  // mode just switched to and until something's typed there, and has no line for the mode that asks each
+  // time. So it's pressed until the box names the mode wanted: or, for the one with no line, until the
+  // line that was there has gone, or none has come in the time one takes to.
+  async #switchUnnamed(known, mode, failed) {
+    const { keyLimit, keyCheck, noticeWait } = this.#timing;
+    const read = async () => {
+      const screen = await this.#terminal.readScreen(known);
+      return { named: readMode(screen), isEmpty: boxOf(screen) === '' };
+    };
+    let shown = await read();
+    // With something typed in the box it would say nothing of the mode, whatever was pressed.
+    if (!shown.named && !shown.isEmpty) throw failed();
+    let current = shown.named;
+    for (let press = 0; current !== mode; press++) {
+      if (press >= MOST_MODE_PRESSES) throw failed();
+      await this.#terminal.pressKey(known, 'BTab');
+      const before = shown.named;
+      for (const pressedAt = Date.now(); ; await pause(keyCheck)) {
+        shown = await read();
+        const waited = Date.now() - pressedAt;
+        if (shown.named && shown.named !== before) {
+          current = shown.named;
+          break;
+        }
+        if (shown.isEmpty && (before || waited >= noticeWait)) {
+          current = 'default';
+          break;
+        }
+        if (waited >= keyLimit) throw failed();
+      }
+    }
   }
 
   // A command of the terminal's own that takes hold at once, typed there. What it says back is waited for.
@@ -1718,8 +1832,10 @@ export class Antigravity {
     return historyOf(start >= 0 ? steps.slice(0, start) : steps, { root: this.#root });
   }
 
+  // A page of the conversation whole, the turn going on with it, as the transcript has it so far: what
+  // a stretch of that turn's calls is opened from. A page before another counts the same either way.
   async history({ sessionId, limit, before }) {
-    return pageOf(this.#past(sessionId), { limit, before });
+    return pageOf(historyOf(this.#steps(sessionId), { root: this.#root }), { limit, before });
   }
 
   // Everything a client needs to open one. The turn going on comes as its events.

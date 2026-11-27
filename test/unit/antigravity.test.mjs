@@ -9,6 +9,7 @@ import {
   commandsFrom,
 } from '../../src/antigravity.mjs';
 import { SessionStore } from '../../src/sessions.mjs';
+import { foldedTurn, stretchOf } from '../../src/fold.mjs';
 
 const ID = '9a2b37ed-a910-4ecc-9241-54964775c9c9';
 const RULE = '─'.repeat(70);
@@ -151,7 +152,7 @@ const LISTED = [
   { name: 'two words', description: 'not a command a line can start with' }, { description: 'no name' },
 ];
 
-function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined, installed = true, account = undefined } = {}) {
+function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage = async () => USAGE, commands = undefined, installed = true, account = undefined, told = undefined } = {}) {
   const data = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-')));
   t.after(() => fs.rmSync(data, { recursive: true, force: true }));
   fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ trustedWorkspaces: trusted }));
@@ -159,8 +160,9 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
   const events = [];
   store.on('event', event => events.push(event));
   const terminal = {
-    screen, keys: [], pasted: [], started: [], isOpen: true, isGone: false, onKey: undefined,
+    screen, keys: [], pasted: [], started: [], closed: [], isOpen: true, isGone: false, onKey: undefined,
     startSession: async spec => { terminal.started.push(spec); return { pane: '%9', tmuxSocket: '/tmp/sock' }; },
+    closeSession: async name => { terminal.closed.push(name); },
     isSessionOpen: async () => terminal.isOpen,
     readScreen: async () => { if (terminal.isGone) throw new Error('no such pane'); return terminal.screen; },
     pressKey: async (_, key) => { terminal.keys.push(key); terminal.onKey?.(key); },
@@ -180,7 +182,7 @@ function setup(t, { screen = IDLE, trusted = [], rows = [], timing = {}, usage =
     store, terminal, data, installed: () => installed, rows: async () => rows,
     mint: async folder => { minted.push(folder); return ID; },
     models: async () => modelsFrom('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'),
-    usage, account,
+    usage, account, told,
     commands: commands ?? (async folder => { asked.push(folder); return commandsFrom(LISTED); }),
     trash: async folder => { trashed.push([path.basename(folder), fs.readdirSync(folder).sort()]); },
     forget: async id => { forgotten.push(id); },
@@ -1112,4 +1114,159 @@ test('closing tells the Antigravity on a session to go, and the session is over'
   assert.equal(store.get(ID).status, 'ended');
   assert.equal(agent.isClosable(ID), false);
   await assert.rejects(agent.closeNow(ID), { code: 'not_open' });
+});
+
+// Its terminal with a status line of the reader's own where the bar would be (1.5.18): nothing under
+// everything says that it waits, or names its mode. The box says the mode just switched to.
+const STATUS = '◆ Gemini 4 Hydrogen (XHigh) │ w ⎇ main │ ctx ━━━━━━━━ 0% │ mode auto';
+const NOTICE = {
+  default: '>', auto: '> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)', plan: '> Plan mode: research & plan only (shift+tab to cycle)',
+  acceptEdits: '> Accept-edits mode: file edits auto-approved (shift+tab to cycle)',
+};
+const underStatus = (box = NOTICE.default, over = ['  ok']) => [...over, RULE, box, RULE, STATUS].join('\n');
+
+test('a session starts under a status line of the reader\'s own, with the mode its box names', async t => {
+  const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-ws-')));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const { agent, store, terminal } = setup(t, { trusted: [folder], screen: underStatus(NOTICE.auto) });
+  assert.deepEqual(await agent.start({ cwd: folder }), { sessionId: ID });
+  assert.deepEqual([store.get(ID).status, store.get(ID).permissionMode, terminal.closed], ['idle', 'auto', []]);
+});
+
+test('a terminal that doesn\'t come to wait for a message is closed again, and nothing of it is left at the Mac', async t => {
+  const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venes-agy-ws-')));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const { agent, store, terminal } = setup(t, { trusted: [folder], screen: 'Signing in...', timing: { startLimit: 40 } });
+  await assert.rejects(agent.start({ cwd: folder }), { code: 'start_failed', message: /took too long/ });
+  assert.deepEqual([terminal.started.length, terminal.closed, store.find(ID)], [1, ['venes-agy-9a2b37ed'], undefined]);
+  // One at work when it's opened isn't ready either, whatever is under its box.
+  const busy = setup(t, { trusted: [folder], screen: underStatus(NOTICE.default, ['⣾  Generating...']), timing: { startLimit: 40 } });
+  await assert.rejects(busy.agent.start({ cwd: folder }), { code: 'start_failed' });
+});
+
+test('under a status line, a session\'s mode and model are what Antigravity told the status line, once each time it\'s told', async t => {
+  const said = (at, mode, name = 'Gemini 4 Hydrogen (High)', effort = 'high') => ({ at, data: { product: 'antigravity', session_id: ID, cycle_mode: mode, model: { display_name: name, effort } } });
+  let kept = said(10, 'auto');
+  const asked = [];
+  const { agent, store, terminal, hook, until } = setup(t, { screen: underStatus(), told: (id, after) => { asked.push(id); return kept && kept.at > after ? kept : undefined; } });
+  await hook('SessionStart');
+  assert.equal(store.get(ID).permissionMode, 'default');
+  await until(() => store.get(ID).permissionMode === 'auto' && store.get(ID).effort === 'high', 'what was told is taken in');
+  assert.deepEqual([store.get(ID).model, asked[0]], ['gemini-4-hydrogen', ID]);
+  // Changed from a client, it stays as changed: what was told before isn't taken in twice.
+  terminal.onKey = key => { if (key === 'BTab') terminal.screen = underStatus(NOTICE.plan); };
+  await agent.setMode({ sessionId: ID, mode: 'plan' });
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  assert.equal(store.get(ID).permissionMode, 'plan');
+  // What the box names stands over what was told before it was switched.
+  kept = said(20, 'auto');
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  assert.equal(store.get(ID).permissionMode, 'plan');
+  // Told again, as when it's switched at the Mac and something typed since, it's the mode told.
+  terminal.screen = underStatus('> half a thought');
+  kept = said(30, 'accept-edits');
+  await until(() => store.get(ID).permissionMode === 'acceptEdits', 'the mode told');
+  // Another program's status, or a mode by no name of Antigravity's, is nothing.
+  kept = { at: 40, data: { session_id: ID, cycle_mode: 'auto' } };
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  kept = said(50, 'bypass');
+  await new Promise(resolve => { setTimeout(resolve, 60); });
+  assert.equal(store.get(ID).permissionMode, 'acceptEdits');
+  // With its own bar back, the bar is what's read.
+  terminal.screen = idleIn('auto');
+  kept = said(60, 'plan');
+  await until(() => store.get(ID).permissionMode === 'auto', 'the bar\'s mode');
+});
+
+test('under a status line its mode is switched by what the box says after Shift+Tab, and no line is the mode that asks', async t => {
+  const { agent, store, terminal, hook } = setup(t, { screen: underStatus(), timing: { watch: 100_000, noticeWait: 30 } });
+  await hook('SessionStart');
+  // It's in auto, with the line that said so gone since something was typed.
+  const round = [NOTICE.plan, NOTICE.default, NOTICE.acceptEdits, NOTICE.auto];
+  terminal.onKey = key => { if (key === 'BTab') terminal.screen = underStatus(round[(terminal.keys.length - 1) % round.length]); };
+  await agent.setMode({ sessionId: ID, mode: 'acceptEdits' });
+  assert.deepEqual([terminal.keys, store.get(ID).permissionMode], [['BTab', 'BTab', 'BTab'], 'acceptEdits']);
+  // The mode the box names already takes no key.
+  await agent.setMode({ sessionId: ID, mode: 'acceptEdits' });
+  assert.equal(terminal.keys.length, 3);
+  // To the mode with no line: round to where the line that was there has gone.
+  await agent.setMode({ sessionId: ID, mode: 'default' });
+  assert.deepEqual([terminal.keys.length, store.get(ID).permissionMode, terminal.screen], [6, 'default', underStatus(NOTICE.default)]);
+  // From plan with its line gone, one press leaves the box as empty as it was: no line came, so it asks each time.
+  const quiet = setup(t, { screen: underStatus(), timing: { watch: 100_000, noticeWait: 30 } });
+  await quiet.hook('SessionStart');
+  quiet.store.report(ID, 'session.mode', { permissionMode: 'plan' }, { permissionMode: 'plan' });
+  await quiet.agent.setMode({ sessionId: ID, mode: 'default' });
+  assert.deepEqual([quiet.terminal.keys, quiet.store.get(ID).permissionMode], [['BTab'], 'default']);
+  // With something typed in the box nothing would name the mode, so nothing is pressed.
+  terminal.keys.length = 0;
+  terminal.screen = underStatus('> half a thought');
+  await assert.rejects(agent.setMode({ sessionId: ID, mode: 'plan' }), { code: 'mode_failed' });
+  assert.deepEqual(terminal.keys, []);
+});
+
+test('under a status line a message is typed, a prompt asked about, and a turn stopped at the Mac seen to have stopped', async t => {
+  const { agent, store, events, terminal, hook, until } = setup(t, { screen: underStatus() });
+  await hook('SessionStart');
+  assert.deepEqual(await agent.send({ sessionId: ID, text: 'run it', clientId: 'c1' }), { queued: false });
+  assert.deepEqual([terminal.pasted, terminal.keys], [['run it'], ['Enter']]);
+  terminal.screen = underStatus(NOTICE.default, ['⣾  Generating...']);
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: 'run it' });
+  // What it asks is drawn where the box was, over the status line.
+  terminal.screen = [...PROMPT.split('\n').slice(0, -1), STATUS].join('\n');
+  await until(() => store.requests().length === 1, 'the prompt is asked about');
+  assert.deepEqual([store.requests()[0].kind, store.get(ID).status], ['permission', 'waiting']);
+  // Esc at the Mac: the box is back with nothing at work over it, and no hook says so.
+  terminal.screen = underStatus();
+  await until(() => events.at(-1).kind === 'turn.interrupted', 'the turn is seen to have stopped');
+  assert.deepEqual([store.requests().length, store.get(ID).status], [0, 'idle']);
+});
+
+test('a page of history has the turn going on, which a stretch of its calls is opened from, and what a client joins has only what\'s past', async t => {
+  const { agent, store, write, hook } = setup(t, { timing: { watch: 100_000 } });
+  const steps = [user(0, 'one'), reply(1, { content: 'first' }), user(2, 'two'), reply(3, { thinking: 'Both.', calls: [READ, RUN] }), result(4, 'Showing lines 1-1 of 1\n1: HERON'), result(5, RAN)];
+  write(steps.slice(0, 3));
+  await hook('SessionStart');
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 3, lastUserInput: 'two' });
+  write(steps);
+  await hook('PostToolUse', { stepIdx: 4, toolCall: READ, error: '' });
+  await hook('PostToolUse', { stepIdx: 5, toolCall: RUN, error: '' });
+  const joined = await agent.join({ sessionId: ID });
+  assert.deepEqual(joined.items.map(item => item.role), ['user', 'assistant', 'turn_end']);
+  // A client that folds a turn's calls has them as one row, by the first of them.
+  const [fold] = foldedTurn(joined.turn, 1, true).filter(event => event.kind === 'turn.fold');
+  assert.deepEqual([fold.key, fold.calls.map(call => call.name)], ['step-4', ['Read', 'Bash']]);
+  const whole = await agent.history({ sessionId: ID, limit: Number.MAX_SAFE_INTEGER });
+  assert.deepEqual(whole.items.map(item => item.role), ['user', 'assistant', 'turn_end', 'user', 'thinking', 'tool', 'tool', 'turn_end']);
+  assert.deepEqual(stretchOf(whole.items, fold.key, true).map(item => [item.role, item.toolUseId, item.result]), [
+    ['thinking', undefined, undefined], ['tool', 'step-4', 'Showing lines 1-1 of 1\n1: HERON'], ['tool', 'step-5', 'done\n'],
+  ]);
+  // A page before the one joined counts the same, with a turn going on or none.
+  assert.deepEqual((await agent.history({ sessionId: ID, before: 3 })).items, joined.items);
+  assert.equal(store.get(ID).status, 'running');
+});
+
+test('a message\'s pictures are the ones Antigravity took a copy of, where its words name none', async t => {
+  const { agent, events, write, hook, data, root, sent } = pictured(t);
+  // Pasted into the terminal with the message, or named by a path Antigravity took out of the words: a copy among the conversation's own files.
+  const copy = path.join(data, 'brain', ID, '.user_uploaded', 'uploaded_media_1.png');
+  fs.mkdirSync(path.dirname(copy), { recursive: true });
+  fs.writeFileSync(copy, PNG);
+  const pasted = { ...user(0, 'redesign this'), media: [{ mime_type: 'image/png', uri: copy }] };
+  assert.deepEqual(pictureSourcesOf(pasted, root), [{ path: copy, mediaType: 'image/png' }]);
+  assert.deepEqual(picturesOf(pasted, root), [{ id: 'said-0:0', mediaType: 'image/png', bytes: PNG_BYTES, width: 1, height: 1 }]);
+  // A path with no `file://` is a message's way to name one, and only inside Antigravity's own folders.
+  assert.deepEqual(pictureSourcesOf({ ...result(2, 'x'), media: [{ mime_type: 'image/png', uri: copy }] }, root), []);
+  assert.deepEqual(pictureSourcesOf({ ...user(0, 'x'), media: [{ mime_type: 'image/png', uri: '/etc/passwd' }] }, root), []);
+  // The files its first lines name are its pictures where there are any, and not the copies of them too.
+  assert.deepEqual(pictureSourcesOf({ ...user(0, `${sent}\nand this`), media: [{ mime_type: 'image/png', uri: copy }] }, root), [{ path: sent, isSaid: true }]);
+  assert.deepEqual(historyOf([pasted], { root }).map(item => [item.text, item.images?.map(image => image.id)]), [['redesign this', ['said-0:0']]]);
+
+  // The turn tells of them once the message is in the transcript, which is a moment after its hook.
+  await hook('SessionStart');
+  setTimeout(() => write([pasted]), 20);
+  await hook('PreInvocation', { invocationNum: 0, initialNumSteps: 1, lastUserInput: 'redesign this' });
+  const said = events.filter(event => event.kind.startsWith('message.'));
+  assert.deepEqual(said.map(event => [event.kind, event.text, event.images?.map(image => image.id)]), [['message.user', 'redesign this', undefined], ['message.images', undefined, ['said-0:0']]]);
+  assert.deepEqual(agent.image({ sessionId: ID, imageId: 'said-0:0' }), { mediaType: 'image/png', data: PNG.toString('base64') });
 });

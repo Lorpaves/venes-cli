@@ -48,7 +48,7 @@ import {
 } from './uploads.mjs';
 import { INSTALL_FOLDER as REX_FOLDER, cachedAccount, runsClaude as rexRunsClaude } from './rex.mjs';
 import { screenAccess, sshAccess } from './ssh.mjs';
-import { accountLimits, pruneStatus, readStatus, readWorkspace, statusFacts } from './status.mjs';
+import { accountLimits, pruneStatus, readStatus, readWorkspace, statusFacts, toldStatus } from './status.mjs';
 import { Prices } from './prices.mjs';
 import { UsageBook, usageReply } from './usage.mjs';
 import { MENTION_LIMIT, mentionFinder } from './mentions.mjs';
@@ -1224,7 +1224,9 @@ export async function startDaemon(paths) {
   if (process.platform === 'win32') openConsoles().catch(() => {});
   // Antigravity's, each in a terminal as Claude Code's are, and told of by the hooks of a plugin put
   // where Antigravity finds it. A Mac with no Antigravity gets none.
-  const antigravity = new Antigravity({ store, terminal: resumeTerminal(), account: paths.antigravityAccount });
+  const antigravity = new Antigravity({
+    store, terminal: resumeTerminal(), account: paths.antigravityAccount, told: (sessionId, after) => toldStatus(paths.statusDir, sessionId, after),
+  });
   try {
     installHooks(paths.antigravityPlugin, { always: Boolean(process.env.VENES_AGY_CONFIG) });
   } catch (error) {

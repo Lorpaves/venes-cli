@@ -274,6 +274,21 @@ export function pruneStatus(dir, now = Date.now()) {
   }
 }
 
+// What a session's status line was last told, whole, with when: nothing where none was kept, or where
+// what's kept is no newer than `after`, which saves reading it again. An Antigravity session has one
+// where a status line set up for Antigravity hands what it's given to the helper's.
+export function toldStatus(dir, sessionId, after = 0) {
+  const file = statusFile(dir, sessionId);
+  try {
+    const at = fs.statSync(file).mtimeMs;
+    if (at <= after) return undefined;
+    const data = readJSON(file);
+    return data && typeof data === 'object' ? { at, data } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // What a session's status line was last told of the Claude Code it runs: its version, and the model and
 // effort it uses, for starting it again as it was.
 export function statusFacts(dir, sessionId) {
